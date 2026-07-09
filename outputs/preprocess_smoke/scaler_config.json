@@ -1,0 +1,6 @@
+{
+  "scaler_type": "standard",
+  "impute_strategy": "zero",
+  "rows_fitted": 2048,
+  "feature_count": 3780
+}

@@ -1,0 +1,50 @@
+{
+  "train": {
+    "all_meta_present": true,
+    "label_present": true,
+    "meta_positions": {
+      "drugid-drug_a": 285,
+      "drugid-drug_b": 286,
+      "drugname-drug_a": 798,
+      "drugname-drug_b": 799,
+      "drugsmiles-drug_a": 2835,
+      "drugsmiles-drug_b": 2836
+    },
+    "label_position": 3248,
+    "feature_count": 3780,
+    "class_in_feature_cols": false,
+    "meta_in_feature_cols": []
+  },
+  "validation": {
+    "all_meta_present": true,
+    "label_present": true,
+    "meta_positions": {
+      "drugid-drug_a": 285,
+      "drugid-drug_b": 286,
+      "drugname-drug_a": 798,
+      "drugname-drug_b": 799,
+      "drugsmiles-drug_a": 2835,
+      "drugsmiles-drug_b": 2836
+    },
+    "label_position": 3248,
+    "feature_count": 3780,
+    "class_in_feature_cols": false,
+    "meta_in_feature_cols": []
+  },
+  "test": {
+    "all_meta_present": true,
+    "label_present": true,
+    "meta_positions": {
+      "drugid-drug_a": 285,
+      "drugid-drug_b": 286,
+      "drugname-drug_a": 798,
+      "drugname-drug_b": 799,
+      "drugsmiles-drug_a": 2835,
+      "drugsmiles-drug_b": 2836
+    },
+    "label_position": 3248,
+    "feature_count": 3780,
+    "class_in_feature_cols": false,
+    "meta_in_feature_cols": []
+  }
+}

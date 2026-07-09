@@ -1,0 +1,7 @@
+*.parquet
+*.csv
+outputs/runs*
+dist/
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,14 @@
+{
+  "label_present": true,
+  "meta_present": {
+    "drugid-drug_a": true,
+    "drugid-drug_b": true,
+    "drugname-drug_a": true,
+    "drugname-drug_b": true,
+    "drugsmiles-drug_a": true,
+    "drugsmiles-drug_b": true
+  },
+  "class_in_feature_cols": false,
+  "meta_in_feature_cols": [],
+  "feature_count": 3780
+}

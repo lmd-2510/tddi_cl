@@ -1,0 +1,533 @@
+
+[2026-07-08 02:00:03] Conda environment ddi2025-cil already exists
+
+[2026-07-08 02:00:03] Activated conda environment ddi2025-cil
+
+[2026-07-08 02:00:03] Installing Python requirements
+Requirement already satisfied: pip in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (26.1.2)
+Requirement already satisfied: setuptools in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (81.0.0)
+Collecting setuptools
+  Using cached setuptools-83.0.0-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: wheel in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (0.47.0)
+Requirement already satisfied: packaging>=24.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from wheel) (26.2)
+Using cached setuptools-83.0.0-py3-none-any.whl (1.0 MB)
+Installing collected packages: setuptools
+  Attempting uninstall: setuptools
+    Found existing installation: setuptools 81.0.0
+    Uninstalling setuptools-81.0.0:
+      Successfully uninstalled setuptools-81.0.0
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+torch 2.12.1 requires setuptools<82, but you have setuptools 83.0.0 which is incompatible.
+Successfully installed setuptools-83.0.0
+Requirement already satisfied: numpy>=2.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 1)) (2.4.6)
+Requirement already satisfied: pandas>=2.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (3.0.3)
+Requirement already satisfied: pyarrow>=21.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 3)) (24.0.0)
+Requirement already satisfied: matplotlib>=3.9 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (3.11.0)
+Requirement already satisfied: scikit-learn>=1.6 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.9.0)
+Requirement already satisfied: torch>=2.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2.12.1)
+Requirement already satisfied: python-dateutil>=2.8.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from pandas>=2.2->-r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (2.9.0.post0)
+Requirement already satisfied: contourpy>=1.0.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (1.3.3)
+Requirement already satisfied: cycler>=0.10 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (0.12.1)
+Requirement already satisfied: fonttools>=4.22.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (4.63.0)
+Requirement already satisfied: kiwisolver>=1.3.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (1.5.0)
+Requirement already satisfied: packaging>=20.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (26.2)
+Requirement already satisfied: pillow>=9 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (12.3.0)
+Requirement already satisfied: pyparsing>=3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (3.3.2)
+Requirement already satisfied: scipy>=1.10.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.17.1)
+Requirement already satisfied: joblib>=1.4.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.5.3)
+Requirement already satisfied: narwhals>=2.0.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (2.23.0)
+Requirement already satisfied: threadpoolctl>=3.5.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (3.6.0)
+Requirement already satisfied: filelock in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.29.6)
+Requirement already satisfied: typing-extensions>=4.10.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (4.16.0)
+Collecting setuptools<82 (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6))
+  Using cached setuptools-81.0.0-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: sympy>=1.13.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.14.0)
+Requirement already satisfied: networkx>=2.5.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.6.1)
+Requirement already satisfied: jinja2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.1.6)
+Requirement already satisfied: fsspec>=0.8.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2026.6.0)
+Requirement already satisfied: cuda-toolkit==13.0.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.2)
+Requirement already satisfied: nvidia-cublas<=13.1.1.3,>=13.1.0.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.1.1.3)
+Requirement already satisfied: cuda-bindings<14,>=13.0.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.3.1)
+Requirement already satisfied: nvidia-cudnn-cu13==9.20.0.48 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (9.20.0.48)
+Requirement already satisfied: nvidia-cusparselt-cu13==0.8.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (0.8.1)
+Requirement already satisfied: nvidia-nccl-cu13==2.29.7 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2.29.7)
+Requirement already satisfied: nvidia-nvshmem-cu13==3.4.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.4.5)
+Requirement already satisfied: triton==3.7.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.7.1)
+Requirement already satisfied: nvidia-cuda-runtime==13.0.96.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.96)
+Requirement already satisfied: nvidia-cufft==12.0.0.61.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.0.0.61)
+Requirement already satisfied: nvidia-cufile==1.15.1.6.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.15.1.6)
+Requirement already satisfied: nvidia-cuda-cupti==13.0.85.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.85)
+Requirement already satisfied: nvidia-curand==10.4.0.35.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (10.4.0.35)
+Requirement already satisfied: nvidia-cusolver==12.0.4.66.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.0.4.66)
+Requirement already satisfied: nvidia-cusparse==12.6.3.3.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.6.3.3)
+Requirement already satisfied: nvidia-nvjitlink==13.0.88.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.88)
+Requirement already satisfied: nvidia-cuda-nvrtc==13.0.88.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.88)
+Requirement already satisfied: nvidia-nvtx==13.0.85.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.85)
+Requirement already satisfied: cuda-pathfinder>=1.4.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-bindings<14,>=13.0.3->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.5.6)
+Requirement already satisfied: six>=1.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from python-dateutil>=2.8.2->pandas>=2.2->-r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (1.17.0)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from sympy>=1.13.3->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.3.0)
+Requirement already satisfied: MarkupSafe>=2.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from jinja2->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.0.3)
+Using cached setuptools-81.0.0-py3-none-any.whl (1.1 MB)
+Installing collected packages: setuptools
+  Attempting uninstall: setuptools
+    Found existing installation: setuptools 83.0.0
+    Uninstalling setuptools-83.0.0:
+      Successfully uninstalled setuptools-83.0.0
+Successfully installed setuptools-81.0.0
+
+[2026-07-08 02:00:05] Running schema audit
+[inspect] train: rows=520841, cols=3787, feature_count=3780, class_nunique=178
+[inspect] validation: rows=173614, cols=3787, feature_count=3780, class_nunique=178
+[inspect] test: rows=173614, cols=3787, feature_count=3780, class_nunique=178
+[train] Scanning feature batches (rows=520841, features=3780, batch_size=1024)...
+[train] batches=1 scanned_rows=1024/520841
+[train] batches=25 scanned_rows=25600/520841
+[train] batches=50 scanned_rows=51200/520841
+[train] batches=75 scanned_rows=76800/520841
+[train] batches=100 scanned_rows=102400/520841
+
+[2026-07-08 18:10:19] Conda environment ddi2025-cil already exists
+
+[2026-07-08 18:10:19] Activated conda environment ddi2025-cil
+
+[2026-07-08 18:10:19] Installing Python requirements
+Requirement already satisfied: pip in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (26.1.2)
+Requirement already satisfied: setuptools in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (81.0.0)
+Collecting setuptools
+  Using cached setuptools-83.0.0-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: wheel in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (0.47.0)
+Requirement already satisfied: packaging>=24.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from wheel) (26.2)
+Using cached setuptools-83.0.0-py3-none-any.whl (1.0 MB)
+Installing collected packages: setuptools
+  Attempting uninstall: setuptools
+    Found existing installation: setuptools 81.0.0
+    Uninstalling setuptools-81.0.0:
+      Successfully uninstalled setuptools-81.0.0
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+torch 2.12.1 requires setuptools<82, but you have setuptools 83.0.0 which is incompatible.
+Successfully installed setuptools-83.0.0
+Requirement already satisfied: numpy>=2.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 1)) (2.4.6)
+Requirement already satisfied: pandas>=2.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (3.0.3)
+Requirement already satisfied: pyarrow>=21.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 3)) (24.0.0)
+Requirement already satisfied: matplotlib>=3.9 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (3.11.0)
+Requirement already satisfied: scikit-learn>=1.6 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.9.0)
+Requirement already satisfied: torch>=2.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2.12.1)
+Requirement already satisfied: python-dateutil>=2.8.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from pandas>=2.2->-r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (2.9.0.post0)
+Requirement already satisfied: contourpy>=1.0.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (1.3.3)
+Requirement already satisfied: cycler>=0.10 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (0.12.1)
+Requirement already satisfied: fonttools>=4.22.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (4.63.0)
+Requirement already satisfied: kiwisolver>=1.3.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (1.5.0)
+Requirement already satisfied: packaging>=20.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (26.2)
+Requirement already satisfied: pillow>=9 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (12.3.0)
+Requirement already satisfied: pyparsing>=3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (3.3.2)
+Requirement already satisfied: scipy>=1.10.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.17.1)
+Requirement already satisfied: joblib>=1.4.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.5.3)
+Requirement already satisfied: narwhals>=2.0.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (2.23.0)
+Requirement already satisfied: threadpoolctl>=3.5.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (3.6.0)
+Requirement already satisfied: filelock in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.29.6)
+Requirement already satisfied: typing-extensions>=4.10.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (4.16.0)
+Collecting setuptools<82 (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6))
+  Using cached setuptools-81.0.0-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: sympy>=1.13.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.14.0)
+Requirement already satisfied: networkx>=2.5.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.6.1)
+Requirement already satisfied: jinja2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.1.6)
+Requirement already satisfied: fsspec>=0.8.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2026.6.0)
+Requirement already satisfied: cuda-toolkit==13.0.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.2)
+Requirement already satisfied: nvidia-cublas<=13.1.1.3,>=13.1.0.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.1.1.3)
+Requirement already satisfied: cuda-bindings<14,>=13.0.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.3.1)
+Requirement already satisfied: nvidia-cudnn-cu13==9.20.0.48 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (9.20.0.48)
+Requirement already satisfied: nvidia-cusparselt-cu13==0.8.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (0.8.1)
+Requirement already satisfied: nvidia-nccl-cu13==2.29.7 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2.29.7)
+Requirement already satisfied: nvidia-nvshmem-cu13==3.4.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.4.5)
+Requirement already satisfied: triton==3.7.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.7.1)
+Requirement already satisfied: nvidia-cuda-runtime==13.0.96.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.96)
+Requirement already satisfied: nvidia-cufft==12.0.0.61.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.0.0.61)
+Requirement already satisfied: nvidia-cufile==1.15.1.6.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.15.1.6)
+Requirement already satisfied: nvidia-cuda-cupti==13.0.85.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.85)
+Requirement already satisfied: nvidia-curand==10.4.0.35.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (10.4.0.35)
+Requirement already satisfied: nvidia-cusolver==12.0.4.66.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.0.4.66)
+Requirement already satisfied: nvidia-cusparse==12.6.3.3.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.6.3.3)
+Requirement already satisfied: nvidia-nvjitlink==13.0.88.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.88)
+Requirement already satisfied: nvidia-cuda-nvrtc==13.0.88.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.88)
+Requirement already satisfied: nvidia-nvtx==13.0.85.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.85)
+Requirement already satisfied: cuda-pathfinder>=1.4.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-bindings<14,>=13.0.3->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.5.6)
+Requirement already satisfied: six>=1.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from python-dateutil>=2.8.2->pandas>=2.2->-r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (1.17.0)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from sympy>=1.13.3->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.3.0)
+Requirement already satisfied: MarkupSafe>=2.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from jinja2->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.0.3)
+Using cached setuptools-81.0.0-py3-none-any.whl (1.1 MB)
+Installing collected packages: setuptools
+  Attempting uninstall: setuptools
+    Found existing installation: setuptools 83.0.0
+    Uninstalling setuptools-83.0.0:
+      Successfully uninstalled setuptools-83.0.0
+Successfully installed setuptools-81.0.0
+
+[2026-07-08 18:10:21] Training device locked to cpu
+
+[2026-07-08 18:10:21] Running schema audit
+[inspect] train: rows=520841, cols=3787, feature_count=3780, class_nunique=178
+[inspect] validation: rows=173614, cols=3787, feature_count=3780, class_nunique=178
+[inspect] test: rows=173614, cols=3787, feature_count=3780, class_nunique=178
+[train] Scanning feature batches (rows=520841, features=3780, batch_size=1024)...
+[train] batches=1 scanned_rows=1024/520841
+[train] batches=25 scanned_rows=25600/520841
+[train] batches=50 scanned_rows=51200/520841
+[train] batches=75 scanned_rows=76800/520841
+[train] batches=100 scanned_rows=102400/520841
+[train] batches=125 scanned_rows=128000/520841
+[train] batches=150 scanned_rows=153600/520841
+[train] batches=175 scanned_rows=179200/520841
+[train] batches=200 scanned_rows=204800/520841
+[train] batches=225 scanned_rows=230400/520841
+[train] batches=250 scanned_rows=256000/520841
+[train] batches=275 scanned_rows=281600/520841
+[train] batches=300 scanned_rows=307200/520841
+[train] batches=325 scanned_rows=332800/520841
+[train] batches=350 scanned_rows=358400/520841
+[train] batches=375 scanned_rows=384000/520841
+[train] batches=400 scanned_rows=409600/520841
+[train] batches=425 scanned_rows=435200/520841
+[train] batches=450 scanned_rows=460800/520841
+[train] batches=475 scanned_rows=486400/520841
+[train] batches=500 scanned_rows=512000/520841
+[validation] Scanning feature batches (rows=173614, features=3780, batch_size=1024)...
+[validation] batches=1 scanned_rows=1024/173614
+[validation] batches=25 scanned_rows=25600/173614
+[validation] batches=50 scanned_rows=51200/173614
+[validation] batches=75 scanned_rows=76800/173614
+[validation] batches=100 scanned_rows=102400/173614
+[validation] batches=125 scanned_rows=128000/173614
+[validation] batches=150 scanned_rows=153600/173614
+[test] Scanning feature batches (rows=173614, features=3780, batch_size=1024)...
+[test] batches=1 scanned_rows=1024/173614
+[test] batches=25 scanned_rows=25600/173614
+[test] batches=50 scanned_rows=51200/173614
+[test] batches=75 scanned_rows=76800/173614
+[test] batches=100 scanned_rows=102400/173614
+[test] batches=125 scanned_rows=128000/173614
+[test] batches=150 scanned_rows=153600/173614
+[done] Wrote audit artifacts to: /mnt/data/uyen/data_splits/outputs/audit
+
+[2026-07-08 18:12:16] Running class distribution analysis
+[class-dist] Reading train labels from /mnt/data/uyen/data_splits/train_extracted.parquet...
+[class-dist] train: num_rows=520841, num_classes=178, min_count=3, max_count=73634
+[class-dist] Reading validation labels from /mnt/data/uyen/data_splits/validation_extracted.parquet...
+[class-dist] validation: num_rows=173614, num_classes=178, min_count=1, max_count=24545
+[class-dist] Reading test labels from /mnt/data/uyen/data_splits/test_extracted.parquet...
+[class-dist] test: num_rows=173614, num_classes=178, min_count=1, max_count=24545
+[done] Wrote class distribution artifacts to: /mnt/data/uyen/data_splits/outputs/class_distribution
+[done] Wrote figures to: /mnt/data/uyen/data_splits/outputs/figures
+
+[2026-07-08 18:12:19] Running leakage audit
+[leakage] Reading train identity columns from /mnt/data/uyen/data_splits/train_extracted.parquet...
+[leakage] train: rows=520841, unique_ordered_pairs=520841, unique_unordered_pairs=520841
+[leakage] Reading validation identity columns from /mnt/data/uyen/data_splits/validation_extracted.parquet...
+[leakage] validation: rows=173614, unique_ordered_pairs=173614, unique_unordered_pairs=173614
+[leakage] Reading test identity columns from /mnt/data/uyen/data_splits/test_extracted.parquet...
+[leakage] test: rows=173614, unique_ordered_pairs=173614, unique_unordered_pairs=173614
+[leakage] Comparing train vs validation...
+[leakage] Comparing train vs test...
+[leakage] Comparing validation vs test...
+[done] Wrote leakage artifacts to: /mnt/data/uyen/data_splits/outputs/leakage
+
+[2026-07-08 18:17:11] Fitting preprocessing artifacts
+[preprocess] feature_count=3780 scaler=standard impute_strategy=zero
+[preprocess] Scanning non-finite stats for train...
+[preprocess] train: batches=1 rows_scanned=1024/520841
+[preprocess] train: batches=25 rows_scanned=25600/520841
+[preprocess] train: batches=50 rows_scanned=51200/520841
+[preprocess] train: batches=75 rows_scanned=76800/520841
+[preprocess] train: batches=100 rows_scanned=102400/520841
+[preprocess] train: batches=125 rows_scanned=128000/520841
+[preprocess] train: batches=150 rows_scanned=153600/520841
+[preprocess] train: batches=175 rows_scanned=179200/520841
+[preprocess] train: batches=200 rows_scanned=204800/520841
+[preprocess] train: batches=225 rows_scanned=230400/520841
+[preprocess] train: batches=250 rows_scanned=256000/520841
+[preprocess] train: batches=275 rows_scanned=281600/520841
+[preprocess] train: batches=300 rows_scanned=307200/520841
+[preprocess] train: batches=325 rows_scanned=332800/520841
+[preprocess] train: batches=350 rows_scanned=358400/520841
+[preprocess] train: batches=375 rows_scanned=384000/520841
+[preprocess] train: batches=400 rows_scanned=409600/520841
+[preprocess] train: batches=425 rows_scanned=435200/520841
+[preprocess] train: batches=450 rows_scanned=460800/520841
+[preprocess] train: batches=475 rows_scanned=486400/520841
+[preprocess] train: batches=500 rows_scanned=512000/520841
+[preprocess] Scanning non-finite stats for validation...
+[preprocess] validation: batches=1 rows_scanned=1024/173614
+[preprocess] validation: batches=25 rows_scanned=25600/173614
+[preprocess] validation: batches=50 rows_scanned=51200/173614
+[preprocess] validation: batches=75 rows_scanned=76800/173614
+[preprocess] validation: batches=100 rows_scanned=102400/173614
+[preprocess] validation: batches=125 rows_scanned=128000/173614
+[preprocess] validation: batches=150 rows_scanned=153600/173614
+[preprocess] Scanning non-finite stats for test...
+[preprocess] test: batches=1 rows_scanned=1024/173614
+[preprocess] test: batches=25 rows_scanned=25600/173614
+[preprocess] test: batches=50 rows_scanned=51200/173614
+[preprocess] test: batches=75 rows_scanned=76800/173614
+[preprocess] test: batches=100 rows_scanned=102400/173614
+[preprocess] test: batches=125 rows_scanned=128000/173614
+[preprocess] test: batches=150 rows_scanned=153600/173614
+[preprocess] Fitting standard scaler on train split only...
+[preprocess] standard(zero) fit: batches=1 rows_scanned=1024/520841
+[preprocess] standard(zero) fit: batches=25 rows_scanned=25600/520841
+[preprocess] standard(zero) fit: batches=50 rows_scanned=51200/520841
+[preprocess] standard(zero) fit: batches=75 rows_scanned=76800/520841
+[preprocess] standard(zero) fit: batches=100 rows_scanned=102400/520841
+[preprocess] standard(zero) fit: batches=125 rows_scanned=128000/520841
+[preprocess] standard(zero) fit: batches=150 rows_scanned=153600/520841
+[preprocess] standard(zero) fit: batches=175 rows_scanned=179200/520841
+[preprocess] standard(zero) fit: batches=200 rows_scanned=204800/520841
+[preprocess] standard(zero) fit: batches=225 rows_scanned=230400/520841
+[preprocess] standard(zero) fit: batches=250 rows_scanned=256000/520841
+[preprocess] standard(zero) fit: batches=275 rows_scanned=281600/520841
+[preprocess] standard(zero) fit: batches=300 rows_scanned=307200/520841
+[preprocess] standard(zero) fit: batches=325 rows_scanned=332800/520841
+[preprocess] standard(zero) fit: batches=350 rows_scanned=358400/520841
+[preprocess] standard(zero) fit: batches=375 rows_scanned=384000/520841
+[preprocess] standard(zero) fit: batches=400 rows_scanned=409600/520841
+[preprocess] standard(zero) fit: batches=425 rows_scanned=435200/520841
+[preprocess] standard(zero) fit: batches=450 rows_scanned=460800/520841
+[preprocess] standard(zero) fit: batches=475 rows_scanned=486400/520841
+[preprocess] standard(zero) fit: batches=500 rows_scanned=512000/520841
+[done] Wrote preprocessing artifacts to: /mnt/data/uyen/data_splits/outputs/preprocess
+
+[2026-07-08 18:20:04] Building CIL task files
+[tasks] Building random protocol for seed=0...
+[tasks] Building random protocol for seed=1...
+[tasks] Building random protocol for seed=2...
+[tasks] Building random protocol for seed=3...
+[tasks] Building random protocol for seed=4...
+[tasks] Building frequency-balanced protocol...
+[tasks] Building long-tail protocol...
+[done] Wrote task artifacts to: /mnt/data/uyen/data_splits/outputs/tasks
+
+[2026-07-08 18:20:05] Running static MLP-base baseline
+[2026-07-08T18:20:07] Static training started on device=cpu
+[2026-07-08T18:20:07] variant=base batch_size=512 epochs=20 lr=0.001 weight_decay=0.0001 seed=0
+./run_full.sh: line 120: 1315232 Killed                  python "${PROJECT_ROOT}/src/training/train_static.py" --train "${TRAIN_PARQUET}" --validation "${VALID_PARQUET}" --test "${TEST_PARQUET}" --feature-cols "${FEATURE_COLS_JSON}" --scaler "${SCALER_PKL}" --outdir "${outdir}" --variant base --batch-size 512 --epochs 20 --patience 5 --seed 0 --device "${DEVICE}"
+
+[2026-07-08 18:22:59] Conda environment ddi2025-cil already exists
+
+[2026-07-08 18:22:59] Activated conda environment ddi2025-cil
+
+[2026-07-08 18:22:59] Installing Python requirements
+Requirement already satisfied: pip in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (26.1.2)
+Requirement already satisfied: setuptools in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (81.0.0)
+Collecting setuptools
+  Using cached setuptools-83.0.0-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: wheel in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (0.47.0)
+Requirement already satisfied: packaging>=24.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from wheel) (26.2)
+Using cached setuptools-83.0.0-py3-none-any.whl (1.0 MB)
+Installing collected packages: setuptools
+  Attempting uninstall: setuptools
+    Found existing installation: setuptools 81.0.0
+    Uninstalling setuptools-81.0.0:
+      Successfully uninstalled setuptools-81.0.0
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+torch 2.12.1 requires setuptools<82, but you have setuptools 83.0.0 which is incompatible.
+Successfully installed setuptools-83.0.0
+Requirement already satisfied: numpy>=2.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 1)) (2.4.6)
+Requirement already satisfied: pandas>=2.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (3.0.3)
+Requirement already satisfied: pyarrow>=21.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 3)) (24.0.0)
+Requirement already satisfied: matplotlib>=3.9 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (3.11.0)
+Requirement already satisfied: scikit-learn>=1.6 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.9.0)
+Requirement already satisfied: torch>=2.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from -r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2.12.1)
+Requirement already satisfied: python-dateutil>=2.8.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from pandas>=2.2->-r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (2.9.0.post0)
+Requirement already satisfied: contourpy>=1.0.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (1.3.3)
+Requirement already satisfied: cycler>=0.10 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (0.12.1)
+Requirement already satisfied: fonttools>=4.22.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (4.63.0)
+Requirement already satisfied: kiwisolver>=1.3.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (1.5.0)
+Requirement already satisfied: packaging>=20.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (26.2)
+Requirement already satisfied: pillow>=9 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (12.3.0)
+Requirement already satisfied: pyparsing>=3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from matplotlib>=3.9->-r /mnt/data/uyen/data_splits/requirements.txt (line 4)) (3.3.2)
+Requirement already satisfied: scipy>=1.10.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.17.1)
+Requirement already satisfied: joblib>=1.4.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (1.5.3)
+Requirement already satisfied: narwhals>=2.0.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (2.23.0)
+Requirement already satisfied: threadpoolctl>=3.5.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from scikit-learn>=1.6->-r /mnt/data/uyen/data_splits/requirements.txt (line 5)) (3.6.0)
+Requirement already satisfied: filelock in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.29.6)
+Requirement already satisfied: typing-extensions>=4.10.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (4.16.0)
+Collecting setuptools<82 (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6))
+  Using cached setuptools-81.0.0-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: sympy>=1.13.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.14.0)
+Requirement already satisfied: networkx>=2.5.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.6.1)
+Requirement already satisfied: jinja2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.1.6)
+Requirement already satisfied: fsspec>=0.8.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2026.6.0)
+Requirement already satisfied: cuda-toolkit==13.0.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.2)
+Requirement already satisfied: nvidia-cublas<=13.1.1.3,>=13.1.0.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.1.1.3)
+Requirement already satisfied: cuda-bindings<14,>=13.0.3 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.3.1)
+Requirement already satisfied: nvidia-cudnn-cu13==9.20.0.48 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (9.20.0.48)
+Requirement already satisfied: nvidia-cusparselt-cu13==0.8.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (0.8.1)
+Requirement already satisfied: nvidia-nccl-cu13==2.29.7 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (2.29.7)
+Requirement already satisfied: nvidia-nvshmem-cu13==3.4.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.4.5)
+Requirement already satisfied: triton==3.7.1 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.7.1)
+Requirement already satisfied: nvidia-cuda-runtime==13.0.96.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.96)
+Requirement already satisfied: nvidia-cufft==12.0.0.61.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.0.0.61)
+Requirement already satisfied: nvidia-cufile==1.15.1.6.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.15.1.6)
+Requirement already satisfied: nvidia-cuda-cupti==13.0.85.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.85)
+Requirement already satisfied: nvidia-curand==10.4.0.35.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (10.4.0.35)
+Requirement already satisfied: nvidia-cusolver==12.0.4.66.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.0.4.66)
+Requirement already satisfied: nvidia-cusparse==12.6.3.3.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (12.6.3.3)
+Requirement already satisfied: nvidia-nvjitlink==13.0.88.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.88)
+Requirement already satisfied: nvidia-cuda-nvrtc==13.0.88.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.88)
+Requirement already satisfied: nvidia-nvtx==13.0.85.* in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-toolkit[cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == "Linux"->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (13.0.85)
+Requirement already satisfied: cuda-pathfinder>=1.4.2 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from cuda-bindings<14,>=13.0.3->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.5.6)
+Requirement already satisfied: six>=1.5 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from python-dateutil>=2.8.2->pandas>=2.2->-r /mnt/data/uyen/data_splits/requirements.txt (line 2)) (1.17.0)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from sympy>=1.13.3->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (1.3.0)
+Requirement already satisfied: MarkupSafe>=2.0 in /home/hien/occho/envs/ddi2025-cil/lib/python3.11/site-packages (from jinja2->torch>=2.5->-r /mnt/data/uyen/data_splits/requirements.txt (line 6)) (3.0.3)
+Using cached setuptools-81.0.0-py3-none-any.whl (1.1 MB)
+Installing collected packages: setuptools
+  Attempting uninstall: setuptools
+    Found existing installation: setuptools 83.0.0
+    Uninstalling setuptools-83.0.0:
+      Successfully uninstalled setuptools-83.0.0
+Successfully installed setuptools-81.0.0
+
+[2026-07-08 18:23:01] Training device locked to cpu
+
+[2026-07-08 18:23:01] Running schema audit
+[inspect] train: rows=520841, cols=3787, feature_count=3780, class_nunique=178
+[inspect] validation: rows=173614, cols=3787, feature_count=3780, class_nunique=178
+[inspect] test: rows=173614, cols=3787, feature_count=3780, class_nunique=178
+[train] Scanning feature batches (rows=520841, features=3780, batch_size=1024)...
+[train] batches=1 scanned_rows=1024/520841
+[train] batches=25 scanned_rows=25600/520841
+[train] batches=50 scanned_rows=51200/520841
+[train] batches=75 scanned_rows=76800/520841
+[train] batches=100 scanned_rows=102400/520841
+[train] batches=125 scanned_rows=128000/520841
+[train] batches=150 scanned_rows=153600/520841
+[train] batches=175 scanned_rows=179200/520841
+[train] batches=200 scanned_rows=204800/520841
+[train] batches=225 scanned_rows=230400/520841
+[train] batches=250 scanned_rows=256000/520841
+[train] batches=275 scanned_rows=281600/520841
+[train] batches=300 scanned_rows=307200/520841
+[train] batches=325 scanned_rows=332800/520841
+[train] batches=350 scanned_rows=358400/520841
+[train] batches=375 scanned_rows=384000/520841
+[train] batches=400 scanned_rows=409600/520841
+[train] batches=425 scanned_rows=435200/520841
+[train] batches=450 scanned_rows=460800/520841
+[train] batches=475 scanned_rows=486400/520841
+[train] batches=500 scanned_rows=512000/520841
+[validation] Scanning feature batches (rows=173614, features=3780, batch_size=1024)...
+[validation] batches=1 scanned_rows=1024/173614
+[validation] batches=25 scanned_rows=25600/173614
+[validation] batches=50 scanned_rows=51200/173614
+[validation] batches=75 scanned_rows=76800/173614
+[validation] batches=100 scanned_rows=102400/173614
+[validation] batches=125 scanned_rows=128000/173614
+[validation] batches=150 scanned_rows=153600/173614
+[test] Scanning feature batches (rows=173614, features=3780, batch_size=1024)...
+[test] batches=1 scanned_rows=1024/173614
+[test] batches=25 scanned_rows=25600/173614
+[test] batches=50 scanned_rows=51200/173614
+[test] batches=75 scanned_rows=76800/173614
+[test] batches=100 scanned_rows=102400/173614
+[test] batches=125 scanned_rows=128000/173614
+[test] batches=150 scanned_rows=153600/173614
+[done] Wrote audit artifacts to: /mnt/data/uyen/data_splits/outputs/audit
+
+[2026-07-08 18:28:02] Running class distribution analysis
+[class-dist] Reading train labels from /mnt/data/uyen/data_splits/train_extracted.parquet...
+[class-dist] train: num_rows=520841, num_classes=178, min_count=3, max_count=73634
+[class-dist] Reading validation labels from /mnt/data/uyen/data_splits/validation_extracted.parquet...
+[class-dist] validation: num_rows=173614, num_classes=178, min_count=1, max_count=24545
+[class-dist] Reading test labels from /mnt/data/uyen/data_splits/test_extracted.parquet...
+[class-dist] test: num_rows=173614, num_classes=178, min_count=1, max_count=24545
+[done] Wrote class distribution artifacts to: /mnt/data/uyen/data_splits/outputs/class_distribution
+[done] Wrote figures to: /mnt/data/uyen/data_splits/outputs/figures
+
+[2026-07-08 18:28:04] Running leakage audit
+[leakage] Reading train identity columns from /mnt/data/uyen/data_splits/train_extracted.parquet...
+[leakage] train: rows=520841, unique_ordered_pairs=520841, unique_unordered_pairs=520841
+[leakage] Reading validation identity columns from /mnt/data/uyen/data_splits/validation_extracted.parquet...
+[leakage] validation: rows=173614, unique_ordered_pairs=173614, unique_unordered_pairs=173614
+[leakage] Reading test identity columns from /mnt/data/uyen/data_splits/test_extracted.parquet...
+[leakage] test: rows=173614, unique_ordered_pairs=173614, unique_unordered_pairs=173614
+[leakage] Comparing train vs validation...
+[leakage] Comparing train vs test...
+[leakage] Comparing validation vs test...
+[done] Wrote leakage artifacts to: /mnt/data/uyen/data_splits/outputs/leakage
+
+[2026-07-08 18:32:52] Fitting preprocessing artifacts
+[preprocess] feature_count=3780 scaler=standard impute_strategy=zero
+[preprocess] Scanning non-finite stats for train...
+[preprocess] train: batches=1 rows_scanned=1024/520841
+[preprocess] train: batches=25 rows_scanned=25600/520841
+[preprocess] train: batches=50 rows_scanned=51200/520841
+[preprocess] train: batches=75 rows_scanned=76800/520841
+[preprocess] train: batches=100 rows_scanned=102400/520841
+[preprocess] train: batches=125 rows_scanned=128000/520841
+[preprocess] train: batches=150 rows_scanned=153600/520841
+[preprocess] train: batches=175 rows_scanned=179200/520841
+[preprocess] train: batches=200 rows_scanned=204800/520841
+[preprocess] train: batches=225 rows_scanned=230400/520841
+[preprocess] train: batches=250 rows_scanned=256000/520841
+[preprocess] train: batches=275 rows_scanned=281600/520841
+[preprocess] train: batches=300 rows_scanned=307200/520841
+[preprocess] train: batches=325 rows_scanned=332800/520841
+[preprocess] train: batches=350 rows_scanned=358400/520841
+[preprocess] train: batches=375 rows_scanned=384000/520841
+[preprocess] train: batches=400 rows_scanned=409600/520841
+[preprocess] train: batches=425 rows_scanned=435200/520841
+[preprocess] train: batches=450 rows_scanned=460800/520841
+[preprocess] train: batches=475 rows_scanned=486400/520841
+[preprocess] train: batches=500 rows_scanned=512000/520841
+[preprocess] Scanning non-finite stats for validation...
+[preprocess] validation: batches=1 rows_scanned=1024/173614
+[preprocess] validation: batches=25 rows_scanned=25600/173614
+[preprocess] validation: batches=50 rows_scanned=51200/173614
+[preprocess] validation: batches=75 rows_scanned=76800/173614
+[preprocess] validation: batches=100 rows_scanned=102400/173614
+[preprocess] validation: batches=125 rows_scanned=128000/173614
+[preprocess] validation: batches=150 rows_scanned=153600/173614
+[preprocess] Scanning non-finite stats for test...
+[preprocess] test: batches=1 rows_scanned=1024/173614
+[preprocess] test: batches=25 rows_scanned=25600/173614
+[preprocess] test: batches=50 rows_scanned=51200/173614
+[preprocess] test: batches=75 rows_scanned=76800/173614
+[preprocess] test: batches=100 rows_scanned=102400/173614
+[preprocess] test: batches=125 rows_scanned=128000/173614
+[preprocess] test: batches=150 rows_scanned=153600/173614
+[preprocess] Fitting standard scaler on train split only...
+[preprocess] standard(zero) fit: batches=1 rows_scanned=1024/520841
+[preprocess] standard(zero) fit: batches=25 rows_scanned=25600/520841
+[preprocess] standard(zero) fit: batches=50 rows_scanned=51200/520841
+[preprocess] standard(zero) fit: batches=75 rows_scanned=76800/520841
+[preprocess] standard(zero) fit: batches=100 rows_scanned=102400/520841
+[preprocess] standard(zero) fit: batches=125 rows_scanned=128000/520841
+[preprocess] standard(zero) fit: batches=150 rows_scanned=153600/520841
+[preprocess] standard(zero) fit: batches=175 rows_scanned=179200/520841
+[preprocess] standard(zero) fit: batches=200 rows_scanned=204800/520841
+[preprocess] standard(zero) fit: batches=225 rows_scanned=230400/520841
+[preprocess] standard(zero) fit: batches=250 rows_scanned=256000/520841
+[preprocess] standard(zero) fit: batches=275 rows_scanned=281600/520841
+[preprocess] standard(zero) fit: batches=300 rows_scanned=307200/520841
+[preprocess] standard(zero) fit: batches=325 rows_scanned=332800/520841
+[preprocess] standard(zero) fit: batches=350 rows_scanned=358400/520841
+[preprocess] standard(zero) fit: batches=375 rows_scanned=384000/520841
+[preprocess] standard(zero) fit: batches=400 rows_scanned=409600/520841
+[preprocess] standard(zero) fit: batches=425 rows_scanned=435200/520841
+[preprocess] standard(zero) fit: batches=450 rows_scanned=460800/520841
+[preprocess] standard(zero) fit: batches=475 rows_scanned=486400/520841
+[preprocess] standard(zero) fit: batches=500 rows_scanned=512000/520841
+[done] Wrote preprocessing artifacts to: /mnt/data/uyen/data_splits/outputs/preprocess
+
+[2026-07-08 18:34:41] Building CIL task files
+[tasks] Building random protocol for seed=0...
+[tasks] Building random protocol for seed=1...
+[tasks] Building random protocol for seed=2...
+[tasks] Building random protocol for seed=3...
+[tasks] Building random protocol for seed=4...
+[tasks] Building frequency-balanced protocol...
+[tasks] Building long-tail protocol...
+[done] Wrote task artifacts to: /mnt/data/uyen/data_splits/outputs/tasks
+
+[2026-07-08 18:34:42] Running static MLP-base baseline
+[2026-07-08T18:34:44] Static training started on device=cpu
+[2026-07-08T18:34:44] variant=base batch_size=512 epochs=20 lr=0.001 weight_decay=0.0001 seed=0
+./run_full.sh: line 120: 1448344 Killed                  python "${PROJECT_ROOT}/src/training/train_static.py" --train "${TRAIN_PARQUET}" --validation "${VALID_PARQUET}" --test "${TEST_PARQUET}" --feature-cols "${FEATURE_COLS_JSON}" --scaler "${SCALER_PKL}" --outdir "${outdir}" --variant base --batch-size 512 --epochs 20 --patience 5 --seed 0 --device "${DEVICE}"
