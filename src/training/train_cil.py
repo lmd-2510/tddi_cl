@@ -19,19 +19,21 @@ try:
     import torch
     import torch.nn.functional as F
     from torch import nn
-    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 except ImportError:  # pragma: no cover - environment may not have torch yet
     torch = None
     F = None
     nn = None
     DataLoader = None
     TensorDataset = None
+    WeightedRandomSampler = None
 
 from src.data.class_mapping import build_seen_class_map, invert_class_map, remap_labels, save_class_map
 from src.data.ddi_dataset import load_feature_columns, load_scaler_payload, load_split_arrays
 from src.data.replay_buffer import ReplayBuffer
 from src.eval.classification_metrics import compute_classification_metrics, compute_per_class_f1
 from src.eval.continual_metrics import compute_forgetting, init_result_matrix, result_matrix_to_frame
+from src.methods.ewc import compute_fisher, ewc_penalty, grow_head_state
 from src.methods.replay import build_training_arrays as build_replay_training_arrays
 from src.methods.sequential import build_training_arrays as build_sequential_training_arrays
 from src.models.mlp import MLP, preset_config
@@ -50,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scaler", required=True, type=Path)
     parser.add_argument("--task-file", required=True, type=Path)
     parser.add_argument("--outdir", required=True, type=Path)
-    parser.add_argument("--method", choices=["sequential", "joint_seen", "replay", "replay_distill"], default="sequential")
+    parser.add_argument("--method", choices=["sequential", "joint_seen", "replay", "replay_distill", "ewc"], default="sequential")
     parser.add_argument("--variant", choices=["small", "base", "large"], default="base")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=20)
@@ -65,6 +67,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-per-class", type=int, default=50)
     parser.add_argument("--distill-alpha", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=2.0)
+    parser.add_argument("--feature-distill-weight", type=float, default=0.5)
+    parser.add_argument("--ewc-lambda", type=float, default=1000.0)
     parser.add_argument("--max-train-rows-per-task", type=int, default=None)
     parser.add_argument("--max-validation-rows-per-task", type=int, default=None)
     parser.add_argument("--max-test-rows-per-task", type=int, default=None)
@@ -95,6 +99,43 @@ def build_tensor_dataset(features: np.ndarray, labels: np.ndarray) -> TensorData
     x = torch.from_numpy(np.asarray(features, dtype=np.float32))
     y = torch.from_numpy(np.asarray(labels, dtype=np.int64))
     return TensorDataset(x, y)
+
+
+def build_balanced_sampler(labels: np.ndarray) -> "WeightedRandomSampler":
+    """Inverse class-frequency sampler so replay-buffer classes (few samples)
+    get resampled roughly as often as current-task classes (many samples)."""
+    require_torch()
+    labels = np.asarray(labels)
+    class_counts = np.bincount(labels)
+    class_weights = 1.0 / np.maximum(class_counts, 1)
+    sample_weights = class_weights[labels]
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+
+
+def align_new_class_weights(
+    model: nn.Module,
+    previous_seen_map: dict[int, int] | None,
+    current_seen_map: dict[int, int],
+) -> None:
+    """Weight Alignment (Zhao et al.): rescale this task's new-class head
+    weight rows so their mean norm matches the previously-seen classes',
+    correcting the classifier's recency bias toward newly learned classes."""
+    if previous_seen_map is None:
+        return
+    old_indices = sorted(previous_seen_map.values())
+    new_indices = [index for raw_id, index in current_seen_map.items() if raw_id not in previous_seen_map]
+    if not new_indices:
+        return
+    with torch.no_grad():
+        weight = model.head.weight
+        old_norm = weight[old_indices].norm(dim=1).mean()
+        new_norm = weight[new_indices].norm(dim=1).mean().clamp_min(1e-8)
+        gamma = old_norm / new_norm
+        weight[new_indices] *= gamma
 
 
 def evaluate_model(
@@ -187,6 +228,10 @@ def train_one_epoch(
     current_seen_map: dict[int, int] | None = None,
     distill_alpha: float = 1.0,
     temperature: float = 2.0,
+    feature_distill_weight: float = 0.5,
+    fisher: dict[str, "torch.Tensor"] | None = None,
+    theta_star: dict[str, "torch.Tensor"] | None = None,
+    ewc_lambda: float = 0.0,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -208,13 +253,19 @@ def train_one_epoch(
         if teacher_model is not None and student_old_indices:
             with torch.no_grad():
                 teacher_logits = teacher_model(features)
+                teacher_features = teacher_model.backbone(features)
             student_old_logits = logits[:, student_old_indices]
             distill_loss = F.kl_div(
                 F.log_softmax(student_old_logits / temperature, dim=1),
                 F.softmax(teacher_logits / temperature, dim=1),
                 reduction="batchmean",
             ) * (temperature ** 2)
-            loss = loss + distill_alpha * distill_loss
+            student_features = model.backbone(features)
+            feature_distill_loss = F.mse_loss(student_features, teacher_features)
+            loss = loss + distill_alpha * distill_loss + feature_distill_weight * feature_distill_loss
+
+        if fisher is not None and theta_star is not None and ewc_lambda:
+            loss = loss + ewc_lambda * ewc_penalty(model, fisher, theta_star)
 
         loss.backward()
         optimizer.step()
@@ -299,6 +350,8 @@ def main() -> None:
     previous_model: nn.Module | None = None
     previous_seen_map: dict[int, int] | None = None
     previous_seen_raw_classes: list[int] | None = None
+    fisher_total: dict[str, "torch.Tensor"] | None = None
+    theta_star: dict[str, "torch.Tensor"] | None = None
 
     for task in tasks:
         task_id = int(task["task_id"])
@@ -343,7 +396,7 @@ def main() -> None:
             )
             train_features = train_seen.features
             train_raw_labels = train_seen.labels
-        elif args.method == "sequential":
+        elif args.method in {"sequential", "ewc"}:
             train_features, train_raw_labels = build_sequential_training_arrays(
                 current_train.features,
                 current_train.labels,
@@ -362,7 +415,11 @@ def main() -> None:
 
         train_dataset = build_tensor_dataset(train_features, train_local_labels)
         validation_dataset = build_tensor_dataset(validation_seen.features, validation_local_labels)
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+        if args.method in {"replay", "replay_distill"}:
+            sampler = build_balanced_sampler(train_local_labels)
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler)
+        else:
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
         validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False)
 
         model = expand_model_for_seen_classes(
@@ -375,6 +432,16 @@ def main() -> None:
             activation=args.activation,
             norm=args.norm,
         ).to(device)
+
+        if args.method == "ewc" and fisher_total is not None and previous_seen_map is not None:
+            reference_state = model.state_dict()
+            fisher_total = grow_head_state(
+                fisher_total, previous_seen_map, current_seen_map, reference_state, zero_new_rows=True
+            )
+            theta_star = grow_head_state(
+                theta_star, previous_seen_map, current_seen_map, reference_state, zero_new_rows=False
+            )
+
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         criterion = nn.CrossEntropyLoss()
 
@@ -400,6 +467,10 @@ def main() -> None:
                 current_seen_map=current_seen_map,
                 distill_alpha=args.distill_alpha,
                 temperature=args.temperature,
+                feature_distill_weight=args.feature_distill_weight,
+                fisher=fisher_total if args.method == "ewc" else None,
+                theta_star=theta_star if args.method == "ewc" else None,
+                ewc_lambda=args.ewc_lambda if args.method == "ewc" else 0.0,
             )
             val_metrics, _ = evaluate_model(model, validation_loader, criterion, device, inverse_seen_map)
             logger.log(
@@ -442,6 +513,10 @@ def main() -> None:
             }
         )
 
+        if args.method in {"replay", "replay_distill", "ewc"} and previous_seen_map is not None:
+            align_new_class_weights(model, previous_seen_map, current_seen_map)
+            best_state = {key: value.cpu() for key, value in model.state_dict().items()}
+
         if args.method in {"replay", "replay_distill"}:
             replay_buffer.update(current_train.features, current_train.labels)
             replay_buffer.save_summary(memory_dir / "memory_summary.csv")
@@ -450,6 +525,14 @@ def main() -> None:
         if args.method == "replay_distill":
             teacher_checkpoint = checkpoint_dir / f"task_{task_id}_teacher.pt"
             torch.save(best_state, teacher_checkpoint)
+
+        if args.method == "ewc":
+            fisher_new = compute_fisher(model, train_loader, device)
+            if fisher_total is not None:
+                fisher_total = {name: fisher_total[name] + fisher_new[name] for name in fisher_new}
+            else:
+                fisher_total = fisher_new
+            theta_star = {name: param.detach().clone() for name, param in model.named_parameters()}
 
         previous_model = expand_model_for_seen_classes(
             previous_model=None,
