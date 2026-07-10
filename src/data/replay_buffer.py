@@ -16,7 +16,11 @@ class ReplayBuffer:
 
     memory_per_class: int
     random_seed: int = 0
+    strategy: str = "herding"
     features_by_class: dict[int, np.ndarray] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.rng = np.random.default_rng(self.random_seed)
 
     @property
     def total_size(self) -> int:
@@ -40,9 +44,12 @@ class ReplayBuffer:
             if class_features.shape[0] == 0:
                 continue
             if class_features.shape[0] > self.memory_per_class:
-                mean = class_features.mean(axis=0, keepdims=True)
-                distances = np.linalg.norm(class_features - mean, axis=1)
-                indices = np.argpartition(distances, self.memory_per_class - 1)[: self.memory_per_class]
+                if self.strategy == "herding":
+                    mean = class_features.mean(axis=0, keepdims=True)
+                    distances = np.linalg.norm(class_features - mean, axis=1)
+                    indices = np.argpartition(distances, self.memory_per_class - 1)[: self.memory_per_class]
+                else:
+                    indices = self.rng.choice(class_features.shape[0], size=self.memory_per_class, replace=False)
                 class_features = class_features[indices]
             self.features_by_class[int(raw_class)] = class_features.astype(np.float32, copy=False)
 

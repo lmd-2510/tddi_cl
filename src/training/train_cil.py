@@ -69,6 +69,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
+    parser.add_argument("--exemplar-strategy", choices=["herding", "random"], default="herding")
+    parser.add_argument("--balanced-sampling", choices=["on", "off"], default="on")
+    parser.add_argument("--weight-align", choices=["on", "off"], default="on")
     parser.add_argument("--max-train-rows-per-task", type=int, default=None)
     parser.add_argument("--max-validation-rows-per-task", type=int, default=None)
     parser.add_argument("--max-test-rows-per-task", type=int, default=None)
@@ -346,7 +349,9 @@ def main() -> None:
         f"CIL training started method={args.method} tasks={num_tasks} device={device}",
     )
 
-    replay_buffer = ReplayBuffer(memory_per_class=args.memory_per_class, random_seed=args.seed)
+    replay_buffer = ReplayBuffer(
+        memory_per_class=args.memory_per_class, random_seed=args.seed, strategy=args.exemplar_strategy
+    )
     previous_model: nn.Module | None = None
     previous_seen_map: dict[int, int] | None = None
     previous_seen_raw_classes: list[int] | None = None
@@ -415,7 +420,7 @@ def main() -> None:
 
         train_dataset = build_tensor_dataset(train_features, train_local_labels)
         validation_dataset = build_tensor_dataset(validation_seen.features, validation_local_labels)
-        if args.method in {"replay", "replay_distill"}:
+        if args.method in {"replay", "replay_distill"} and args.balanced_sampling == "on":
             sampler = build_balanced_sampler(train_local_labels)
             train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler)
         else:
@@ -513,7 +518,11 @@ def main() -> None:
             }
         )
 
-        if args.method in {"replay", "replay_distill", "ewc"} and previous_seen_map is not None:
+        if (
+            args.method in {"replay", "replay_distill", "ewc"}
+            and previous_seen_map is not None
+            and args.weight_align == "on"
+        ):
             align_new_class_weights(model, previous_seen_map, current_seen_map)
             best_state = {key: value.cpu() for key, value in model.state_dict().items()}
 
