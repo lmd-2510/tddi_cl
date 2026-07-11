@@ -98,6 +98,14 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_ROBUST_SAMPLE_SIZE,
         help=f"Maximum sampled train rows for robust quantiles. Default: {DEFAULT_ROBUST_SAMPLE_SIZE}.",
     )
+    parser.add_argument(
+        "--pca-variance",
+        type=float,
+        default=None,
+        help="If set, fit PCA on the scaled train split and keep the smallest number "
+        "of components whose cumulative explained variance reaches this fraction "
+        "(e.g. 0.95). Disabled by default.",
+    )
     return parser.parse_args()
 
 
@@ -366,6 +374,64 @@ def fit_robust_scaler(
     }
 
 
+def apply_standardization(values: np.ndarray, scaler_payload: dict[str, Any]) -> np.ndarray:
+    """Mirrors src.data.ddi_dataset.transform_features's scaling step (pre-PCA),
+    kept local so this script stays self-contained without importing src/."""
+    impute_values = np.asarray(scaler_payload["impute_values"], dtype=np.float64)
+    nonfinite_mask = ~np.isfinite(values)
+    if nonfinite_mask.any():
+        values = np.where(nonfinite_mask, impute_values, values)
+    if scaler_payload["scaler_type"] == "standard":
+        return (values - scaler_payload["mean"]) / scaler_payload["scale"]
+    center = scaler_payload["center"]
+    scale = scaler_payload["scale"]
+    return (values - center) / scale
+
+
+def fit_pca(
+    train_path: Path,
+    feature_columns: list[str],
+    batch_size: int,
+    max_batches: int | None,
+    scaler_payload: dict[str, Any],
+    variance_threshold: float,
+) -> dict[str, Any]:
+    num_features = len(feature_columns)
+    outer_sum = np.zeros((num_features, num_features), dtype=np.float64)
+    total_rows = 0
+
+    print(f"[preprocess] Fitting PCA on scaled train split (variance_threshold={variance_threshold})...", flush=True)
+    parquet_rows = pq.ParquetFile(train_path).metadata.num_rows
+    for batch_idx, batch, _ in iterate_batches(train_path, feature_columns, batch_size, max_batches):
+        values, _, _ = batch_to_numpy(batch)
+        scaled = apply_standardization(values, scaler_payload)
+        outer_sum += scaled.T @ scaled
+        total_rows += batch.num_rows
+        if batch_idx == 1 or batch_idx % 25 == 0:
+            print(f"[preprocess] pca fit: batches={batch_idx} rows_scanned={total_rows}/{parquet_rows}", flush=True)
+
+    covariance = outer_sum / total_rows
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = np.clip(eigenvalues[order], 0.0, None)
+    eigenvectors = eigenvectors[:, order]
+    cumulative = np.cumsum(eigenvalues) / eigenvalues.sum()
+    n_components = int(np.searchsorted(cumulative, variance_threshold) + 1)
+    n_components = min(n_components, num_features)
+
+    print(
+        f"[preprocess] PCA fitted: n_components={n_components}/{num_features} "
+        f"cumulative_variance={cumulative[n_components - 1]:.4f}",
+        flush=True,
+    )
+    return {
+        "pca_components": eigenvectors[:, :n_components].astype(np.float32),
+        "pca_n_components": n_components,
+        "pca_variance_threshold": variance_threshold,
+        "pca_cumulative_variance": float(cumulative[n_components - 1]),
+    }
+
+
 def scaler_payload_to_config(payload: dict[str, Any], feature_count: int) -> dict[str, Any]:
     config: dict[str, Any] = {
         "scaler_type": payload["scaler_type"],
@@ -377,6 +443,10 @@ def scaler_payload_to_config(payload: dict[str, Any], feature_count: int) -> dic
         config["sample_size_used"] = payload["sample_size_used"]
         config["sample_size_target"] = payload["sample_size_target"]
         config["approximate"] = payload["approximate"]
+    if "pca_components" in payload:
+        config["pca_n_components"] = payload["pca_n_components"]
+        config["pca_variance_threshold"] = payload["pca_variance_threshold"]
+        config["pca_cumulative_variance"] = payload["pca_cumulative_variance"]
     return config
 
 
@@ -506,6 +576,17 @@ def main() -> None:
             random_seed=args.random_seed,
             impute_strategy=args.impute_strategy,
         )
+
+    if args.pca_variance is not None:
+        pca_payload = fit_pca(
+            train_path=args.train,
+            feature_columns=feature_columns,
+            batch_size=args.batch_size,
+            max_batches=args.max_batches,
+            scaler_payload=scaler_payload,
+            variance_threshold=args.pca_variance,
+        )
+        scaler_payload.update(pca_payload)
 
     scaler_config = scaler_payload_to_config(scaler_payload, len(feature_columns))
     save_pickle(outdir / "scaler.pkl", scaler_payload)

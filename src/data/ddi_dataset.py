@@ -115,6 +115,10 @@ def transform_features(values: np.ndarray, scaler_payload: dict[str, Any]) -> np
     else:
         raise ValueError(f"Unsupported scaler_type: {scaler_type}")
 
+    pca_components = scaler_payload.get("pca_components")
+    if pca_components is not None:
+        transformed = transformed @ np.asarray(pca_components, dtype=np.float64)
+
     return transformed.astype(np.float32, copy=False)
 
 
