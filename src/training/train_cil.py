@@ -41,6 +41,23 @@ from src.utils.logging import RunLogger, ensure_run_paths
 from src.utils.seed import set_global_seed
 
 
+class FocalLoss(nn.Module if nn is not None else object):
+    """L_focal(p_t) = -(1-p_t)^gamma * log(p_t), unweighted (Lin et al. 2017),
+    as used by the T-DDI paper on this same DDI2025 dataset to handle severe
+    178-class imbalance."""
+
+    def __init__(self, gamma: float = 1.0) -> None:
+        super().__init__()
+        self.gamma = gamma
+
+    def forward(self, logits: "torch.Tensor", targets: "torch.Tensor") -> "torch.Tensor":
+        log_probs = F.log_softmax(logits, dim=1)
+        target_log_probs = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        target_probs = target_log_probs.exp()
+        loss = -((1 - target_probs) ** self.gamma) * target_log_probs
+        return loss.mean()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train class-incremental MLP baselines for DDI2025-CIL."
@@ -69,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
+    parser.add_argument("--focal-gamma", type=float, default=1.0)
     parser.add_argument("--max-train-rows-per-task", type=int, default=None)
     parser.add_argument("--max-validation-rows-per-task", type=int, default=None)
     parser.add_argument("--max-test-rows-per-task", type=int, default=None)
@@ -421,7 +439,7 @@ def main() -> None:
             )
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        criterion = nn.CrossEntropyLoss()
+        criterion = FocalLoss(gamma=args.focal_gamma)
 
         teacher_model = None
         if args.method == "replay_distill" and previous_model is not None and previous_seen_raw_classes is not None:
