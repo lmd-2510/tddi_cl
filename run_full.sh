@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="/mnt/data/uyen/data_splits"
-ENV_NAME="ddi2025-cil"
-DEVICE="${DEVICE:-cuda}"
+# PROJECT_ROOT="/mnt/data/uyen/data_splits"
+# ENV_NAME="ddi2025-cil"
+# DEVICE="${DEVICE:-cuda}"
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEVICE="${DEVICE:-mps}"
 
 TRAIN_PARQUET="${PROJECT_ROOT}/train_extracted.parquet"
 VALID_PARQUET="${PROJECT_ROOT}/validation_extracted.parquet"

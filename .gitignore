@@ -1,5 +1,7 @@
 *.parquet
 *.csv
+.DS_Store
+data/*.zip
 outputs/runs*
 dist/
 __pycache__/

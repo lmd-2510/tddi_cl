@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="/mnt/data/uyen/data_splits"
-ENV_NAME="ddi2025-cil"
-DEVICE="${DEVICE:-cuda}"
+# PROJECT_ROOT="/mnt/data/uyen/data_splits"
+# ENV_NAME="ddi2025-cil"
+# DEVICE="${DEVICE:-cuda}"
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEVICE="${DEVICE:-mps}"
 
 TRAIN_PARQUET="${PROJECT_ROOT}/train_extracted.parquet"
 VALID_PARQUET="${PROJECT_ROOT}/validation_extracted.parquet"
@@ -171,8 +174,8 @@ main() {
   prepare_directories
   exec > >(tee -a "${PROJECT_ROOT}/outputs/run_smoke.log") 2>&1
 
-  activate_conda_env
-  install_requirements
+  # activate_conda_env
+  # install_requirements
   log "Training device set to ${DEVICE}"
 
   run_audit
