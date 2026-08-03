@@ -91,6 +91,21 @@ def load_scaler_payload(path: str | Path) -> dict[str, Any]:
     return payload
 
 
+def load_class_counts(
+    parquet_path: str | Path,
+    *,
+    label_col: str = DEFAULT_LABEL_COL,
+) -> dict[int, int]:
+    """Count each raw class in a full split while reading only its label column."""
+
+    labels = pq.read_table(parquet_path, columns=[label_col])[label_col].to_numpy()
+    class_ids, counts = np.unique(labels.astype(np.int64, copy=False), return_counts=True)
+    return {
+        int(class_id): int(count)
+        for class_id, count in zip(class_ids, counts, strict=True)
+    }
+
+
 def apply_imputation(values: np.ndarray, scaler_payload: dict[str, Any]) -> np.ndarray:
     impute_values = np.asarray(scaler_payload["impute_values"], dtype=np.float64)
     nonfinite_mask = ~np.isfinite(values)

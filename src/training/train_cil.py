@@ -29,9 +29,15 @@ except ImportError:  # pragma: no cover - environment may not have torch yet
     WeightedRandomSampler = None
 
 from src.data.class_mapping import build_seen_class_map, invert_class_map, remap_labels, save_class_map
-from src.data.ddi_dataset import load_feature_columns, load_scaler_payload, load_split_arrays
+from src.data.ddi_dataset import (
+    load_class_counts,
+    load_feature_columns,
+    load_scaler_payload,
+    load_split_arrays,
+)
 from src.data.replay_buffer import ReplayBuffer
-from src.eval.classification_metrics import compute_classification_metrics, compute_per_class_f1
+from src.eval.classification_metrics import compute_classification_metrics
+from src.eval.classwise_metrics import ClasswiseTracker, compute_classwise_metrics
 from src.eval.continual_metrics import compute_forgetting, init_result_matrix, result_matrix_to_frame
 from src.methods.ewc import compute_fisher, ewc_penalty, grow_head_state
 from src.methods.replay import build_training_arrays as build_replay_training_arrays
@@ -112,6 +118,18 @@ def load_task_spec(path: Path) -> dict[str, Any]:
     return payload
 
 
+def build_first_task_lookup(tasks: list[dict[str, Any]]) -> dict[int, int]:
+    first_task_by_class: dict[int, int] = {}
+    for task in tasks:
+        task_id = int(task["task_id"])
+        for raw_class_id in task["classes"]:
+            class_id = int(raw_class_id)
+            if class_id in first_task_by_class:
+                raise ValueError(f"Class {class_id} appears in more than one task.")
+            first_task_by_class[class_id] = task_id
+    return first_task_by_class
+
+
 def build_tensor_dataset(features: np.ndarray, labels: np.ndarray) -> TensorDataset:
     require_torch()
     x = torch.from_numpy(np.asarray(features, dtype=np.float32))
@@ -140,12 +158,16 @@ def evaluate_model(
     criterion: nn.Module,
     device: str,
     inverse_seen_map: dict[int, int],
-) -> tuple[dict[str, float], pd.DataFrame]:
+    *,
+    evaluation_class_indices: list[int] | None = None,
+    include_classwise: bool = False,
+) -> tuple[dict[str, float], pd.DataFrame | None]:
     model.eval()
     total_loss = 0.0
     total_examples = 0
     all_true: list[np.ndarray] = []
     all_pred: list[np.ndarray] = []
+    all_probabilities: list[np.ndarray] = []
 
     with torch.no_grad():
         for features, labels in loader:
@@ -159,16 +181,29 @@ def evaluate_model(
             preds = logits.argmax(dim=1)
             all_true.append(labels.cpu().numpy())
             all_pred.append(preds.cpu().numpy())
+            if include_classwise:
+                all_probabilities.append(F.softmax(logits, dim=1).cpu().numpy())
 
     y_true = np.concatenate(all_true)
     y_pred = np.concatenate(all_pred)
-    metrics = compute_classification_metrics(y_true, y_pred)
+    metrics = compute_classification_metrics(
+        y_true,
+        y_pred,
+        labels=evaluation_class_indices,
+    )
     metrics["loss"] = total_loss / max(total_examples, 1)
 
-    class_indices = sorted(np.unique(y_true).tolist())
-    raw_class_ids = [inverse_seen_map[index] for index in class_indices]
-    per_class = compute_per_class_f1(y_true, y_pred, class_indices, raw_class_ids)
-    return metrics, per_class
+    classwise = None
+    if include_classwise:
+        probabilities = np.concatenate(all_probabilities)
+        classwise = compute_classwise_metrics(
+            y_true,
+            y_pred,
+            probabilities,
+            class_indices=sorted(inverse_seen_map),
+            inverse_class_map=inverse_seen_map,
+        )
+    return metrics, classwise
 
 
 def expand_model_for_seen_classes(
@@ -332,10 +367,20 @@ def main() -> None:
     task_spec = load_task_spec(args.task_file)
     tasks = task_spec["tasks"]
     num_tasks = len(tasks)
+    first_task_by_class = build_first_task_lookup(tasks)
+    train_count_by_class = load_class_counts(args.train)
+    missing_train_counts = sorted(set(first_task_by_class) - set(train_count_by_class))
+    if missing_train_counts:
+        raise ValueError(f"Task classes missing from the full train split: {missing_train_counts}")
+    classwise_tracker = ClasswiseTracker(
+        seed=args.seed,
+        method=args.method,
+        first_task_by_class=first_task_by_class,
+        train_count_by_class=train_count_by_class,
+    )
     result_matrix = init_result_matrix(num_tasks)
     result_rows: list[dict[str, Any]] = []
     best_task_rows: list[dict[str, Any]] = []
-    final_per_class_frames: list[pd.DataFrame] = []
 
     logger.log_event(
         "run_started",
@@ -468,7 +513,14 @@ def main() -> None:
                 theta_star=theta_star if args.method == "ewc" else None,
                 ewc_lambda=args.ewc_lambda if args.method == "ewc" else 0.0,
             )
-            val_metrics, _ = evaluate_model(model, validation_loader, criterion, device, inverse_seen_map)
+            val_metrics, _ = evaluate_model(
+                model,
+                validation_loader,
+                criterion,
+                device,
+                inverse_seen_map,
+                evaluation_class_indices=sorted(inverse_seen_map),
+            )
             logger.log(
                 f"task={task_id} epoch={epoch}/{args.epochs} "
                 f"train_loss={train_loss:.6f} val_loss={val_metrics['loss']:.6f} "
@@ -555,7 +607,16 @@ def main() -> None:
             eval_labels = remap_labels(eval_arrays.labels, current_seen_map)
             eval_dataset = build_tensor_dataset(eval_arrays.features, eval_labels)
             eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False)
-            metrics, per_class = evaluate_model(model.to(device), eval_loader, criterion, device, inverse_seen_map)
+            metrics, _ = evaluate_model(
+                model.to(device),
+                eval_loader,
+                criterion,
+                device,
+                inverse_seen_map,
+                evaluation_class_indices=[
+                    current_seen_map[class_id] for class_id in eval_classes
+                ],
+            )
             result_matrix[task_id, eval_task_id] = metrics["macro_f1"]
             result_rows.append(
                 {
@@ -565,11 +626,6 @@ def main() -> None:
                     **metrics,
                 }
             )
-            if eval_task_id == task_id:
-                per_class.insert(0, "train_task_id", task_id)
-                per_class.insert(1, "eval_task_id", eval_task_id)
-                final_per_class_frames.append(per_class)
-
         seen_test_arrays = load_split_arrays(
             args.test,
             feature_columns,
@@ -580,7 +636,19 @@ def main() -> None:
         seen_test_labels = remap_labels(seen_test_arrays.labels, current_seen_map)
         seen_test_dataset = build_tensor_dataset(seen_test_arrays.features, seen_test_labels)
         seen_test_loader = DataLoader(seen_test_dataset, batch_size=args.batch_size, shuffle=False)
-        final_seen_metrics, _ = evaluate_model(model.to(device), seen_test_loader, criterion, device, inverse_seen_map)
+        final_seen_metrics, classwise_metrics = evaluate_model(
+            model.to(device),
+            seen_test_loader,
+            criterion,
+            device,
+            inverse_seen_map,
+            evaluation_class_indices=sorted(inverse_seen_map),
+            include_classwise=True,
+        )
+        if classwise_metrics is None:
+            raise RuntimeError("Seen-class evaluation did not return class-wise metrics.")
+        classwise_tracker.add_task(task_id, classwise_metrics)
+        trajectory_path, forgetting_path = classwise_tracker.save(run_paths["outdir"])
         result_rows.append(
             {
                 "train_task_id": task_id,
@@ -592,22 +660,17 @@ def main() -> None:
         logger.log_event(
             "task_completed",
             f"task={task_id} seen_macro_f1={final_seen_metrics['macro_f1']:.6f} "
-            f"seen_bal_acc={final_seen_metrics['balanced_accuracy']:.6f}",
+            f"seen_bal_acc={final_seen_metrics['balanced_accuracy']:.6f} "
+            f"class_trajectory={trajectory_path} class_forgetting={forgetting_path}",
         )
 
     result_matrix_frame = result_matrix_to_frame(result_matrix)
     forgetting_frame = compute_forgetting(result_matrix)
     metrics_frame = pd.DataFrame(result_rows)
-    per_class_frame = (
-        pd.concat(final_per_class_frames, ignore_index=True)
-        if final_per_class_frames
-        else pd.DataFrame(columns=["train_task_id", "eval_task_id", "raw_class_id", "class_index", "f1"])
-    )
 
     result_matrix_frame.to_csv(run_paths["outdir"] / "task_matrix.csv", index=False)
     forgetting_frame.to_csv(run_paths["outdir"] / "forgetting.csv", index=False)
     metrics_frame.to_csv(run_paths["metrics_csv"], index=False)
-    per_class_frame.to_csv(run_paths["per_class_metrics_csv"], index=False)
     final_seen_metrics = metrics_frame[metrics_frame["eval_task_id"] == "seen_all"].iloc[-1].to_dict()
     write_run_summary(
         run_paths["run_summary_md"],
