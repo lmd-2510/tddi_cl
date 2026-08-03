@@ -80,6 +80,17 @@ Các bước nhỏ:
 
 Full run đã hoàn thành cho 4 methods × 5 seeds. Xem [S01 full experiment results](results/s01_results.md).
 
+S01 đã được khóa kỹ thuật sau audit ngày 2026-08-03:
+
+- classifier expansion và teacher/student logit alignment có regression tests;
+- run mới từ chối output directory đã có nội dung, có `run_id` duy nhất và lưu `run_config.json`;
+- sampler, memory trước/sau task và optimizer steps được lưu trong `training_audit.csv`;
+- validation policy được ghi rõ là early stopping trên toàn bộ seen validation classes.
+
+Hai CLI method `replay` và `replay_distill` của full run cũ lần lượt có protocol chính xác là
+`replay_balanced_per_class_cap50` và `replay_distill_balanced_per_class_cap50`.
+Đây vẫn là legacy per-class-cap baseline; fixed-total-memory và fixed-replay exposure thuộc S04.
+
 Schema tối thiểu của `[O01]`:
 
 ```text
@@ -109,14 +120,32 @@ Input descriptors
 
 Các bước nhỏ:
 
-- [ ] **S02.1** Tách encoder và classifier trong model interface.
-- [ ] **S02.2** Cho evaluator trả về logits, probabilities, predictions và labels.
-- [ ] **S02.3** Cho evaluator trả về latent feature của từng mẫu.
-- [ ] **S02.4** Lưu prediction-level data vào `[O03]`.
-- [ ] **S02.5** Lưu latent features và metadata vào `[O04]`.
-- [ ] **S02.6** Kiểm tra sample ID và label khớp giữa `[O03]` và `[O04]`.
+- [x] **S02.1** Tách encoder và classifier trong model interface.
+- [x] **S02.2** Cho evaluator trả về logits, probabilities, predictions và labels.
+- [x] **S02.3** Cho evaluator trả về latent feature của từng mẫu.
+- [x] **S02.4** Lưu prediction-level data vào `[O03]`.
+- [x] **S02.5** Lưu latent features và metadata vào `[O04]`.
+- [x] **S02.6** Kiểm tra sample ID và label khớp giữa `[O03]` và `[O04]`.
 
 Các artifact này phục vụ cả uncertainty analysis và prototype replay.
+
+S02 dùng `--export-s02` và mặc định export cả `validation test`. Mỗi run tự sở hữu
+`<run>/s02`, schema version được ghi trong manifest thay vì tạo thêm tầng directory:
+
+```text
+<run>/s02/
+├── manifest.json
+└── task_<train_task>/
+    ├── validation/{predictions.parquet,latent_features.npz}
+    └── test/{predictions.parquet,latent_features.npz}
+```
+
+Khóa join là `(run_id, train_task, split, sample_id)`, trong đó
+`sample_id = <drug_id_a>|<drug_id_b>`. Export fail-fast khi pair bị trùng, artifact đã
+tồn tại, provenance lệch, vector sai shape/dtype hoặc có NaN/Inf. O03 dùng Parquet ZSTD
+với explicit PyArrow schema; O04 dùng compressed NumPy arrays và phải đọc được với
+`allow_pickle=False`. Validation là nguồn cho calibration, uncertainty và replay
+decisions; test artifact chỉ dùng reporting.
 
 ### 4.3. S03 — Tích hợp calibration
 
@@ -241,8 +270,8 @@ Các bước nhỏ:
 | --- | --- | --- | --- |
 | **O01** | `class_trajectory.csv` | Metric của từng class sau từng task | S01 |
 | **O02** | `class_forgetting.csv` | Best F1, current F1 và forgetting theo class/task | S01 |
-| **O03** | `predictions.parquet` | Logits, probabilities, predictions, labels và sample metadata | S02 |
-| **O04** | `latent_features.npz` | Latent features và khóa liên kết tới từng mẫu | S02 |
+| **O03** | `s02/task_<t>/<split>/predictions.parquet` | Logits, probabilities, predictions, labels và sample metadata | S02 |
+| **O04** | `s02/task_<t>/<split>/latent_features.npz` | Latent features và khóa liên kết tới từng mẫu | S02 |
 | **O05** | `calibration_by_task.csv` | ECE, Brier, NLL, confidence và high-confidence error rate | S03 |
 | **O06** | `replay_budget_audit.csv` | Memory và replay budget thực tế theo task/class | S04 |
 | **O07** | `fixed_budget_baseline.csv` | Kết quả của `replay_distill_fixed_budget_uniform` | S04 |
@@ -271,7 +300,7 @@ Milestone hoàn thành khi đáp ứng toàn bộ các điều kiện sau:
 
 - [x] **C01** Có F1 trajectory của từng class qua tất cả các task.
 - [x] **C02** Tính được class-wise forgetting.
-- [ ] **C03** Có probabilities, confidence, entropy và latent representation.
+- [x] **C03** Có probabilities, confidence, entropy và latent representation.
 - [ ] **C04** Có calibration metrics theo task.
 - [ ] **C05** Có fixed-memory và fixed-replay baseline.
 - [ ] **C06** Có kết luận sơ bộ về việc rare classes có bị quên nhiều hơn không.

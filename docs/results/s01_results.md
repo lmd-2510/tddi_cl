@@ -11,11 +11,18 @@ tasks   = 8
 device  = mps
 ```
 
-Tổng cộng có 20 runs trong `outputs/runs_s01_full/`. Các giá trị dưới đây là mean ± sample standard deviation trên 5 seeds.
+Tổng cộng có 20 output directories trong `outputs/runs_s01_full/`. Các giá trị dưới đây là mean ± sample standard deviation trên 5 seeds.
+
+Tên protocol đầy đủ của hai replay aliases trong bảng là:
+
+- `replay` = `replay_balanced_per_class_cap50`;
+- `replay_distill` = `replay_distill_balanced_per_class_cap50`.
+
+Hai protocol dùng inverse-class-frequency sampling với replacement và per-class memory cap, chưa phải fixed-total-budget baselines.
 
 ## 2. Kiểm tra tính toàn vẹn
 
-Tất cả 20 runs đều đạt các điều kiện:
+Tất cả 20 output directories đều đạt các điều kiện file-level:
 
 - có event `run_completed`;
 - `class_trajectory.csv`: 864 dòng/run;
@@ -29,6 +36,20 @@ Tất cả 20 runs đều đạt các điều kiện:
 - forgetting không âm và bằng 0 tại lần đầu class xuất hiện.
 
 Kết quả gộp gồm 17.280 class-trajectory rows và 17.280 class-forgetting rows.
+
+### 2.1. Qualification sau provenance audit
+
+Audit sau full run phát hiện 7/20 directories có `events.csv` được append từ nhiều execution. CSV kết quả và checkpoint trong mỗi directory được overwrite bởi execution cuối nên vẫn vượt qua các invariant dữ liệu trên, nhưng lịch sử run không còn provenance một-một sạch.
+
+Pipeline đã được khóa cho các run tiếp theo:
+
+- từ chối `--outdir` đã có nội dung;
+- gắn một `run_id` vào toàn bộ events;
+- lưu full arguments, git state và resolved protocol vào `run_config.json`;
+- lưu sampler, memory và optimizer-step audit theo task vào `training_audit.csv`;
+- có regression tests cho classifier remapping và teacher/student logit alignment.
+
+Vì vậy, kết quả trong tài liệu này được giữ như exploratory legacy results của đúng protocol nêu trên. Chúng không được dùng để kết luận riêng hiệu ứng replay memory hoặc hiệu quả fixed-budget.
 
 ## 3. Final seen-class performance
 

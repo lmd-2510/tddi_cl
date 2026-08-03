@@ -18,6 +18,9 @@ Tổng cộng có **20 CIL runs**. EWC được để ở phần chạy bổ sun
 
 > **Trạng thái:** 20/20 main runs đã hoàn thành ngày 2026-08-03. Xem [S01 full experiment results](../../results/s01_results.md).
 
+Các run này không được backfill S02. Với clean runs tạo O01–O04 trong cùng execution,
+xem [hướng dẫn S02](s02_guilde.md).
+
 ## 1. Chuẩn bị
 
 Chạy các lệnh từ thư mục gốc `DDI-CIL`.
@@ -81,7 +84,7 @@ Copy toàn bộ block dưới đây vào terminal:
 set -eo pipefail
 
 S01_PYTHON=".venv/bin/python"
-S01_OUT_ROOT="outputs/runs_s01_full"
+S01_OUT_ROOT="outputs/runs_s01_locked"
 S01_SEEDS=(0 1 2 3 4)
 S01_METHODS=(sequential replay replay_distill joint_seen)
 
@@ -106,7 +109,10 @@ for method in "${S01_METHODS[@]}"; do
     fi
 
     echo "Running method=${method} seed=${seed}"
-    mkdir -p "${outdir}"
+    if [[ -e "${outdir}" ]]; then
+      echo "Refusing to reuse existing run directory: ${outdir}" >&2
+      exit 1
+    fi
 
     "${S01_PYTHON}" src/training/train_cil.py \
       --train train_extracted.parquet \
@@ -129,6 +135,8 @@ done
 ```
 
 Không thêm các option `--max-*-rows-*` khi chạy full experiment.
+
+`train_cil.py` từ chối output directory đã có nội dung. Không chạy lại vào `outputs/runs_s01_full`; đó là artifact legacy. Mỗi clean rerun phải dùng root mới như `outputs/runs_s01_locked`.
 
 Nếu MPS hết memory, dùng `--batch-size 256` cho **toàn bộ 20 runs**. Không trộn kết quả từ các batch size khác nhau trong cùng một bảng so sánh.
 
@@ -314,7 +322,7 @@ outputs/runs_s01_ablation/seed0_replay_distill_mem100_alpha1_temp2_feat05
 Ví dụ theo dõi `replay_distill`, seed 0:
 
 ```bash
-tail -f outputs/runs_s01_full/random_seed0_replay_distill_mlpbase/train.log
+tail -f outputs/runs_s01_locked/random_seed0_replay_distill_mlpbase/train.log
 ```
 
 Một run hoàn thành phải đi qua `task_id=0` đến `task_id=7`.
@@ -326,8 +334,8 @@ Không chạy hai process MPS cùng lúc. Chạy tuần tự sẽ ổn định h
 Sau khi chạy xong, số file trajectory và forgetting đều phải bằng 20:
 
 ```bash
-find outputs/runs_s01_full -name class_trajectory.csv | wc -l
-find outputs/runs_s01_full -name class_forgetting.csv | wc -l
+find outputs/runs_s01_locked -name class_trajectory.csv | wc -l
+find outputs/runs_s01_locked -name class_forgetting.csv | wc -l
 ```
 
 Kết quả mong đợi:
@@ -341,11 +349,12 @@ Kiểm tra schema, số dòng và duplicate key của toàn bộ runs:
 
 ```bash
 .venv/bin/python - <<'PY'
+import json
 from pathlib import Path
 
 import pandas as pd
 
-root = Path("outputs/runs_s01_full")
+root = Path("outputs/runs_s01_locked")
 trajectory_files = sorted(root.glob("*/class_trajectory.csv"))
 
 if len(trajectory_files) != 20:
@@ -362,6 +371,30 @@ for path in trajectory_files:
     if frame.loc[frame["train_task"] == 7, "class_id"].nunique() != 178:
         raise SystemExit(f"{path}: final task does not contain 178 classes")
 
+    run_dir = path.parent
+    events = pd.read_csv(run_dir / "events.csv")
+    event_counts = events["event_type"].value_counts()
+    expected_counts = {
+        "run_started": 1,
+        "task_started": 8,
+        "training_protocol": 8,
+        "task_completed": 8,
+        "run_completed": 1,
+    }
+    for event_type, expected in expected_counts.items():
+        actual = int(event_counts.get(event_type, 0))
+        if actual != expected:
+            raise SystemExit(f"{run_dir}: {event_type} expected {expected}, found {actual}")
+    if events["run_id"].nunique() != 1:
+        raise SystemExit(f"{run_dir}: events contain more than one run_id")
+
+    config = json.loads((run_dir / "run_config.json").read_text())
+    if config["run_id"] != events["run_id"].iloc[0]:
+        raise SystemExit(f"{run_dir}: config/event run_id mismatch")
+    audit = pd.read_csv(run_dir / "training_audit.csv")
+    if len(audit) != 8 or audit["task"].tolist() != list(range(8)):
+        raise SystemExit(f"{run_dir}: invalid training audit")
+
 print("All 20 S01 runs are valid.")
 PY
 ```
@@ -375,6 +408,8 @@ metrics.csv
 task_matrix.csv
 forgetting.csv
 run_summary.md
+run_config.json
+training_audit.csv
 train.log
 checkpoints/
 ```
@@ -390,6 +425,8 @@ Khi một run hoàn thành đủ 8 tasks, kết quả cấu trúc mong đợi l�
 | `metrics.csv` | 44 dòng gồm task-group và seen-all evaluations |
 | `task_matrix.csv` | 8 dòng, tương ứng 8 train tasks |
 | `forgetting.csv` | 9 dòng: 8 tasks và `mean_old_tasks` |
+| `run_config.json` | Một run ID, full CLI arguments, git state và resolved protocol |
+| `training_audit.csv` | 8 dòng audit sampler, memory và optimizer steps |
 | `seen_class_map_task_*.json` | 8 files |
 | `checkpoints/task_*_model.pt` | 8 checkpoints |
 
@@ -449,7 +486,7 @@ Chỉ chạy phần này sau khi 20 main runs đã hoàn tất:
 set -eo pipefail
 
 S01_PYTHON=".venv/bin/python"
-S01_OUT_ROOT="outputs/runs_s01_full"
+S01_OUT_ROOT="outputs/runs_s01_locked"
 S01_SEEDS=(0 1 2 3 4)
 
 export PYTORCH_ENABLE_MPS_FALLBACK=1
@@ -477,7 +514,9 @@ done
 ## 8. Lưu ý
 
 - Mỗi run phải dùng một output directory riêng.
+- Pipeline fail-fast nếu output directory đã có bất kỳ nội dung nào; không append hoặc resume tại chỗ.
 - Không dùng output từ smoke run để phân tích chính thức.
 - Không commit checkpoints, CSV results hoặc raw data vào Git.
 - Nếu một run bị dừng, nên chuyển directory cũ sang tên backup rồi chạy lại bằng directory sạch.
 - `class_trajectory.csv` và `class_forgetting.csv` được cập nhật sau mỗi task, nên có thể dùng để kiểm tra tiến độ của partial run.
+- Không bật S02 bằng cách chạy lại vào các S01 directories; exporter chỉ dành cho clean run có cùng provenance từ đầu.
