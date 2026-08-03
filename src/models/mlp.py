@@ -72,8 +72,27 @@ if nn is not None:
             self.backbone = nn.Sequential(*layers)
             self.head = nn.Linear(in_dim, config.num_classes)
 
+        def encode(self, x: torch.Tensor) -> torch.Tensor:
+            """Map input descriptors to the final latent representation."""
+
+            return self.backbone(x)
+
+        def classify(self, latent: torch.Tensor) -> torch.Tensor:
+            """Map latent representations to class logits."""
+
+            return self.head(latent)
+
+        def forward_with_latent(
+            self,
+            x: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            """Return logits and their corresponding latent representations."""
+
+            latent = self.encode(x)
+            return self.classify(latent), latent
+
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.head(self.backbone(x))
+            return self.classify(self.encode(x))
 
 
     def _build_activation(name: ActivationName) -> nn.Module:

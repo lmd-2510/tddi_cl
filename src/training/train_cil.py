@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import subprocess
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,9 +40,15 @@ from src.data.ddi_dataset import (
     load_split_arrays,
 )
 from src.data.replay_buffer import ReplayBuffer
-from src.eval.classification_metrics import compute_classification_metrics
-from src.eval.classwise_metrics import ClasswiseTracker, compute_classwise_metrics
+from src.eval.cil_evaluation import EvaluationResult, evaluate_model
+from src.eval.classwise_metrics import ClasswiseTracker
 from src.eval.continual_metrics import compute_forgetting, init_result_matrix, result_matrix_to_frame
+from src.eval.s02_artifacts import (
+    DRUG_ID_A_COLUMN,
+    DRUG_ID_B_COLUMN,
+    S02ExportContext,
+    export_s02_artifacts,
+)
 from src.methods.ewc import compute_fisher, ewc_penalty, grow_head_state
 from src.methods.replay import build_training_arrays as build_replay_training_arrays
 from src.methods.sequential import build_training_arrays as build_sequential_training_arrays
@@ -96,6 +106,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-rows-per-task", type=int, default=None)
     parser.add_argument("--max-validation-rows-per-task", type=int, default=None)
     parser.add_argument("--max-test-rows-per-task", type=int, default=None)
+    parser.add_argument("--export-s02", action="store_true")
+    parser.add_argument(
+        "--s02-splits",
+        nargs="+",
+        choices=["validation", "test"],
+        default=["validation", "test"],
+    )
     return parser.parse_args()
 
 
@@ -152,58 +169,159 @@ def build_balanced_sampler(labels: np.ndarray) -> "WeightedRandomSampler":
     )
 
 
-def evaluate_model(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
-    device: str,
-    inverse_seen_map: dict[int, int],
-    *,
-    evaluation_class_indices: list[int] | None = None,
-    include_classwise: bool = False,
-) -> tuple[dict[str, float], pd.DataFrame | None]:
-    model.eval()
-    total_loss = 0.0
-    total_examples = 0
-    all_true: list[np.ndarray] = []
-    all_pred: list[np.ndarray] = []
-    all_probabilities: list[np.ndarray] = []
+def ordered_raw_classes(class_map: dict[int, int]) -> list[int]:
+    """Return raw class IDs in the exact order used by model output columns."""
 
-    with torch.no_grad():
-        for features, labels in loader:
-            features = features.to(device)
-            labels = labels.to(device)
-            logits = model(features)
-            loss = criterion(logits, labels)
-            batch_size = labels.shape[0]
-            total_loss += float(loss.item()) * batch_size
-            total_examples += batch_size
-            preds = logits.argmax(dim=1)
-            all_true.append(labels.cpu().numpy())
-            all_pred.append(preds.cpu().numpy())
-            if include_classwise:
-                all_probabilities.append(F.softmax(logits, dim=1).cpu().numpy())
-
-    y_true = np.concatenate(all_true)
-    y_pred = np.concatenate(all_pred)
-    metrics = compute_classification_metrics(
-        y_true,
-        y_pred,
-        labels=evaluation_class_indices,
-    )
-    metrics["loss"] = total_loss / max(total_examples, 1)
-
-    classwise = None
-    if include_classwise:
-        probabilities = np.concatenate(all_probabilities)
-        classwise = compute_classwise_metrics(
-            y_true,
-            y_pred,
-            probabilities,
-            class_indices=sorted(inverse_seen_map),
-            inverse_class_map=inverse_seen_map,
+    expected_indices = list(range(len(class_map)))
+    actual_indices = sorted(class_map.values())
+    if actual_indices != expected_indices:
+        raise ValueError(
+            "Class map must use dense output indices before aligning logits. "
+            f"Expected {expected_indices}, got {actual_indices}."
         )
-    return metrics, classwise
+    return [raw_class for raw_class, _ in sorted(class_map.items(), key=lambda item: item[1])]
+
+
+def build_student_old_indices(
+    teacher_raw_classes: list[int],
+    current_seen_map: dict[int, int],
+) -> list[int]:
+    """Align student logit columns to the teacher's raw-class column order."""
+
+    if len(set(teacher_raw_classes)) != len(teacher_raw_classes):
+        raise ValueError("Teacher raw classes must not contain duplicates.")
+    missing = sorted(set(teacher_raw_classes) - set(current_seen_map))
+    if missing:
+        raise ValueError(f"Teacher classes missing from current class map: {missing}")
+    return [current_seen_map[raw_class] for raw_class in teacher_raw_classes]
+
+
+def method_protocol_name(method: str, memory_per_class: int) -> str:
+    if method == "replay":
+        return f"replay_balanced_per_class_cap{memory_per_class}"
+    if method == "replay_distill":
+        return f"replay_distill_balanced_per_class_cap{memory_per_class}"
+    if method == "joint_seen":
+        return "cumulative_joint_seen_natural_sampling"
+    return f"{method}_natural_sampling"
+
+
+def sampler_policy_name(method: str) -> str:
+    if method in {"replay", "replay_distill"}:
+        return "inverse_class_frequency_with_replacement"
+    return "natural_shuffle_without_replacement"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _git_state(project_root: Path) -> dict[str, str | bool | None]:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=project_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        return {"commit": commit, "dirty": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": None, "dirty": None}
+
+
+def write_run_config(
+    path: Path,
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    device: str,
+    task_spec: dict[str, Any],
+) -> None:
+    arguments = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+    }
+    payload = {
+        "run_id": run_id,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "git": _git_state(PROJECT_ROOT),
+        "arguments": arguments,
+        "resolved": {
+            "device": device,
+            "method_protocol": method_protocol_name(args.method, args.memory_per_class),
+            "sampler_policy": sampler_policy_name(args.method),
+            "validation_policy": "all_seen_classes_for_early_stopping",
+            "order_seed": task_spec.get("seed"),
+            "training_seed": args.seed,
+            "task_protocol": task_spec.get("protocol"),
+            "num_tasks": len(task_spec["tasks"]),
+            "task_file_sha256": _sha256_file(args.task_file),
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def export_s02_evaluation(
+    result: EvaluationResult,
+    metadata: dict[str, np.ndarray] | None,
+    *,
+    run_paths: dict[str, Path],
+    run_id: str,
+    args: argparse.Namespace,
+    task_id: int,
+    split: str,
+    checkpoint_path: Path,
+    logger: RunLogger,
+) -> None:
+    """Publish one already-collected evaluation result and log its completion."""
+
+    if result.outputs is None or metadata is None:
+        raise RuntimeError(f"S02 {split} export requires outputs and drug-pair metadata.")
+    paths = export_s02_artifacts(
+        result.outputs,
+        metadata,
+        S02ExportContext(
+            run_id=run_id,
+            seed=args.seed,
+            method=args.method,
+            method_protocol=method_protocol_name(args.method, args.memory_per_class),
+            train_task=task_id,
+            split=split,
+            checkpoint_path=checkpoint_path,
+            run_config_path=run_paths["run_config_json"],
+        ),
+        run_paths["outdir"] / "s02",
+    )
+    logger.log_event(
+        "s02_exported",
+        f"task={task_id} split={split} rows={result.outputs.labels.shape[0]}",
+        payload_json=json.dumps(
+            {
+                "task": task_id,
+                "split": split,
+                "rows": int(result.outputs.labels.shape[0]),
+                "latent_dim": int(result.outputs.latent_features.shape[1]),
+                "predictions": str(paths.predictions_path),
+                "latent_features": str(paths.latent_features_path),
+                "manifest": str(paths.manifest_path),
+            },
+            sort_keys=True,
+        ),
+    )
 
 
 def expand_model_for_seen_classes(
@@ -270,7 +388,10 @@ def train_one_epoch(
 
     student_old_indices: list[int] = []
     if teacher_model is not None and teacher_raw_classes is not None and current_seen_map is not None:
-        student_old_indices = [current_seen_map[raw_class] for raw_class in teacher_raw_classes]
+        student_old_indices = build_student_old_indices(
+            teacher_raw_classes,
+            current_seen_map,
+        )
         teacher_model.eval()
 
     for features, labels in loader:
@@ -284,14 +405,19 @@ def train_one_epoch(
         if teacher_model is not None and student_old_indices:
             with torch.no_grad():
                 teacher_logits = teacher_model(features)
-                teacher_features = teacher_model.backbone(features)
+                teacher_features = teacher_model.encode(features)
+            if teacher_logits.shape[1] != len(student_old_indices):
+                raise ValueError(
+                    "Teacher logit width does not match the recorded teacher class order: "
+                    f"{teacher_logits.shape[1]} != {len(student_old_indices)}"
+                )
             student_old_logits = logits[:, student_old_indices]
             distill_loss = F.kl_div(
                 F.log_softmax(student_old_logits / temperature, dim=1),
                 F.softmax(teacher_logits / temperature, dim=1),
                 reduction="batchmean",
             ) * (temperature ** 2)
-            student_features = model.backbone(features)
+            student_features = model.encode(features)
             feature_distill_loss = F.mse_loss(student_features, teacher_features)
             loss = loss + distill_alpha * distill_loss + feature_distill_weight * feature_distill_loss
 
@@ -311,7 +437,9 @@ def train_one_epoch(
 def write_run_summary(
     path: Path,
     *,
+    run_id: str,
     method: str,
+    method_protocol: str,
     task_file: Path,
     best_task_metrics: list[dict[str, Any]],
     final_test_metrics: dict[str, float],
@@ -319,8 +447,11 @@ def write_run_summary(
     lines = [
         "# CIL Run Summary",
         "",
+        f"- run_id: `{run_id}`",
         f"- method: `{method}`",
+        f"- method_protocol: `{method_protocol}`",
         f"- task_file: `{task_file}`",
+        "- validation_policy: `all_seen_classes_for_early_stopping`",
         "",
         "## Per-Task Best Validation",
         "",
@@ -349,22 +480,32 @@ def main() -> None:
     args = parse_args()
     require_torch()
 
-    run_paths = ensure_run_paths(args.outdir)
-    logger = RunLogger(
-        log_path=run_paths["train_log"],
-        events_path=run_paths["events_csv"],
-        mirror_log_path=run_paths["stdout_log"],
-    )
-    checkpoint_dir = run_paths["outdir"] / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    memory_dir = run_paths["outdir"] / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-
+    run_id = uuid.uuid4().hex
+    run_paths = ensure_run_paths(args.outdir, require_empty=True)
     set_global_seed(args.seed)
     device = resolve_device(args.device)
     feature_columns = load_feature_columns(args.feature_cols)
     scaler_payload = load_scaler_payload(args.scaler)
     task_spec = load_task_spec(args.task_file)
+    write_run_config(
+        run_paths["run_config_json"],
+        args=args,
+        run_id=run_id,
+        device=device,
+        task_spec=task_spec,
+    )
+
+    checkpoint_dir = run_paths["outdir"] / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir = run_paths["outdir"] / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    logger = RunLogger(
+        log_path=run_paths["train_log"],
+        events_path=run_paths["events_csv"],
+        mirror_log_path=run_paths["stdout_log"],
+        run_id=run_id,
+    )
+
     tasks = task_spec["tasks"]
     num_tasks = len(tasks)
     first_task_by_class = build_first_task_lookup(tasks)
@@ -381,10 +522,22 @@ def main() -> None:
     result_matrix = init_result_matrix(num_tasks)
     result_rows: list[dict[str, Any]] = []
     best_task_rows: list[dict[str, Any]] = []
+    training_audit_rows: list[dict[str, Any]] = []
 
     logger.log_event(
         "run_started",
-        f"CIL training started method={args.method} tasks={num_tasks} device={device}",
+        f"CIL training started run_id={run_id} method={args.method} "
+        f"protocol={method_protocol_name(args.method, args.memory_per_class)} "
+        f"tasks={num_tasks} device={device}",
+        payload_json=json.dumps(
+            {
+                "run_id": run_id,
+                "method_protocol": method_protocol_name(args.method, args.memory_per_class),
+                "sampler_policy": sampler_policy_name(args.method),
+                "validation_policy": "all_seen_classes_for_early_stopping",
+            },
+            sort_keys=True,
+        ),
     )
 
     replay_buffer = ReplayBuffer(memory_per_class=args.memory_per_class, random_seed=args.seed)
@@ -406,6 +559,9 @@ def main() -> None:
         )
         current_seen_map = build_seen_class_map(seen_raw_classes)
         inverse_seen_map = invert_class_map(current_seen_map)
+        memory_before = replay_buffer.total_size
+        if task_id == 0 and memory_before != 0:
+            raise RuntimeError("Replay memory must be empty before task 0.")
 
         logger.log_event(
             "task_started",
@@ -424,9 +580,12 @@ def main() -> None:
             feature_columns,
             class_ids=seen_raw_classes,
             scaler_payload=scaler_payload,
+            include_metadata=args.export_s02 and "validation" in args.s02_splits,
+            meta_cols=[DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN],
             max_rows=args.max_validation_rows_per_task,
         )
 
+        replay_examples_available = 0
         if args.method == "joint_seen":
             train_seen = load_split_arrays(
                 args.train,
@@ -444,6 +603,9 @@ def main() -> None:
             )
         else:
             replay_features, replay_raw_labels = replay_buffer.get_all()
+            replay_examples_available = int(replay_raw_labels.shape[0])
+            if task_id == 0 and replay_examples_available != 0:
+                raise RuntimeError("Replay examples must be empty at task 0.")
             train_features, train_raw_labels = build_replay_training_arrays(
                 current_train.features,
                 current_train.labels,
@@ -462,6 +624,33 @@ def main() -> None:
         else:
             train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
         validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False)
+        samples_drawn_per_epoch = len(train_loader.sampler)
+        old_class_count = len(previous_seen_map or {})
+        expected_replay_draws = 0.0
+        if args.method in {"replay", "replay_distill"} and seen_raw_classes:
+            expected_replay_draws = (
+                samples_drawn_per_epoch * old_class_count / len(seen_raw_classes)
+            )
+        logger.log_event(
+            "training_protocol",
+            f"task={task_id} sampler={sampler_policy_name(args.method)} "
+            f"current_examples={len(current_train.labels)} "
+            f"replay_examples={replay_examples_available} "
+            f"training_examples={len(train_local_labels)} "
+            f"draws_per_epoch={samples_drawn_per_epoch}",
+            payload_json=json.dumps(
+                {
+                    "task": task_id,
+                    "sampler_policy": sampler_policy_name(args.method),
+                    "current_examples": int(len(current_train.labels)),
+                    "replay_examples_available": replay_examples_available,
+                    "training_examples": int(len(train_local_labels)),
+                    "samples_drawn_per_epoch": int(samples_drawn_per_epoch),
+                    "expected_replay_draws_per_epoch": expected_replay_draws,
+                },
+                sort_keys=True,
+            ),
+        )
 
         model = expand_model_for_seen_classes(
             previous_model=previous_model,
@@ -488,6 +677,13 @@ def main() -> None:
 
         teacher_model = None
         if args.method == "replay_distill" and previous_model is not None and previous_seen_raw_classes is not None:
+            if previous_seen_map is None:
+                raise RuntimeError("Teacher class map is missing for replay distillation.")
+            expected_teacher_order = ordered_raw_classes(previous_seen_map)
+            if previous_seen_raw_classes != expected_teacher_order:
+                raise RuntimeError(
+                    "Teacher raw-class order does not match teacher logit columns."
+                )
             teacher_model = previous_model.to(device)
             teacher_model.eval()
 
@@ -495,8 +691,10 @@ def main() -> None:
         best_val_metrics: dict[str, float] | None = None
         best_state: dict[str, Any] | None = None
         patience_counter = 0
+        epochs_trained = 0
 
         for epoch in range(1, args.epochs + 1):
+            epochs_trained = epoch
             train_loss = train_one_epoch(
                 model,
                 train_loader,
@@ -513,7 +711,7 @@ def main() -> None:
                 theta_star=theta_star if args.method == "ewc" else None,
                 ewc_lambda=args.ewc_lambda if args.method == "ewc" else 0.0,
             )
-            val_metrics, _ = evaluate_model(
+            val_result = evaluate_model(
                 model,
                 validation_loader,
                 criterion,
@@ -521,6 +719,7 @@ def main() -> None:
                 inverse_seen_map,
                 evaluation_class_indices=sorted(inverse_seen_map),
             )
+            val_metrics = val_result.metrics
             logger.log(
                 f"task={task_id} epoch={epoch}/{args.epochs} "
                 f"train_loss={train_loss:.6f} val_loss={val_metrics['loss']:.6f} "
@@ -552,6 +751,29 @@ def main() -> None:
             raise RuntimeError(f"Task {task_id} did not produce a valid checkpoint.")
 
         model.load_state_dict(best_state)
+        checkpoint_path = checkpoint_dir / f"task_{task_id}_model.pt"
+        if args.export_s02 and "validation" in args.s02_splits:
+            validation_export_result = evaluate_model(
+                model,
+                validation_loader,
+                criterion,
+                device,
+                inverse_seen_map,
+                evaluation_class_indices=sorted(inverse_seen_map),
+                collect_outputs=True,
+            )
+            export_s02_evaluation(
+                validation_export_result,
+                validation_seen.metadata,
+                run_paths=run_paths,
+                run_id=run_id,
+                args=args,
+                task_id=task_id,
+                split="validation",
+                checkpoint_path=checkpoint_path,
+                logger=logger,
+            )
+            del validation_export_result
         best_task_rows.append(
             {
                 "task_id": task_id,
@@ -565,6 +787,41 @@ def main() -> None:
             replay_buffer.update(current_train.features, current_train.labels)
             replay_buffer.save_summary(memory_dir / "memory_summary.csv")
             replay_buffer.save_snapshot(memory_dir / f"memory_after_task_{task_id}.parquet")
+        memory_after = replay_buffer.total_size
+
+        training_audit_rows.append(
+            {
+                "run_id": run_id,
+                "seed": args.seed,
+                "method": args.method,
+                "method_protocol": method_protocol_name(args.method, args.memory_per_class),
+                "task": task_id,
+                "current_class_count": len(current_raw_classes),
+                "old_class_count": old_class_count,
+                "seen_class_count": len(seen_raw_classes),
+                "current_dataset_size": int(len(current_train.labels)),
+                "replay_examples_available": replay_examples_available,
+                "training_dataset_size": int(len(train_local_labels)),
+                "validation_dataset_size": int(len(validation_local_labels)),
+                "memory_before": memory_before,
+                "memory_after": memory_after,
+                "sampler_policy": sampler_policy_name(args.method),
+                "samples_drawn_per_epoch": int(samples_drawn_per_epoch),
+                "expected_replay_draws_per_epoch": expected_replay_draws,
+                "expected_current_draws_per_epoch": (
+                    float(samples_drawn_per_epoch) - expected_replay_draws
+                ),
+                "distillation_active": teacher_model is not None,
+                "batches_per_epoch": len(train_loader),
+                "epochs_trained": epochs_trained,
+                "optimizer_steps": epochs_trained * len(train_loader),
+                "best_epoch": best_epoch,
+            }
+        )
+        pd.DataFrame(training_audit_rows).to_csv(
+            run_paths["training_audit_csv"],
+            index=False,
+        )
 
         if args.method == "replay_distill":
             teacher_checkpoint = checkpoint_dir / f"task_{task_id}_teacher.pt"
@@ -590,7 +847,7 @@ def main() -> None:
         )
         previous_model.load_state_dict(best_state)
         previous_seen_map = dict(current_seen_map)
-        previous_seen_raw_classes = list(seen_raw_classes)
+        previous_seen_raw_classes = ordered_raw_classes(current_seen_map)
         save_class_map(run_paths["outdir"] / f"seen_class_map_task_{task_id}.json", current_seen_map)
 
         final_seen_metrics: dict[str, float] | None = None
@@ -607,7 +864,7 @@ def main() -> None:
             eval_labels = remap_labels(eval_arrays.labels, current_seen_map)
             eval_dataset = build_tensor_dataset(eval_arrays.features, eval_labels)
             eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False)
-            metrics, _ = evaluate_model(
+            eval_result = evaluate_model(
                 model.to(device),
                 eval_loader,
                 criterion,
@@ -617,6 +874,7 @@ def main() -> None:
                     current_seen_map[class_id] for class_id in eval_classes
                 ],
             )
+            metrics = eval_result.metrics
             result_matrix[task_id, eval_task_id] = metrics["macro_f1"]
             result_rows.append(
                 {
@@ -631,12 +889,14 @@ def main() -> None:
             feature_columns,
             class_ids=seen_raw_classes,
             scaler_payload=scaler_payload,
+            include_metadata=args.export_s02 and "test" in args.s02_splits,
+            meta_cols=[DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN],
             max_rows=args.max_test_rows_per_task,
         )
         seen_test_labels = remap_labels(seen_test_arrays.labels, current_seen_map)
         seen_test_dataset = build_tensor_dataset(seen_test_arrays.features, seen_test_labels)
         seen_test_loader = DataLoader(seen_test_dataset, batch_size=args.batch_size, shuffle=False)
-        final_seen_metrics, classwise_metrics = evaluate_model(
+        final_seen_result = evaluate_model(
             model.to(device),
             seen_test_loader,
             criterion,
@@ -644,9 +904,25 @@ def main() -> None:
             inverse_seen_map,
             evaluation_class_indices=sorted(inverse_seen_map),
             include_classwise=True,
+            collect_outputs=args.export_s02 and "test" in args.s02_splits,
         )
+        final_seen_metrics = final_seen_result.metrics
+        classwise_metrics = final_seen_result.classwise_metrics
         if classwise_metrics is None:
             raise RuntimeError("Seen-class evaluation did not return class-wise metrics.")
+        if args.export_s02 and "test" in args.s02_splits:
+            export_s02_evaluation(
+                final_seen_result,
+                seen_test_arrays.metadata,
+                run_paths=run_paths,
+                run_id=run_id,
+                args=args,
+                task_id=task_id,
+                split="test",
+                checkpoint_path=checkpoint_path,
+                logger=logger,
+            )
+        del final_seen_result
         classwise_tracker.add_task(task_id, classwise_metrics)
         trajectory_path, forgetting_path = classwise_tracker.save(run_paths["outdir"])
         result_rows.append(
@@ -674,7 +950,9 @@ def main() -> None:
     final_seen_metrics = metrics_frame[metrics_frame["eval_task_id"] == "seen_all"].iloc[-1].to_dict()
     write_run_summary(
         run_paths["run_summary_md"],
+        run_id=run_id,
         method=args.method,
+        method_protocol=method_protocol_name(args.method, args.memory_per_class),
         task_file=args.task_file,
         best_task_metrics=best_task_rows,
         final_test_metrics={

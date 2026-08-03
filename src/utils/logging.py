@@ -16,6 +16,7 @@ class RunLogger:
     log_path: Path
     events_path: Path
     mirror_log_path: Path | None = None
+    run_id: str = ""
 
     def __post_init__(self) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,7 +27,7 @@ class RunLogger:
             with self.events_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(
                     handle,
-                    fieldnames=["timestamp", "event_type", "message", "payload_json"],
+                    fieldnames=["timestamp", "run_id", "event_type", "message", "payload_json"],
                 )
                 writer.writeheader()
 
@@ -45,11 +46,12 @@ class RunLogger:
         with self.events_path.open("a", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=["timestamp", "event_type", "message", "payload_json"],
+                fieldnames=["timestamp", "run_id", "event_type", "message", "payload_json"],
             )
             writer.writerow(
                 {
                     "timestamp": timestamp,
+                    "run_id": self.run_id,
                     "event_type": event_type,
                     "message": message,
                     "payload_json": payload_json,
@@ -61,8 +63,22 @@ class RunLogger:
         self.event(event_type, message, payload_json=payload_json)
 
 
-def ensure_run_paths(outdir: str | Path) -> dict[str, Path]:
+def ensure_run_paths(
+    outdir: str | Path,
+    *,
+    require_empty: bool = False,
+) -> dict[str, Path]:
     outdir = Path(outdir)
+    if require_empty and outdir.exists():
+        existing_entries = sorted(path.name for path in outdir.iterdir())
+        if existing_entries:
+            preview = ", ".join(existing_entries[:5])
+            if len(existing_entries) > 5:
+                preview += ", ..."
+            raise FileExistsError(
+                f"Run output directory must be empty: {outdir}. "
+                f"Existing entries: {preview}"
+            )
     outdir.mkdir(parents=True, exist_ok=True)
     return {
         "outdir": outdir,
@@ -74,4 +90,6 @@ def ensure_run_paths(outdir: str | Path) -> dict[str, Path]:
         "checkpoint_pt": outdir / "best_model.pt",
         "checkpoint_paths_txt": outdir / "checkpoint_paths.txt",
         "run_summary_md": outdir / "run_summary.md",
+        "run_config_json": outdir / "run_config.json",
+        "training_audit_csv": outdir / "training_audit.csv",
     }
