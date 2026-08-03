@@ -18,7 +18,10 @@ def compute_fisher(model, loader, device: str) -> dict[str, "torch.Tensor"]:
     cross-entropy log-likelihood) over the given loader."""
     model.eval()
     criterion = nn.CrossEntropyLoss()
-    fisher = {name: torch.zeros_like(param) for name, param in model.named_parameters()}
+    fisher = {
+        name: torch.zeros_like(param)
+        for name, param in model.named_parameters()
+    }
     total = 0
     for features, labels in loader:
         features = features.to(device)
