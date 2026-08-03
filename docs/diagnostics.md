@@ -57,15 +57,16 @@ Sau mỗi task, đánh giá toàn bộ class đã học và lưu các trường 
 - số mẫu test;
 - mean confidence;
 - mean entropy;
-- calibration error;
 - task mà class bắt đầu xuất hiện.
+
+Calibration error và calibrated confidence được xử lý riêng trong S03.
 
 Các bước nhỏ:
 
-- [ ] **S01.1** Mở rộng evaluator để tính metric theo từng class.
-- [ ] **S01.2** Gắn metadata về seed, method, train task, class ID và train count.
-- [ ] **S01.3** Ghi trajectory của mỗi class sau từng task vào `[O01]`.
-- [ ] **S01.4** Tính class-wise forgetting theo công thức:
+- [x] **S01.1** Mở rộng evaluator để tính metric theo từng class.
+- [x] **S01.2** Gắn metadata về seed, method, train task, class ID và train count.
+- [x] **S01.3** Ghi trajectory của mỗi class sau từng task vào `[O01]`.
+- [x] **S01.4** Tính class-wise forgetting theo công thức:
 
   $$
   \text{forgetting}_{c,t}
@@ -75,7 +76,9 @@ Các bước nhỏ:
   \operatorname{F1}_{c,t}
   $$
 
-- [ ] **S01.5** Tổng hợp forgetting theo class và task vào `[O02]`.
+- [x] **S01.5** Tổng hợp forgetting theo class và task vào `[O02]`.
+
+Full run đã hoàn thành cho 4 methods × 5 seeds. Xem [S01 full experiment results](results/s01_results.md).
 
 Schema tối thiểu của `[O01]`:
 
@@ -266,8 +269,8 @@ Chỉ bắt đầu chuỗi này sau khi hoàn thành các bước S01–S04 và 
 
 Milestone hoàn thành khi đáp ứng toàn bộ các điều kiện sau:
 
-- [ ] **C01** Có F1 trajectory của từng class qua tất cả các task.
-- [ ] **C02** Tính được class-wise forgetting.
+- [x] **C01** Có F1 trajectory của từng class qua tất cả các task.
+- [x] **C02** Tính được class-wise forgetting.
 - [ ] **C03** Có probabilities, confidence, entropy và latent representation.
 - [ ] **C04** Có calibration metrics theo task.
 - [ ] **C05** Có fixed-memory và fixed-replay baseline.
