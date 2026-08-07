@@ -159,11 +159,17 @@ Các metric tối thiểu:
 
 Các bước nhỏ:
 
-- [ ] **S03.1** Tính calibration metrics trước temperature scaling.
-- [ ] **S03.2** Fit temperature scaling trên validation set.
-- [ ] **S03.3** Tính lại calibration metrics sau scaling.
-- [ ] **S03.4** Tổng hợp metric theo seed, method và task vào `[O05]`.
-- [ ] **S03.5** Xác nhận replay allocation không sử dụng dữ liệu từ test set.
+- [x] **S03.1** Tính calibration metrics trước temperature scaling.
+- [x] **S03.2** Fit temperature scaling trên validation set.
+- [x] **S03.3** Tính lại calibration metrics sau scaling.
+- [x] **S03.4** Tổng hợp metric theo seed, method và task vào `[O05]`.
+- [x] **S03.5** Xác nhận replay allocation không sử dụng dữ liệu từ test set.
+
+S03 fit một scalar temperature riêng cho mỗi `(run_id, train_task)` bằng validation
+logits. Cùng temperature sau đó được áp dụng lên validation và test; test chỉ dùng để
+báo cáo. O05 lưu bốn hàng cho mỗi run/task (`validation test` × `raw
+temperature_scaled`), dùng 15 equal-width ECE bins và ngưỡng high confidence 0.9.
+Khi không có mẫu vượt ngưỡng, error rate để trống và `high_confidence_count=0`.
 
 Uncertainty chỉ được dùng làm tín hiệu khi probabilities đã được kiểm tra về calibration.
 
@@ -301,7 +307,7 @@ Milestone hoàn thành khi đáp ứng toàn bộ các điều kiện sau:
 - [x] **C01** Có F1 trajectory của từng class qua tất cả các task.
 - [x] **C02** Tính được class-wise forgetting.
 - [x] **C03** Có probabilities, confidence, entropy và latent representation.
-- [ ] **C04** Có calibration metrics theo task.
+- [x] **C04** Có calibration metrics theo task.
 - [ ] **C05** Có fixed-memory và fixed-replay baseline.
 - [ ] **C06** Có kết luận sơ bộ về việc rare classes có bị quên nhiều hơn không.
 - [ ] **C07** Có kết luận sơ bộ về việc multi-prototype có cần thiết không.
