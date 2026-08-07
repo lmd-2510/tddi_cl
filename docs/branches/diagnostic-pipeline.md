@@ -28,7 +28,7 @@ Xây dựng diagnostic evaluation pipeline để:
 - [x] **S01** Class-wise evaluation
 - [x] **S02** Prediction và latent representation
 - [x] **S03** Calibration
-- [ ] **S04** Fixed-budget replay baseline
+- [x] **S04** Fixed-budget replay baseline
 - [ ] **E01** Rare-class forgetting
 - [ ] **E02** Multi-prototype diagnostics
 - [ ] **E03** Uncertainty và future forgetting
@@ -47,7 +47,7 @@ Xây dựng diagnostic evaluation pipeline để:
 | S01 | Class-wise evaluation | Done | | 20/20 full MPS runs và output validation pass |
 | S02 | Prediction và latent export | Done | | Schema v1; validation/test shards; A/B smoke pass |
 | S03 | Calibration pipeline | Done | | 20 runs × 8 tasks; validation-only fit; 640 O05 rows |
-| S04 | Fixed-budget baseline | Todo | | |
+| S04 | Fixed-budget baseline | Done | `181328e` | 5/5 full MPS runs; O06/O07 và S03 recalibration pass |
 | E01 | Rare-class forgetting | Todo | | |
 | E02 | Prototype diagnostics | Todo | | |
 | E03 | Uncertainty analysis | Todo | | |
@@ -63,8 +63,8 @@ Trạng thái sử dụng: `Todo`, `In progress`, `Blocked`, `Done`.
 | O03 | `s02/task_<t>/<split>/predictions.parquet` | Done | Explicit PyArrow schema, ZSTD |
 | O04 | `s02/task_<t>/<split>/latent_features.npz` | Done | Compressed arrays, `allow_pickle=False` |
 | O05 | `calibration_by_task.csv` | Done | 640 rows; raw/scaled × validation/test |
-| O06 | `replay_budget_audit.csv` | Todo | |
-| O07 | `fixed_budget_baseline.csv` | Todo | |
+| O06 | `replay_budget_audit.csv` | Done | 5 files, tổng 4.320 rows; exact memory/replay audit |
+| O07 | `fixed_budget_baseline.csv` | Done | 5 seeds; final metrics, forgetting, zero-F1 và budgets |
 | O08 | `rarity_forgetting.csv` | Todo | |
 | O09 | `prototype_diagnostics.csv` | Todo | |
 | O10 | `uncertainty_forgetting.csv` | Todo | |
@@ -87,6 +87,11 @@ Trạng thái sử dụng: `Todo`, `In progress`, `Blocked`, `Done`.
 | `src/eval/calibration_metrics.py` | ECE, Brier, NLL, confidence và safeguarded-Newton temperature scaling | S03 |
 | `src/eval/run_s03_calibration.py` | Audit S02 provenance, validation-only fit và tổng hợp O05 | S03 |
 | `tests/test_s03_calibration.py` | Raw-label mapping, metric, optimizer, leakage và output regression tests | S03 |
+| `src/data/fixed_budget_replay.py` | Max-min fixed buffer và deterministic class-uniform sampler | S04 |
+| `src/training/train_cil.py` | S04 CLI, distillation orchestration, provenance và O06 | S04 |
+| `src/eval/run_s04_aggregation.py` | Strict run/O06/S02 validation và O07 aggregation | S04 |
+| `tests/test_s04_fixed_budget.py` | Allocation, shrinking, exact draws, determinism và audit tests | S04 |
+| `tests/test_s04_aggregation.py` | O07 aggregation/provenance regression test | S04 |
 
 ## 7. Quyết định kỹ thuật
 
@@ -240,21 +245,24 @@ Trạng thái sử dụng: `Todo`, `In progress`, `Blocked`, `Done`.
 - Đã làm: Hoàn thành S03 metrics, scalar temperature scaling và full aggregation cho 20 clean S02 runs.
 - Kết quả: 160/160 fits hội tụ; final-task test ECE giảm rõ trên replay, replay-distill và sequential; xem [`s03_results.md`](../results/s03_results.md).
 - Giới hạn: Temperature scaling tối ưu NLL nên ECE không giảm ở mọi seed; high-confidence error rate không xác định khi không còn mẫu đạt confidence 0.9.
-- Bước tiếp theo: S04 fixed-total-memory/fixed-replay-exposure baseline hoặc E01 trên O01/O02.
+- Đã làm thêm: Hoàn thành S04 fixed-total-memory/fixed-replay-exposure baseline trên 5 clean MPS runs.
+- Kết quả: 5/5 runs và 40/40 tasks pass; memory đúng 6.800 sau mỗi task, replay đúng 6.800 draws/epoch từ task 1; O06 có 4.320 rows, O07 có 5 seeds và S03 recalibration có 160 rows. Xem [`s04_results.md`](../results/s04_results.md).
+- Nhận xét: S04 tăng Macro-F1 so với legacy replay-distill nhưng giảm balanced accuracy và tăng forgetting; legacy không cùng storage/replay budget nên không diễn giải chênh lệch như causal effect.
+- Bước tiếp theo: E01 rare-class forgetting trên baseline S04 đã khóa budget.
 
 ## 11. Điều kiện merge
 
-- [ ] Hoàn thành phạm vi đã chọn.
+- [x] Hoàn thành phạm vi S01–S04 đã chọn.
 - [x] Các test liên quan đều pass.
 - [x] Output schema đã được kiểm tra.
 - [x] Không sử dụng test set cho calibration hoặc replay allocation.
-- [ ] Memory và replay budget được audit.
+- [x] Memory và replay budget được audit.
 - [x] Tài liệu được cập nhật.
 - [x] Không commit dữ liệu hoặc artifact lớn ngoài chủ đích.
 
 ## 12. Tổng kết
 
-- **Kết quả chính:** S01–S03 đã hoàn thành; prediction/latent artifacts và calibration-by-task đều có full 5-seed outputs cùng provenance audit.
-- **Phần chưa hoàn thành:** S04 và E01–E03.
+- **Kết quả chính:** S01–S04 đã hoàn thành; fixed-budget baseline có 5-seed O01–O07, S02 artifacts, calibration và provenance audit đầy đủ.
+- **Phần chưa hoàn thành:** E01–E03.
 - **Quyết định cho bước M1–M5:** Chưa đưa ra trước khi hoàn thành diagnostic experiments.
-- **Follow-up branch/issue:** Clean S04 fixed-budget runs bật `--export-s02`, hoặc E01 rare-class forgetting.
+- **Follow-up branch/issue:** E01 rare-class forgetting dùng S04 làm baseline chính.

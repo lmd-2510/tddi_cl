@@ -189,12 +189,12 @@ Baseline vẫn dùng exemplar replay và distillation, nhưng phải bảo đả
 
 Các bước nhỏ:
 
-- [ ] **S04.1** Định nghĩa total memory budget cố định.
-- [ ] **S04.2** Định nghĩa replay budget cố định theo task hoặc epoch.
-- [ ] **S04.3** Cài đặt uniform allocation giữa các class đã học.
-- [ ] **S04.4** Ghi nhận budget thực tế sau mỗi task.
-- [ ] **S04.5** Chạy baseline với cùng seed và protocol của các phương pháp đối chứng.
-- [ ] **S04.6** Lưu budget audit và kết quả baseline vào `[O06]` và `[O07]`.
+- [x] **S04.1** Định nghĩa total memory budget cố định.
+- [x] **S04.2** Định nghĩa replay budget cố định theo task hoặc epoch.
+- [x] **S04.3** Cài đặt uniform allocation giữa các class đã học.
+- [x] **S04.4** Ghi nhận budget thực tế sau mỗi task.
+- [x] **S04.5** Chạy baseline với cùng seed và protocol của các phương pháp đối chứng.
+- [x] **S04.6** Lưu budget audit và kết quả baseline vào `[O06]` và `[O07]`.
 
 Đây là baseline chính để so sánh với prototype replay.
 
