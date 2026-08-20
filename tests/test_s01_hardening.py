@@ -58,7 +58,14 @@ class ClassAlignmentRegressionTest(unittest.TestCase):
 
         self.assertEqual(teacher_raw_classes, [6, 11, 41])
         self.assertEqual(student_old_indices, [1, 2, 4])
-        torch.testing.assert_close(teacher_logits, aligned_student_logits, rtol=0.0, atol=0.0)
+        # Different classifier widths may select different GEMM kernels; the
+        # copied rows remain equivalent up to normal float32 round-off.
+        torch.testing.assert_close(
+            teacher_logits,
+            aligned_student_logits,
+            rtol=1e-6,
+            atol=1e-7,
+        )
 
     def test_rejects_invalid_teacher_class_order_metadata(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicates"):

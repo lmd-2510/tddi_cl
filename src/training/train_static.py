@@ -48,7 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-cols", required=True, type=Path)
     parser.add_argument("--scaler", required=True, type=Path)
     parser.add_argument("--outdir", required=True, type=Path)
-    parser.add_argument("--variant", choices=["small", "base", "large"], default="base")
+    parser.add_argument(
+        "--variant",
+        choices=["small", "base", "large", "tddi"],
+        default="base",
+    )
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)

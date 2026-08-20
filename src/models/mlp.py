@@ -28,7 +28,7 @@ class MLPConfig:
 
 
 def preset_config(
-    variant: Literal["small", "base", "large"],
+    variant: Literal["small", "base", "large", "tddi"],
     *,
     input_dim: int,
     num_classes: int,
@@ -39,6 +39,9 @@ def preset_config(
     hidden_map = {
         "small": (512, 256),
         "base": (1024, 512),
+        # Canonical name for the numerical-only T-DDI reproduction.  "base"
+        # remains as a backward-compatible alias for existing checkpoints.
+        "tddi": (1024, 512),
         "large": (2048, 1024, 512),
     }
     return MLPConfig(
