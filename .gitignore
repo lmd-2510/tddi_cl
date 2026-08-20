@@ -3,6 +3,7 @@
 .DS_Store
 data/*.zip
 outputs/runs*
+outputs/advanced_protocols/
 dist/
 __pycache__/
 *.pyc

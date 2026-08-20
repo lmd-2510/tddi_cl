@@ -1,5 +1,7 @@
 # Class-Incremental Learning for Multi-Class Tabular Data — Technical Reference
 
+> **Trạng thái:** giữ lại theo yêu cầu như tài liệu nền. Tài liệu này khảo sát nhiều method CIL nhưng không định nghĩa ma trận thử nghiệm hiện tại. Study đang khóa ở P0–P8 + T-DDI + `replay_distill_fixed_budget_uniform`; hãy đọc `README.md` và `docs/PROTOCOL_STUDY.md` trước.
+
 **Scope of this document.** This is written as a self-contained study reference. Assume the reader knows only this: *we have multi-class tabular data (fixed-length numerical feature vectors, no images/text/graphs), and new classes arrive over time — the model must learn them without forgetting old ones, and without unbounded growth in stored data.* No other project context is assumed here. Part 1 is a neutral technical survey of 23 techniques, organized into 4 implementation "streams" plus one reference benchmark. Part 2 is my own opinionated technical recommendation, reasoned from that same bare assumption — not from any specific dataset's quirks.
 
 ---

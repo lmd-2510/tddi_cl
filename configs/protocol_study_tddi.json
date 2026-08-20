@@ -1,0 +1,241 @@
+{
+  "study_id": "tddi_protocol_study_v1",
+  "status": "locked",
+  "scope": {
+    "independent_variable": "task_protocol",
+    "fixed_backbone": "tddi",
+    "fixed_method": "replay_distill_fixed_budget_uniform",
+    "main_protocol": "P4",
+    "reference_protocol": "P0",
+    "stress_protocols": ["P2", "P3"],
+    "advanced_protocols": ["P5", "P6", "P7", "P8"]
+  },
+  "dataset": {
+    "name": "DDI2025",
+    "files": {
+      "train": "train_extracted.parquet",
+      "validation": "validation_extracted.parquet",
+      "test": "test_extracted.parquet"
+    },
+    "rows": {
+      "total": 868069,
+      "train": 520841,
+      "validation": 173614,
+      "test": 173614
+    },
+    "split_ratio": [0.6, 0.2, 0.2],
+    "num_classes": 178,
+    "num_features": 3780,
+    "pair_disjoint": {
+      "ordered_overlap": 0,
+      "unordered_overlap": 0,
+      "reverse_overlap": 0,
+      "duplicate_pairs": 0
+    }
+  },
+  "preprocessing": {
+    "feature_columns": "outputs/audit/feature_columns.json",
+    "scaler": "outputs/preprocess/scaler.pkl",
+    "scaler_type": "standard",
+    "fit_split": "train_only",
+    "impute_strategy": "zero",
+    "pca": false,
+    "feature_selection": false,
+    "row_caps": {
+      "train_per_task": null,
+      "validation_per_task": null,
+      "test_per_task": null
+    }
+  },
+  "task_layout": {
+    "num_tasks": 8,
+    "classes_per_task": [38, 20, 20, 20, 20, 20, 20, 20],
+    "total_classes": 178,
+    "class_id_policy": "actual_raw_class_ids"
+  },
+  "model": {
+    "variant": "tddi",
+    "architecture": "MLP",
+    "input_dim": 3780,
+    "hidden_dims": [1024, 512],
+    "classifier": "expandable_linear_head",
+    "normalization": "layernorm",
+    "activation": "gelu",
+    "dropout": 0.2
+  },
+  "training": {
+    "method": "replay_distill_fixed_budget_uniform",
+    "seeds": [0, 1, 2, 3, 4],
+    "batch_size": 1024,
+    "max_epochs_per_task": 20,
+    "early_stopping_patience": 5,
+    "early_stopping_metric": "validation_macro_f1_all_seen_classes",
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "device": "auto",
+    "deterministic_seeded_run": true
+  },
+  "loss": {
+    "classification": "focal",
+    "focal_gamma": 1.0,
+    "distillation_alpha": 1.0,
+    "distillation_temperature": 2.0,
+    "feature_distillation": "mse",
+    "feature_distillation_weight": 0.5
+  },
+  "inactive_legacy_arguments": {
+    "memory_per_class": {
+      "value": 50,
+      "reason": "ignored_by_fixed_total_memory_method"
+    },
+    "ewc_lambda": {
+      "value": 1000.0,
+      "reason": "ignored_because_method_is_not_ewc"
+    },
+    "export_s02": false,
+    "s02_splits_if_enabled": ["validation", "test"]
+  },
+  "replay": {
+    "total_memory_budget": 6800,
+    "replay_draws_per_epoch_after_task0": 6800,
+    "current_task_sampling": "each_current_sample_once_per_epoch",
+    "old_class_sampling": "uniform_over_old_classes",
+    "within_class_sampling": "without_replacement_cycles",
+    "buffer_source": "current_task_train_split_only",
+    "exemplar_ranking": "distance_to_class_mean_stable_index_tiebreak",
+    "memory_allocation": "capacity_constrained_max_min_raw_class_id"
+  },
+  "protocols": {
+    "P0": {
+      "name": "random",
+      "role": "reference",
+      "schedule": "seeded_random_permutation",
+      "schedule_seeds": [0, 1, 2, 3, 4],
+      "task_file": "outputs/tasks/random_seed{seed}_tasks.json"
+    },
+    "P1": {
+      "name": "frequency_balanced",
+      "role": "simple_baseline",
+      "schedule": "three_frequency_strata_round_robin",
+      "schedule_seeds": null,
+      "task_file": "outputs/tasks/frequency_balanced_tasks.json"
+    },
+    "P2": {
+      "name": "head_to_tail",
+      "role": "stress_test",
+      "schedule": "descending_train_frequency",
+      "schedule_seeds": null,
+      "task_file": "outputs/tasks/head_to_tail_tasks.json"
+    },
+    "P3": {
+      "name": "tail_to_head",
+      "role": "counter_stress_test",
+      "schedule": "ascending_train_frequency",
+      "schedule_seeds": null,
+      "task_file": "outputs/tasks/tail_to_head_tasks.json"
+    },
+    "P4": {
+      "name": "constrained_mass_balanced",
+      "role": "main",
+      "schedule": "proportional_rarity_quotas_plus_train_mass_balance",
+      "schedule_seeds": [0, 1, 2, 3, 4],
+      "same_bin_swap_iterations": 1000,
+      "task_file": "outputs/tasks/constrained_mass_balanced_seed{seed}_tasks.json"
+    },
+    "P5": {
+      "name": "multi_factor_balanced",
+      "role": "advanced_train_informed",
+      "schedule": "balance_mass_effective_support_unique_drugs_descriptor_diversity",
+      "schedule_seeds": [0, 1, 2, 3, 4],
+      "same_bin_swap_iterations": 3000,
+      "task_file": "outputs/tasks/multi_factor_balanced_seed{seed}_tasks.json"
+    },
+    "P6": {
+      "name": "difficulty_balanced",
+      "role": "advanced_model_informed",
+      "schedule": "balance_mass_validation_f1_difficulty_and_nll",
+      "schedule_seeds": [0, 1, 2, 3, 4],
+      "same_bin_swap_iterations": 3000,
+      "task_file": "outputs/tasks/difficulty_balanced_seed{seed}_tasks.json"
+    },
+    "P7": {
+      "name": "confusion_spread",
+      "role": "advanced_model_informed",
+      "schedule": "spread_validation_confusion_edges_across_tasks",
+      "schedule_seeds": [0, 1, 2, 3, 4],
+      "same_bin_swap_iterations": 1500,
+      "task_file": "outputs/tasks/confusion_spread_seed{seed}_tasks.json"
+    },
+    "P8": {
+      "name": "controlled_rarity_drift",
+      "role": "advanced_stress_test",
+      "schedule": "decreasing_head_and_increasing_ultra_tail_quotas",
+      "schedule_seeds": [0, 1, 2, 3, 4],
+      "same_bin_swap_iterations": 3000,
+      "rarity_quotas": {
+        "ultra_tail": [8, 4, 4, 5, 5, 6, 6, 7],
+        "tail": [8, 4, 5, 5, 5, 4, 4, 4],
+        "medium": [14, 6, 6, 5, 6, 6, 6, 6],
+        "head": [8, 6, 5, 5, 4, 4, 4, 3]
+      },
+      "task_file": "outputs/tasks/controlled_rarity_drift_seed{seed}_tasks.json"
+    }
+  },
+  "protocol_signal_policy": {
+    "frequency_bins": {
+      "ultra_tail": "train_count <= 20",
+      "tail": "21 <= train_count <= 100",
+      "medium": "101 <= train_count <= 1000",
+      "head": "train_count > 1000"
+    },
+    "P5": "train_only",
+    "P6": "train_plus_validation_static_tddi",
+    "P7": "train_plus_validation_static_tddi",
+    "P8": "locked_quotas_plus_train_only_mass",
+    "test_used_to_build_schedules": false
+  },
+  "static_reference_for_P6_P7": {
+    "variant": "tddi",
+    "batch_size": 1024,
+    "epochs": 20,
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "loss": "cross_entropy",
+    "dropout": 0.2,
+    "activation": "gelu",
+    "normalization": "layernorm",
+    "early_stopping_patience": 5,
+    "seed": 0,
+    "best_epoch": 19,
+    "checkpoint_selection": "validation",
+    "test_used_for_schedule": false,
+    "artifact_root": "outputs/advanced_protocols/static_tddi_reference"
+  },
+  "evaluation": {
+    "scope_per_task": "all_seen_classes",
+    "checkpoint_selection_split": "validation",
+    "report_split": "test",
+    "primary_metrics": [
+      "final_macro_f1",
+      "final_balanced_accuracy",
+      "average_forgetting"
+    ],
+    "secondary_metrics": ["final_accuracy", "final_weighted_f1"],
+    "aggregation": "mean_and_sample_standard_deviation_over_5_seeds"
+  },
+  "resource_guard": {
+    "sequential_jobs": true,
+    "minimum_available_ram_gib": 12,
+    "minimum_free_disk_gib": 50,
+    "skip_complete_runs": true,
+    "refuse_incomplete_overwrite": true
+  },
+  "artifacts": {
+    "task_root": "outputs/tasks",
+    "run_root": "outputs/runs_backbones",
+    "advanced_signal_root": "outputs/advanced_protocols/signals",
+    "runner": "scripts/run_protocol_study.sh"
+  }
+}

@@ -1,4 +1,4 @@
-"""Class-incremental training entrypoint for DDI2025-CIL."""
+"""Class-incremental training engine for the DDI2025 T-DDI protocol study."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ class FocalLoss(nn.Module if nn is not None else object):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train class-incremental MLP baselines for DDI2025-CIL."
+        description="Train the locked T-DDI protocol study or explicit legacy baselines."
     )
     parser.add_argument("--train", required=True, type=Path)
     parser.add_argument("--validation", required=True, type=Path)
@@ -106,14 +106,14 @@ def parse_args() -> argparse.Namespace:
             FIXED_BUDGET_METHOD,
             "ewc",
         ],
-        default="sequential",
+        default=FIXED_BUDGET_METHOD,
     )
     parser.add_argument(
         "--variant",
         choices=["small", "base", "large", "tddi"],
-        default="base",
+        default="tddi",
     )
-    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)

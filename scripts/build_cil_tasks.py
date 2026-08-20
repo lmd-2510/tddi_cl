@@ -32,7 +32,6 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "random",
             "frequency_balanced",
-            "long_tail",
             "head_to_tail",
             "tail_to_head",
             "constrained_mass_balanced",
@@ -104,12 +103,6 @@ def build_random_order(class_ids: list[int], seed: int) -> list[int]:
     order = class_ids.copy()
     rng.shuffle(order)
     return order
-
-
-def build_long_tail_order(train_counts: pd.DataFrame) -> list[int]:
-    """Backward-compatible alias for the P2 head-to-tail ordering."""
-
-    return build_frequency_order(train_counts, descending=True)
 
 
 def build_frequency_order(
@@ -484,21 +477,13 @@ def main() -> None:
             )
         )
 
-    if args.protocol in {"long_tail", "head_to_tail", "all"}:
+    if args.protocol in {"head_to_tail", "all"}:
         print("[tasks] Building P2 head-to-tail protocol...", flush=True)
         order = build_frequency_order(train_counts, descending=True)
         tasks = split_order_into_tasks(order, sizes)
         validate_tasks(tasks, class_ids, sizes)
         outpath = outdir / "head_to_tail_tasks.json"
         write_task_json(outpath, "head_to_tail", None, args.num_classes, tasks)
-        # Preserve the historical filename/schema used by existing commands.
-        write_task_json(
-            outdir / "long_tail_tasks.json",
-            "long_tail",
-            None,
-            args.num_classes,
-            tasks,
-        )
         summaries.append(
             summarize_tasks(
                 protocol="head_to_tail",

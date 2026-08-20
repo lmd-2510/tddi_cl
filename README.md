@@ -1,44 +1,82 @@
-# DDI-CIL
+# DDI2025-CIL — T-DDI Protocol Study
 
-Class-Incremental Learning (CIL) for drug-drug interaction (DDI) classification on the **DDI2025** dataset — 868,069 drug pairs labeled across 178 interaction types, introduced by the T-DDI paper (Kha et al., "Robust Prediction of Drug Interactions using Chemical Descriptors", npj Digital Medicine). Each drug pair is represented by 3,780 QSAR physicochemical descriptors (MR_VSA, EState_VSA, SlogP_VSA, LabuteASA, MTPSA, PEOE_VSA, VSA_EState families) computed from SMILES via RDKit/PyBioMed.
+Repo hiện được khóa ở **giai đoạn thiết kế và so sánh protocol** cho dữ liệu DDI2025 mất cân bằng. Biến độc lập duy nhất là cách phân 178 lớp thành 8 task; backbone và phương pháp học được giữ cố định.
 
-This repo extends that dataset into a **class-incremental** setting: interaction classes are revealed across 8 sequential tasks (38 base classes + 7 increments of 20 classes each), and evaluates how well different continual-learning strategies retain accuracy on previously seen classes while learning new ones — a problem the original paper does not address (it trains on all 178 classes jointly).
+## Phạm vi đang khóa
 
-## Pipeline
+- Backbone duy nhất: `tddi`, MLP `3780 → 1024 → 512 → head mở rộng`.
+- Method duy nhất để so protocol: `replay_distill_fixed_budget_uniform`.
+- Task layout duy nhất: `[38, 20, 20, 20, 20, 20, 20, 20]`.
+- Protocol đang xét: P0–P8.
+- Mỗi protocol chạy 5 training seed: `0, 1, 2, 3, 4`.
+- Protocol chính để báo cáo: **P4 — constrained mass-balanced**.
+- P0 là random reference; P2/P3 là cặp stress test; P1 là baseline cân bằng đơn giản; P5–P8 là các thiết kế nâng cao.
+- Chưa mở lại so sánh backbone hoặc phát triển method. Các implementation cũ vẫn tồn tại để tái lập lịch sử nhưng không thuộc ma trận hiện tại.
 
+Mọi thay đổi làm biến thiên backbone, method, loss, memory, optimizer, task layout hoặc split phải được coi là **một study khác**, không được gộp vào kết quả P0–P8 hiện tại.
+
+## Thứ tự đọc bắt buộc
+
+Để không lệch định hướng, đọc theo đúng thứ tự sau:
+
+1. `README.md` — phạm vi và quy tắc khóa hiện tại.
+2. `docs/PROTOCOL_STUDY.md` — câu hỏi nghiên cứu, vai trò từng protocol và tiêu chí chọn protocol chính.
+3. `configs/protocol_study_tddi.json` — nguồn sự thật dạng máy cho toàn bộ cấu hình khóa.
+4. `docs/EXPERIMENTS.md` — diễn giải đầy đủ dữ liệu, preprocessing, model, training, replay, protocol và metric.
+5. `docs/RESULTS.md` — kết quả 5 seed và kết luận hiện tại.
+6. `docs/RUNBOOK.md` — cách kiểm tra môi trường, tạo task và chạy bằng tmux.
+7. `CIL.md` — chỉ đọc khi cần nền tảng kỹ thuật về CIL; tài liệu này **không được dùng để tự ý mở rộng ma trận hiện tại**.
+
+Không dùng nội dung trong `archive/` để quyết định cấu hình hiện tại. Archive chỉ phục vụ truy vết lịch sử.
+
+## Chạy study
+
+Chạy một protocol:
+
+```bash
+tmux new-session -d -s ddi_p4 \
+  "cd '$PWD' && bash scripts/run_protocol_study.sh P4 2>&1 | tee outputs/runs_backbones/p4_tddi_driver.log"
 ```
-scripts/inspect_splits.py           # schema/leakage sanity checks on the raw parquet splits
-scripts/analyze_class_distribution.py
-scripts/check_leakage.py
-scripts/preprocess_features.py      # fits scaler (+ optional PCA) on train split only
-scripts/build_cil_tasks.py          # builds task schedules (random / frequency_balanced / long_tail protocols)
-src/training/train_static.py        # offline baseline: all 178 classes trained jointly
-src/training/train_cil.py           # class-incremental training entrypoint (all CIL methods below)
+
+Chạy toàn bộ P0–P8 (runner tự bỏ qua run đã hoàn tất):
+
+```bash
+tmux new-session -d -s ddi_protocols \
+  "cd '$PWD' && bash scripts/run_protocol_study.sh all 2>&1 | tee outputs/runs_backbones/protocol_study_tddi_driver.log"
 ```
 
-Run `run_smoke.sh` for a fast end-to-end sanity check on a tiny row-capped subset, or `run_full.sh` for the full pipeline.
+Theo dõi:
 
-## CIL methods (`train_cil.py --method ...`)
+```bash
+tmux attach -t ddi_protocols
+tail -f outputs/runs_backbones/protocol_study_tddi_driver.log
+```
 
-| Method | Idea |
-|---|---|
-| `sequential` | Fine-tune on each new task only — no anti-forgetting mechanism (worst-case baseline) |
-| `joint_seen` | Oracle: reloads full real data for every class seen so far, every task (not a real CIL method — measures the ceiling if memory weren't constrained) |
-| `replay` | Rehearsal from a bounded exemplar buffer (herding-selected, class-balanced sampling) |
-| `replay_distill` | `replay` + knowledge distillation (logit KL + feature MSE) from the previous task's model |
-| `ewc` | Online Elastic Weight Consolidation — regularizes toward previous-task weights, weighted by accumulated Fisher information, growing with the classifier head |
+Runner có chặn thiếu RAM/ổ đĩa, không ghi đè run dở và không nhận lựa chọn backbone. Xem toàn bộ quy trình tại `docs/RUNBOOK.md`.
 
-Shared components: `src/data/replay_buffer.py` (herding exemplar selection), `src/methods/ewc.py` (Fisher computation, penalty, head-growth remapping), `src/models/mlp.py` (LayerNorm + 2-layer MLP backbone, scale-free with input dimensionality), focal loss (`FocalLoss` in `train_cil.py`, matching the original T-DDI paper's loss for this exact class-imbalance problem).
+## Cấu trúc đang dùng
 
-## Key findings
+```text
+configs/protocol_study_tddi.json   cấu hình khóa của study
+docs/PROTOCOL_STUDY.md             định hướng nghiên cứu
+docs/EXPERIMENTS.md                mô tả đầy đủ thử nghiệm
+docs/RESULTS.md                    bảng kết quả và quyết định
+docs/RUNBOOK.md                    lệnh tái lập
+scripts/run_protocol_study.sh      runner P0–P8, chỉ T-DDI
+scripts/build_cil_tasks.py         tạo P0–P4
+scripts/prepare_advanced_protocol_signals.py
+scripts/build_advanced_protocols.py tạo P5–P8
+src/training/train_cil.py          training engine
+archive/pre_protocol_method_stage/ tài liệu/entrypoint/output lịch sử
+```
 
-- The offline **`static`** baseline (all classes trained jointly) reaches **macro-F1 ≈ 0.833**, closely reproducing the original T-DDI paper's own reported result (0.832) — a good sanity check that this reimplementation is faithful.
-- Naive **`replay`**/**`replay_distill`** already recover most of that ceiling's balanced accuracy while cutting forgetting drastically vs. `sequential`.
-- A **Weight Alignment** bias-correction step (classifier recency-bias rescaling) was tried and found to be actively harmful here — removing it recovered balanced accuracy and forgetting beyond the original baseline, at some cost to macro-F1 on rare classes (herding trades exemplar diversity for typicality).
-- **EWC alone**, even after tuning its penalty strength across several orders of magnitude, stays far below replay-based methods — consistent with known limits of pure regularization in true (task-ID-free) class-incremental settings.
-- **PCA dimensionality reduction** (3,780 → 555 dims, 95% variance) trains faster but does not meaningfully improve the accuracy/forgetting trade-off — independently confirming the original paper's own feature-selection ablation, which found the full descriptor set essential for long-tail performance.
-- **Focal loss** (the original paper's own loss function) gives a small, seed-noise-level macro-F1 improvement over plain cross-entropy for the replay-based methods.
+## Dữ liệu và môi trường
 
-## Requirements
+Ba split parquet không được track bởi git: `train_extracted.parquet`, `validation_extracted.parquet`, `test_extracted.parquet`. Môi trường Python nằm tại `.venv`; dependency được ghi trong `requirements.txt`.
 
-See `requirements.txt` (numpy, pandas, pyarrow, matplotlib, scikit-learn, torch). Data (`*_extracted.parquet`) is not tracked in git — see `.gitignore`.
+Để kiểm tra nhanh contract của study:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+bash -n scripts/run_protocol_study.sh
+```
