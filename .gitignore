@@ -4,6 +4,7 @@
 data/*.zip
 outputs/runs*
 outputs/advanced_protocols/
+outputs/graph_cache/
 dist/
 __pycache__/
 *.pyc

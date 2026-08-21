@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 import sys
 import uuid
@@ -44,6 +45,8 @@ from src.data.fixed_budget_replay import (
     FixedReplaySampler,
     ReplayEpochAudit,
 )
+from src.data.backbone_inputs import load_ddi_gcn_split_arrays
+from src.data.molecular_graphs import MolecularGraphBank, load_graph_bank
 from src.data.replay_buffer import ReplayBuffer
 from src.eval.cil_evaluation import EvaluationResult, evaluate_model
 from src.eval.classwise_metrics import ClasswiseTracker
@@ -58,6 +61,8 @@ from src.methods.ewc import compute_fisher, ewc_penalty, grow_head_state
 from src.methods.replay import build_training_arrays as build_replay_training_arrays
 from src.methods.sequential import build_training_arrays as build_sequential_training_arrays
 from src.models.mlp import MLP, preset_config
+from src.models.ddi_gcn import DDIGCNClassifier
+from src.models.tabm_classifier import TabMClassifier
 from src.utils.logging import RunLogger, ensure_run_paths
 from src.utils.seed import set_global_seed
 
@@ -110,10 +115,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--variant",
-        choices=["small", "base", "large", "tddi"],
+        choices=["small", "base", "large", "tddi", "tabm", "ddi_gcn"],
         default="tddi",
     )
     parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument(
+        "--effective-batch-size",
+        type=int,
+        default=None,
+        help="Gradient-accumulated batch size; defaults to --batch-size.",
+    )
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -131,6 +142,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
     parser.add_argument("--focal-gamma", type=float, default=1.0)
+    parser.add_argument("--graph-cache", type=Path, default=None)
+    parser.add_argument("--graph-mapping", type=Path, default=None)
+    parser.add_argument("--tabm-k", type=int, default=32)
+    parser.add_argument("--tabm-blocks", type=int, default=3)
+    parser.add_argument("--tabm-d-block", type=int, default=512)
+    parser.add_argument("--tabm-dropout", type=float, default=0.1)
+    parser.add_argument("--ddi-gcn-depth", type=int, default=8)
+    parser.add_argument("--ddi-gcn-width", type=int, default=128)
+    parser.add_argument("--ddi-gcn-attention-dim", type=int, default=65)
     parser.add_argument("--max-train-rows-per-task", type=int, default=None)
     parser.add_argument("--max-validation-rows-per-task", type=int, default=None)
     parser.add_argument("--max-test-rows-per-task", type=int, default=None)
@@ -304,7 +324,11 @@ def write_run_config(
                 "total_memory_budget": args.total_memory_budget,
                 "replay_draws_per_epoch": args.replay_draws_per_epoch,
                 "memory_allocation_policy": "capacity_constrained_max_min_raw_class_id",
-                "exemplar_ranking_policy": "distance_to_class_mean_stable_index_tiebreak",
+                "exemplar_ranking_policy": (
+                    "standardized_descriptor_distance_to_class_mean_stable_index_tiebreak"
+                    if args.variant in {"tabm", "ddi_gcn"}
+                    else "distance_to_class_mean_stable_index_tiebreak"
+                ),
                 "replay_replacement_policy": "per_class_without_replacement_cycles",
                 "buffer_source_policy": "current_task_train_split_only",
                 "implementation_sha256": {
@@ -315,6 +339,15 @@ def write_run_config(
                 },
             }
         )
+    model_implementation = PROJECT_ROOT / "src/models" / f"{args.variant}.py"
+    if args.variant == "tabm":
+        model_implementation = PROJECT_ROOT / "src/models/tabm_classifier.py"
+    elif args.variant == "ddi_gcn":
+        model_implementation = PROJECT_ROOT / "src/models/ddi_gcn.py"
+    if model_implementation.exists():
+        resolved["model_implementation_sha256"] = _sha256_file(model_implementation)
+    if args.graph_cache is not None:
+        resolved["graph_cache_sha256"] = _sha256_file(args.graph_cache)
     payload = {
         "run_id": run_id,
         "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -323,6 +356,44 @@ def write_run_config(
         "resolved": resolved,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def load_backbone_split(
+    args: argparse.Namespace,
+    parquet_path: Path,
+    feature_columns: list[str],
+    scaler_payload: dict[str, Any],
+    graph_bank: MolecularGraphBank | None,
+    *,
+    class_ids: list[int],
+    max_rows: int | None,
+    include_metadata: bool = False,
+    include_ranking_features: bool = False,
+) -> tuple[Any, np.ndarray | None]:
+    """Load identical rows in the input representation required by a backbone."""
+
+    if args.variant == "ddi_gcn":
+        if graph_bank is None:
+            raise RuntimeError("DDI-GCN graph bank was not initialized.")
+        arrays, ranking = load_ddi_gcn_split_arrays(
+            parquet_path,
+            graph_bank,
+            class_ids=class_ids,
+            max_rows=max_rows,
+            ranking_feature_columns=feature_columns if include_ranking_features else None,
+            scaler_payload=scaler_payload if include_ranking_features else None,
+        )
+        return arrays, ranking
+    arrays = load_split_arrays(
+        parquet_path,
+        feature_columns,
+        class_ids=class_ids,
+        scaler_payload=scaler_payload,
+        include_metadata=include_metadata,
+        meta_cols=[DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN],
+        max_rows=max_rows,
+    )
+    return arrays, arrays.features if include_ranking_features else None
 
 
 def export_s02_evaluation(
@@ -384,32 +455,72 @@ def expand_model_for_seen_classes(
     dropout: float,
     activation: str,
     norm: str,
+    graph_bank: MolecularGraphBank | None = None,
+    tabm_k: int = 32,
+    tabm_blocks: int = 3,
+    tabm_d_block: int = 512,
+    tabm_dropout: float = 0.1,
+    ddi_gcn_depth: int = 8,
+    ddi_gcn_width: int = 128,
+    ddi_gcn_attention_dim: int = 65,
 ) -> nn.Module:
     require_torch()
-    config = preset_config(
-        variant,
-        input_dim=input_dim,
-        num_classes=len(current_seen_map),
-        dropout=dropout,
-        activation=activation,  # type: ignore[arg-type]
-        norm=norm,  # type: ignore[arg-type]
-    )
-    model = MLP(config)
+    if variant == "tabm":
+        model = TabMClassifier(
+            input_dim=input_dim,
+            num_classes=len(current_seen_map),
+            k=tabm_k,
+            n_blocks=tabm_blocks,
+            d_block=tabm_d_block,
+            dropout=tabm_dropout,
+        )
+    elif variant == "ddi_gcn":
+        if graph_bank is None:
+            raise ValueError("DDI-GCN requires a molecular graph bank.")
+        model = DDIGCNClassifier(
+            graph_bank=graph_bank,
+            num_classes=len(current_seen_map),
+            depth=ddi_gcn_depth,
+            width=ddi_gcn_width,
+            attention_dim=ddi_gcn_attention_dim,
+        )
+    else:
+        config = preset_config(
+            variant,  # type: ignore[arg-type]
+            input_dim=input_dim,
+            num_classes=len(current_seen_map),
+            dropout=dropout,
+            activation=activation,  # type: ignore[arg-type]
+            norm=norm,  # type: ignore[arg-type]
+        )
+        model = MLP(config)
     if previous_model is None or previous_seen_map is None:
         return model
 
     current_state = model.state_dict()
     previous_state = previous_model.state_dict()
     for key, value in previous_state.items():
-        if key.startswith("backbone.") and key in current_state and current_state[key].shape == value.shape:
+        if not key.startswith("head.") and key in current_state and current_state[key].shape == value.shape:
             current_state[key] = value.clone()
 
     previous_head_weight = previous_state["head.weight"]
     previous_head_bias = previous_state["head.bias"]
     for raw_class_id, previous_index in previous_seen_map.items():
         current_index = current_seen_map[raw_class_id]
-        current_state["head.weight"][current_index] = previous_head_weight[previous_index].clone()
-        current_state["head.bias"][current_index] = previous_head_bias[previous_index].clone()
+        if variant == "tabm":
+            current_state["head.weight"][:, :, current_index] = previous_head_weight[
+                :, :, previous_index
+            ].clone()
+            current_state["head.bias"][:, current_index] = previous_head_bias[
+                :, previous_index
+            ].clone()
+        else:
+            current_state["head.weight"][current_index] = previous_head_weight[
+                previous_index
+            ].clone()
+            current_state["head.bias"][current_index] = previous_head_bias[
+                previous_index
+            ].clone()
 
     model.load_state_dict(current_state)
     return model
@@ -431,7 +542,10 @@ def train_one_epoch(
     fisher: dict[str, "torch.Tensor"] | None = None,
     theta_star: dict[str, "torch.Tensor"] | None = None,
     ewc_lambda: float = 0.0,
+    gradient_accumulation_steps: int = 1,
 ) -> float:
+    if gradient_accumulation_steps <= 0:
+        raise ValueError("gradient_accumulation_steps must be positive.")
     model.train()
     total_loss = 0.0
     total_examples = 0
@@ -444,18 +558,27 @@ def train_one_epoch(
         )
         teacher_model.eval()
 
-    for features, labels in loader:
+    optimizer.zero_grad(set_to_none=True)
+    for batch_index, (features, labels) in enumerate(loader):
         features = features.to(device)
         labels = labels.to(device)
 
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(features)
-        loss = criterion(logits, labels)
+        if isinstance(model, TabMClassifier):
+            member_logits, student_features = model.forward_members_with_latent(features)
+            logits = model.aggregate_member_logits(member_logits)
+            member_labels = labels.unsqueeze(1).expand(-1, member_logits.shape[1]).reshape(-1)
+            loss = criterion(member_logits.reshape(-1, member_logits.shape[-1]), member_labels)
+        elif teacher_model is not None and student_old_indices:
+            logits, student_features = model.forward_with_latent(features)
+            loss = criterion(logits, labels)
+        else:
+            logits = model(features)
+            student_features = None
+            loss = criterion(logits, labels)
 
         if teacher_model is not None and student_old_indices:
             with torch.no_grad():
-                teacher_logits = teacher_model(features)
-                teacher_features = teacher_model.encode(features)
+                teacher_logits, teacher_features = teacher_model.forward_with_latent(features)
             if teacher_logits.shape[1] != len(student_old_indices):
                 raise ValueError(
                     "Teacher logit width does not match the recorded teacher class order: "
@@ -467,18 +590,42 @@ def train_one_epoch(
                 F.softmax(teacher_logits / temperature, dim=1),
                 reduction="batchmean",
             ) * (temperature ** 2)
-            student_features = model.encode(features)
+            if student_features is None:
+                student_features = model.encode(features)
             feature_distill_loss = F.mse_loss(student_features, teacher_features)
             loss = loss + distill_alpha * distill_loss + feature_distill_weight * feature_distill_loss
 
         if fisher is not None and theta_star is not None and ewc_lambda:
             loss = loss + ewc_lambda * ewc_penalty(model, fisher, theta_star)
 
-        loss.backward()
-        optimizer.step()
+        unscaled_loss = loss
+        microbatch_capacity = loader.batch_size
+        if microbatch_capacity is None:
+            raise RuntimeError("Gradient accumulation requires a fixed DataLoader batch size.")
+        group_start_batch = (batch_index // gradient_accumulation_steps) * gradient_accumulation_steps
+        group_end_batch = min(
+            group_start_batch + gradient_accumulation_steps,
+            len(loader),
+        )
+        group_start_sample = group_start_batch * microbatch_capacity
+        group_end_sample = min(
+            group_end_batch * microbatch_capacity,
+            len(loader.sampler),
+        )
+        group_sample_count = group_end_sample - group_start_sample
+        if group_sample_count <= 0:
+            raise RuntimeError("Could not resolve the gradient-accumulation group size.")
+        (loss * (labels.shape[0] / group_sample_count)).backward()
+        should_step = (
+            (batch_index + 1) % gradient_accumulation_steps == 0
+            or batch_index + 1 == len(loader)
+        )
+        if should_step:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
         batch_size = labels.shape[0]
-        total_loss += float(loss.item()) * batch_size
+        total_loss += float(unscaled_loss.item()) * batch_size
         total_examples += batch_size
 
     return total_loss / max(total_examples, 1)
@@ -556,9 +703,9 @@ def build_fixed_budget_audit_rows(
                 "task": task_id,
                 "raw_class_id": class_id,
                 "class_role": "current" if class_id in current_set else "old",
-                "available_samples": available_count_by_class[class_id],
+                "available_samples": available_count_by_class.get(class_id, 0),
                 "memory_before": memory_start,
-                "memory_after": memory_after_by_class[class_id],
+                "memory_after": memory_after_by_class.get(class_id, 0),
                 "total_memory_before": sum(memory_before_by_class.values()),
                 "total_memory_after": sum(memory_after_by_class.values()),
                 "total_memory_budget": total_memory_budget,
@@ -630,11 +777,22 @@ def write_run_summary(
 def main() -> None:
     args = parse_args()
     require_torch()
+    effective_batch_size = args.effective_batch_size or args.batch_size
+    if args.batch_size <= 0 or effective_batch_size < args.batch_size:
+        raise ValueError("Batch sizes must be positive and effective batch must be at least microbatch.")
+    if effective_batch_size % args.batch_size:
+        raise ValueError("--effective-batch-size must be divisible by --batch-size.")
+    gradient_accumulation_steps = effective_batch_size // args.batch_size
+    args.effective_batch_size = effective_batch_size
     if args.method == FIXED_BUDGET_METHOD:
         if args.total_memory_budget <= 0:
             raise ValueError("--total-memory-budget must be positive.")
         if args.replay_draws_per_epoch <= 0:
             raise ValueError("--replay-draws-per-epoch must be positive.")
+    if args.variant == "ddi_gcn" and (args.graph_cache is None or args.graph_mapping is None):
+        raise ValueError("DDI-GCN requires --graph-cache and --graph-mapping.")
+    if args.variant == "ddi_gcn" and args.export_s02:
+        raise ValueError("S02 descriptor export is not supported for DDI-GCN runs.")
 
     run_id = uuid.uuid4().hex
     run_paths = ensure_run_paths(args.outdir, require_empty=True)
@@ -642,6 +800,11 @@ def main() -> None:
     device = resolve_device(args.device)
     feature_columns = load_feature_columns(args.feature_cols)
     scaler_payload = load_scaler_payload(args.scaler)
+    graph_bank = (
+        load_graph_bank(args.graph_cache, args.graph_mapping)
+        if args.variant == "ddi_gcn"
+        else None
+    )
     task_spec = load_task_spec(args.task_file)
     write_run_config(
         run_paths["run_config_json"],
@@ -740,31 +903,37 @@ def main() -> None:
             f"task_id={task_id} current_classes={len(current_raw_classes)} seen_classes={len(seen_raw_classes)}",
         )
 
-        current_train = load_split_arrays(
+        current_train, current_ranking_features = load_backbone_split(
+            args,
             args.train,
             feature_columns,
+            scaler_payload,
+            graph_bank,
             class_ids=current_raw_classes,
-            scaler_payload=scaler_payload,
             max_rows=args.max_train_rows_per_task,
+            include_ranking_features=args.method == FIXED_BUDGET_METHOD,
         )
-        validation_seen = load_split_arrays(
+        validation_seen, _ = load_backbone_split(
+            args,
             args.validation,
             feature_columns,
+            scaler_payload,
+            graph_bank,
             class_ids=seen_raw_classes,
-            scaler_payload=scaler_payload,
             include_metadata=args.export_s02 and "validation" in args.s02_splits,
-            meta_cols=[DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN],
             max_rows=args.max_validation_rows_per_task,
         )
 
         replay_examples_available = 0
         replay_raw_labels = np.empty((0,), dtype=np.int64)
         if args.method == "joint_seen":
-            train_seen = load_split_arrays(
+            train_seen, _ = load_backbone_split(
+                args,
                 args.train,
                 feature_columns,
+                scaler_payload,
+                graph_bank,
                 class_ids=seen_raw_classes,
-                scaler_payload=scaler_payload,
                 max_rows=args.max_train_rows_per_task,
             )
             train_features = train_seen.features
@@ -850,6 +1019,14 @@ def main() -> None:
             dropout=args.dropout,
             activation=args.activation,
             norm=args.norm,
+            graph_bank=graph_bank,
+            tabm_k=args.tabm_k,
+            tabm_blocks=args.tabm_blocks,
+            tabm_d_block=args.tabm_d_block,
+            tabm_dropout=args.tabm_dropout,
+            ddi_gcn_depth=args.ddi_gcn_depth,
+            ddi_gcn_width=args.ddi_gcn_width,
+            ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
         ).to(device)
 
         if args.method == "ewc" and fisher_total is not None and previous_seen_map is not None:
@@ -903,6 +1080,7 @@ def main() -> None:
                 fisher=fisher_total if args.method == "ewc" else None,
                 theta_star=theta_star if args.method == "ewc" else None,
                 ewc_lambda=args.ewc_lambda if args.method == "ewc" else 0.0,
+                gradient_accumulation_steps=gradient_accumulation_steps,
             )
             if fixed_sampler is not None:
                 if len(fixed_sampler.history) != epoch:
@@ -989,7 +1167,14 @@ def main() -> None:
         )
 
         if args.method in ALL_REPLAY_METHODS:
-            replay_buffer.update(current_train.features, current_train.labels)
+            if isinstance(replay_buffer, FixedBudgetReplayBuffer):
+                replay_buffer.update(
+                    current_train.features,
+                    current_train.labels,
+                    ranking_features=current_ranking_features,
+                )
+            else:
+                replay_buffer.update(current_train.features, current_train.labels)
             replay_buffer.save_summary(memory_dir / "memory_summary.csv")
             replay_buffer.save_snapshot(memory_dir / f"memory_after_task_{task_id}.parquet")
         memory_after = replay_buffer.total_size
@@ -1018,7 +1203,8 @@ def main() -> None:
                     replay_draws_per_epoch=args.replay_draws_per_epoch,
                     current_dataset_size=int(len(current_train.labels)),
                     epoch_audits=list(fixed_sampler.history),
-                    optimizer_steps=epochs_trained * len(train_loader),
+                    optimizer_steps=epochs_trained
+                    * math.ceil(len(train_loader) / gradient_accumulation_steps),
                 )
             )
             replay_budget_audit = pd.DataFrame(replay_budget_audit_rows)
@@ -1070,7 +1256,10 @@ def main() -> None:
                 "distillation_active": teacher_model is not None,
                 "batches_per_epoch": len(train_loader),
                 "epochs_trained": epochs_trained,
-                "optimizer_steps": epochs_trained * len(train_loader),
+                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "effective_batch_size": effective_batch_size,
+                "optimizer_steps": epochs_trained
+                * math.ceil(len(train_loader) / gradient_accumulation_steps),
                 "best_epoch": best_epoch,
             }
         )
@@ -1100,6 +1289,14 @@ def main() -> None:
             dropout=args.dropout,
             activation=args.activation,
             norm=args.norm,
+            graph_bank=graph_bank,
+            tabm_k=args.tabm_k,
+            tabm_blocks=args.tabm_blocks,
+            tabm_d_block=args.tabm_d_block,
+            tabm_dropout=args.tabm_dropout,
+            ddi_gcn_depth=args.ddi_gcn_depth,
+            ddi_gcn_width=args.ddi_gcn_width,
+            ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
         )
         previous_model.load_state_dict(best_state)
         previous_seen_map = dict(current_seen_map)
@@ -1110,11 +1307,13 @@ def main() -> None:
         for eval_task in tasks[: task_id + 1]:
             eval_task_id = int(eval_task["task_id"])
             eval_classes = [int(class_id) for class_id in eval_task["classes"]]
-            eval_arrays = load_split_arrays(
+            eval_arrays, _ = load_backbone_split(
+                args,
                 args.test,
                 feature_columns,
+                scaler_payload,
+                graph_bank,
                 class_ids=eval_classes,
-                scaler_payload=scaler_payload,
                 max_rows=args.max_test_rows_per_task,
             )
             eval_labels = remap_labels(eval_arrays.labels, current_seen_map)
@@ -1140,13 +1339,14 @@ def main() -> None:
                     **metrics,
                 }
             )
-        seen_test_arrays = load_split_arrays(
+        seen_test_arrays, _ = load_backbone_split(
+            args,
             args.test,
             feature_columns,
+            scaler_payload,
+            graph_bank,
             class_ids=seen_raw_classes,
-            scaler_payload=scaler_payload,
             include_metadata=args.export_s02 and "test" in args.s02_splits,
-            meta_cols=[DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN],
             max_rows=args.max_test_rows_per_task,
         )
         seen_test_labels = remap_labels(seen_test_arrays.labels, current_seen_map)

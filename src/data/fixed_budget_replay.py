@@ -103,8 +103,19 @@ class FixedBudgetReplayBuffer:
         distances = np.linalg.norm(features - mean, axis=1)
         return np.lexsort((np.arange(features.shape[0]), distances))
 
-    def update(self, features: np.ndarray, raw_labels: np.ndarray) -> None:
-        """Add previously unseen classes, then rebalance all retained exemplars."""
+    def update(
+        self,
+        features: np.ndarray,
+        raw_labels: np.ndarray,
+        *,
+        ranking_features: np.ndarray | None = None,
+    ) -> None:
+        """Add unseen classes and rebalance retained model inputs.
+
+        ``ranking_features`` may differ from ``features``. This lets a graph
+        backbone retain pair-index inputs while selecting the same exemplars as
+        descriptor backbones under the shared protocol.
+        """
 
         features = np.asarray(features, dtype=np.float32)
         raw_labels = np.asarray(raw_labels, dtype=np.int64)
@@ -112,6 +123,13 @@ class FixedBudgetReplayBuffer:
             raise ValueError("features and raw_labels must be aligned two-dimensional/one-dimensional arrays.")
         if features.shape[0] == 0 or not np.isfinite(features).all():
             raise ValueError("fixed-budget replay update requires non-empty finite features.")
+        if ranking_features is None:
+            ranking_features = features
+        ranking_features = np.asarray(ranking_features, dtype=np.float32)
+        if ranking_features.ndim != 2 or ranking_features.shape[0] != features.shape[0]:
+            raise ValueError("ranking_features must be two-dimensional and aligned with features.")
+        if not np.isfinite(ranking_features).all():
+            raise ValueError("ranking_features must be finite.")
 
         new_classes = sorted(int(class_id) for class_id in np.unique(raw_labels))
         duplicate_classes = sorted(set(new_classes) & set(self.available_count_by_class))
@@ -119,10 +137,13 @@ class FixedBudgetReplayBuffer:
             raise ValueError(f"Fixed-budget buffer received classes twice: {duplicate_classes}")
 
         current_features: dict[int, np.ndarray] = {}
+        current_ranking_features: dict[int, np.ndarray] = {}
         for class_id in new_classes:
-            class_features = features[raw_labels == class_id]
+            class_mask = raw_labels == class_id
+            class_features = features[class_mask]
             self.available_count_by_class[class_id] = int(class_features.shape[0])
             current_features[class_id] = class_features
+            current_ranking_features[class_id] = ranking_features[class_mask]
 
         allocation = max_min_uniform_allocation(
             self.available_count_by_class,
@@ -132,7 +153,7 @@ class FixedBudgetReplayBuffer:
             target_count = allocation[class_id]
             if class_id in current_features:
                 class_features = current_features[class_id]
-                ranking = self._rank_by_class_mean(class_features)
+                ranking = self._rank_by_class_mean(current_ranking_features[class_id])
                 retained = class_features[ranking[:target_count]]
             else:
                 retained = self.features_by_class[class_id][:target_count]

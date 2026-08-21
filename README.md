@@ -1,6 +1,6 @@
 # DDI2025-CIL — T-DDI Protocol Study
 
-Repo hiện được khóa ở **giai đoạn thiết kế và so sánh protocol** cho dữ liệu DDI2025 mất cân bằng. Biến độc lập duy nhất là cách phân 178 lớp thành 8 task; backbone và phương pháp học được giữ cố định.
+Study kết quả gốc vẫn được khóa ở **giai đoạn thiết kế và so sánh protocol** cho dữ liệu DDI2025 mất cân bằng. Biến độc lập duy nhất của bảng P0–P8 bên dưới là cách phân 178 lớp thành 8 task; backbone T-DDI và phương pháp học được giữ cố định. Một study mở rộng riêng cho TabM/DDI-GCN được mô tả ở phần sau và không được trộn số liệu với bảng này.
 
 ## Phạm vi đang khóa
 
@@ -11,7 +11,7 @@ Repo hiện được khóa ở **giai đoạn thiết kế và so sánh protocol
 - Mỗi protocol chạy 5 training seed: `0, 1, 2, 3, 4`.
 - Protocol chính để báo cáo: **P4 — constrained mass-balanced**.
 - P0 là random reference; P2/P3 là cặp stress test; P1 là baseline cân bằng đơn giản; P5–P8 là các thiết kế nâng cao.
-- Chưa mở lại so sánh backbone hoặc phát triển method. Các implementation cũ vẫn tồn tại để tái lập lịch sử nhưng không thuộc ma trận hiện tại.
+- Không phát triển method mới. So sánh backbone chỉ được mở trong ma trận riêng P4/P6/P0/P2/P3, dùng cùng method và ngân sách của study gốc.
 
 Mọi thay đổi làm biến thiên backbone, method, loss, memory, optimizer, task layout hoặc split phải được coi là **một study khác**, không được gộp vào kết quả P0–P8 hiện tại.
 
@@ -42,8 +42,10 @@ Kết quả tại task cuối, biểu diễn bằng mean ± sample standard devi
 3. `configs/protocol_study_tddi.json` — nguồn sự thật dạng máy cho toàn bộ cấu hình khóa.
 4. `docs/EXPERIMENTS.md` — diễn giải đầy đủ dữ liệu, preprocessing, model, training, replay, protocol và metric.
 5. `docs/RESULTS.md` — kết quả 5 seed và kết luận hiện tại.
-6. `docs/RUNBOOK.md` — cách kiểm tra môi trường, tạo task và chạy bằng tmux.
-7. `CIL.md` — chỉ đọc khi cần nền tảng kỹ thuật về CIL; tài liệu này **không được dùng để tự ý mở rộng ma trận hiện tại**.
+6. `docs/BACKBONE_STUDY.md` — study mở rộng riêng cho TabM/DDI-GCN và giới hạn diễn giải P6.
+7. `configs/selected_backbone_protocol_study.json` — cấu hình máy đọc được của study backbone.
+8. `docs/RUNBOOK.md` — cách kiểm tra môi trường, tạo task và chạy bằng tmux.
+9. `CIL.md` — chỉ đọc khi cần nền tảng kỹ thuật về CIL; tài liệu này **không được dùng để tự ý mở rộng ma trận hiện tại**.
 
 Không dùng nội dung trong `archive/` để quyết định cấu hình hiện tại. Archive chỉ phục vụ truy vết lịch sử.
 
@@ -72,6 +74,19 @@ tail -f outputs/runs_backbones/protocol_study_tddi_driver.log
 
 Runner có chặn thiếu RAM/ổ đĩa, không ghi đè run dở và không nhận lựa chọn backbone. Xem toàn bộ quy trình tại `docs/RUNBOOK.md`.
 
+## Study TabM và DDI-GCN đang chạy
+
+Ma trận mở rộng dùng đúng P4, P6, P0, P2, P3 trên hai backbone. Tất cả cấu hình CIL chung được giữ nguyên; microbatch là 256 và tích lũy 4 bước để effective batch vẫn là 1,024, tránh tràn GPU 16 GiB. P6 vẫn kế thừa lịch chia task được tạo từ static T-DDI nên chỉ là nhánh model-informed, không phải phép so sánh backbone-neutral.
+
+Chạy pilot seed 0 trước:
+
+```bash
+tmux new-session -d -s backbone_pilot \
+  "cd '$PWD' && mkdir -p outputs/runs_selected_backbones && BACKBONE_SEEDS=0 bash scripts/run_selected_backbone_protocols.sh all all 2>&1 | tee outputs/runs_selected_backbones/pilot_driver.log"
+```
+
+Xem contract, cấu hình hai model, resource guard và lệnh chạy seed 1–4 tại `docs/BACKBONE_STUDY.md`.
+
 ## Cấu trúc đang dùng
 
 ```text
@@ -80,7 +95,10 @@ docs/PROTOCOL_STUDY.md             định hướng nghiên cứu
 docs/EXPERIMENTS.md                mô tả đầy đủ thử nghiệm
 docs/RESULTS.md                    bảng kết quả và quyết định
 docs/RUNBOOK.md                    lệnh tái lập
+docs/BACKBONE_STUDY.md             study TabM/DDI-GCN riêng
 scripts/run_protocol_study.sh      runner P0–P8, chỉ T-DDI
+scripts/run_selected_backbone_protocols.sh runner P4/P6/P0/P2/P3, TabM/DDI-GCN
+scripts/build_molecular_graph_cache.py tạo graph cache DDI-GCN
 scripts/build_cil_tasks.py         tạo P0–P4
 scripts/prepare_advanced_protocol_signals.py
 scripts/build_advanced_protocols.py tạo P5–P8
