@@ -74,15 +74,32 @@ tail -f outputs/runs_backbones/protocol_study_tddi_driver.log
 
 Runner có chặn thiếu RAM/ổ đĩa, không ghi đè run dở và không nhận lựa chọn backbone. Xem toàn bộ quy trình tại `docs/RUNBOOK.md`.
 
-## Study TabM và DDI-GCN đang chạy
+## Study TabM và DDI-GCN
 
 Ma trận mở rộng dùng đúng P4, P6, P0, P2, P3 trên hai backbone. Tất cả cấu hình CIL chung được giữ nguyên; microbatch là 256 và tích lũy 4 bước để effective batch vẫn là 1,024, tránh tràn GPU 16 GiB. P6 vẫn kế thừa lịch chia task được tạo từ static T-DDI nên chỉ là nhánh model-informed, không phải phép so sánh backbone-neutral.
 
-Chạy pilot seed 0 trước:
+Pilot seed 0 đã hoàn tất đủ 10/10 run. Bảng dưới là kết quả **sơ bộ của một seed**, chỉ dùng để xác nhận pipeline và định hướng; không dùng để kết luận protocol trước khi hoàn thành seed 1–4.
+
+| Backbone | Protocol | Macro-F1 ↑ | Balanced Acc. ↑ | Task Forgetting ↓ |
+|---|---|---:|---:|---:|
+| TabM | P4 Mass-balanced | 0.3792 | 0.4692 | 0.3222 |
+| TabM | P6 Difficulty-balanced | 0.3702 | 0.5121 | 0.3174 |
+| TabM | P0 Random | 0.3601 | 0.5886 | 0.2318 |
+| TabM | **P2 Head→tail** | 0.1775 | **0.6965** | **0.0808** |
+| TabM | **P3 Tail→head** | **0.4192** | 0.3932 | 0.5746 |
+| DDI-GCN | P4 Mass-balanced | 0.3669 | 0.4819 | 0.1081 |
+| DDI-GCN | P6 Difficulty-balanced | 0.4603 | 0.5645 | 0.0844 |
+| DDI-GCN | P0 Random | 0.4640 | 0.6335 | 0.1049 |
+| DDI-GCN | **P2 Head→tail** | 0.2862 | **0.7606** | **0.0479** |
+| DDI-GCN | **P3 Tail→head** | **0.6057** | 0.5608 | 0.3777 |
+
+Ở seed 0, P3 có Macro-F1 cao nhất và P2 có balanced accuracy cao nhất/forgetting thấp nhất trên cả hai backbone. Đây vẫn là hai stress test cực đoan; quyết định protocol chính phải dựa trên mean ± sample standard deviation đủ 5 seed và giữ riêng lưu ý model-informed của P6.
+
+Chạy bốn seed còn lại; runner tự bỏ qua mọi run hoàn tất:
 
 ```bash
-tmux new-session -d -s backbone_pilot \
-  "cd '$PWD' && mkdir -p outputs/runs_selected_backbones && BACKBONE_SEEDS=0 bash scripts/run_selected_backbone_protocols.sh all all 2>&1 | tee outputs/runs_selected_backbones/pilot_driver.log"
+tmux new-session -d -s backbone_full \
+  "cd '$PWD' && mkdir -p outputs/runs_selected_backbones && BACKBONE_SEEDS='1 2 3 4' bash scripts/run_selected_backbone_protocols.sh all all 2>&1 | tee outputs/runs_selected_backbones/full_driver.log"
 ```
 
 Xem contract, cấu hình hai model, resource guard và lệnh chạy seed 1–4 tại `docs/BACKBONE_STUDY.md`.
@@ -113,6 +130,7 @@ Ba split parquet không được track bởi git: `train_extracted.parquet`, `va
 Để kiểm tra nhanh contract của study:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+.venv/bin/python -m pytest -q
 bash -n scripts/run_protocol_study.sh
+bash -n scripts/run_selected_backbone_protocols.sh
 ```
