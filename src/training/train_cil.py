@@ -9,9 +9,10 @@ import math
 import subprocess
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -58,6 +59,14 @@ from src.eval.s02_artifacts import (
     export_s02_artifacts,
 )
 from src.methods.ewc import compute_fisher, ewc_penalty, grow_head_state
+from src.methods.agem import project_agem_gradient
+from src.methods.gem import (
+    TaskEpisodicMemory,
+    assign_gradients,
+    flatten_gradients,
+    project_gem_gradient,
+    trainable_parameters,
+)
 from src.methods.replay import build_training_arrays as build_replay_training_arrays
 from src.methods.sequential import build_training_arrays as build_sequential_training_arrays
 from src.models.mlp import MLP, preset_config
@@ -71,6 +80,7 @@ FIXED_BUDGET_METHOD = "replay_distill_fixed_budget_uniform"
 LEGACY_REPLAY_METHODS = {"replay", "replay_distill"}
 DISTILL_METHODS = {"replay_distill", FIXED_BUDGET_METHOD}
 ALL_REPLAY_METHODS = LEGACY_REPLAY_METHODS | {FIXED_BUDGET_METHOD}
+GRADIENT_EPISODIC_METHODS = {"gem", "agem"}
 
 
 class FocalLoss(nn.Module if nn is not None else object):
@@ -110,6 +120,8 @@ def parse_args() -> argparse.Namespace:
             "replay_distill",
             FIXED_BUDGET_METHOD,
             "ewc",
+            "gem",
+            "agem",
         ],
         default=FIXED_BUDGET_METHOD,
     )
@@ -137,6 +149,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-per-class", type=int, default=50)
     parser.add_argument("--total-memory-budget", type=int, default=6800)
     parser.add_argument("--replay-draws-per-epoch", type=int, default=6800)
+    parser.add_argument(
+        "--episodic-memory-budget",
+        type=int,
+        default=500,
+        help="Fixed total number of task-indexed GEM/A-GEM memory examples.",
+    )
+    parser.add_argument(
+        "--agem-reference-batch-size",
+        type=int,
+        default=256,
+        help="Random union-memory batch used to compute each A-GEM reference gradient.",
+    )
     parser.add_argument("--distill-alpha", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
@@ -253,6 +277,10 @@ def method_protocol_name(method: str, memory_per_class: int) -> str:
         return FIXED_BUDGET_METHOD
     if method == "joint_seen":
         return "cumulative_joint_seen_natural_sampling"
+    if method == "gem":
+        return "gem_task_episodic_gradient_projection"
+    if method == "agem":
+        return "agem_averaged_episodic_gradient_projection"
     return f"{method}_natural_sampling"
 
 
@@ -261,6 +289,8 @@ def sampler_policy_name(method: str) -> str:
         return "inverse_class_frequency_with_replacement"
     if method == FIXED_BUDGET_METHOD:
         return "current_once_plus_fixed_class_uniform_replay"
+    if method in GRADIENT_EPISODIC_METHODS:
+        return "current_task_natural_shuffle_with_memory_gradient_constraints"
     return "natural_shuffle_without_replacement"
 
 
@@ -334,6 +364,39 @@ def write_run_config(
                 "implementation_sha256": {
                     "fixed_budget_replay": _sha256_file(
                         PROJECT_ROOT / "src/data/fixed_budget_replay.py"
+                    ),
+                    "training_orchestration": _sha256_file(Path(__file__)),
+                },
+            }
+        )
+    if args.method in GRADIENT_EPISODIC_METHODS:
+        resolved.update(
+            {
+                "memory_budget": args.episodic_memory_budget,
+                "episodic_memory_budget": args.episodic_memory_budget,
+                "episodic_memory_allocation": "known_total_tasks_reserved_equal_quota",
+                "episodic_memory_partition": "separate_by_task",
+                "episodic_exemplar_selection": "seeded_uniform_without_replacement",
+                "current_task_sampling": "natural_shuffle_without_replacement",
+                "reference_model_mode": "eval_to_freeze_dropout_and_normalization_state",
+                "projection_scope": "raw_gradient_before_adamw_preconditioning_and_weight_decay",
+                "gradient_constraint": (
+                    "one_constraint_per_previous_task"
+                    if args.method == "gem"
+                    else "one_average_union_memory_constraint"
+                ),
+                "agem_reference_batch_size": (
+                    args.agem_reference_batch_size if args.method == "agem" else None
+                ),
+                "gem_reference_batch_size": (
+                    args.batch_size if args.method == "gem" else None
+                ),
+                "implementation_sha256": {
+                    "method": _sha256_file(
+                        PROJECT_ROOT / "src/methods" / f"{args.method}.py"
+                    ),
+                    "shared_gem_memory_and_gradients": _sha256_file(
+                        PROJECT_ROOT / "src/methods/gem.py"
                     ),
                     "training_orchestration": _sha256_file(Path(__file__)),
                 },
@@ -526,6 +589,187 @@ def expand_model_for_seen_classes(
     return model
 
 
+@dataclass(frozen=True)
+class GradientProjectionAudit:
+    """One optimizer-step audit for GEM or A-GEM."""
+
+    constraint_count: int
+    violated: bool
+    minimum_dot_before: float
+    minimum_dot_after: float
+
+
+def classification_forward(
+    model: nn.Module,
+    features: "torch.Tensor",
+    labels: "torch.Tensor",
+    criterion: nn.Module,
+    *,
+    include_latent: bool = False,
+) -> tuple["torch.Tensor", "torch.Tensor | None", "torch.Tensor"]:
+    """Run the classification path shared by current and memory gradients.
+
+    TabM must train every ensemble member independently, whereas evaluation
+    aggregates member probabilities. Keeping this policy in one helper prevents
+    GEM/A-GEM reference gradients from silently using a different objective.
+    """
+
+    if isinstance(model, TabMClassifier):
+        member_logits, latent = model.forward_members_with_latent(features)
+        logits = model.aggregate_member_logits(member_logits)
+        member_labels = labels.unsqueeze(1).expand(-1, member_logits.shape[1]).reshape(-1)
+        loss = criterion(member_logits.reshape(-1, member_logits.shape[-1]), member_labels)
+        return logits, latent if include_latent else None, loss
+    if include_latent:
+        logits, latent = model.forward_with_latent(features)
+        return logits, latent, criterion(logits, labels)
+    logits = model(features)
+    return logits, None, criterion(logits, labels)
+
+
+def compute_episodic_reference_gradient(
+    model: nn.Module,
+    criterion: nn.Module,
+    memory_features: np.ndarray,
+    memory_raw_labels: np.ndarray,
+    current_seen_map: dict[int, int],
+    device: str,
+    parameters: list["torch.nn.Parameter"],
+    *,
+    reference_batch_size: int,
+) -> "torch.Tensor":
+    """Compute an exact mean memory gradient in bounded-size chunks.
+
+    Chunk gradients are weighted by their sample counts, so the result equals
+    the gradient of the mean loss over the complete task memory. ``autograd.grad``
+    leaves the accumulated current-task ``parameter.grad`` tensors untouched.
+    """
+
+    if memory_raw_labels.shape[0] == 0:
+        raise ValueError("Cannot compute a reference gradient from empty memory.")
+    if reference_batch_size <= 0:
+        raise ValueError("reference_batch_size must be positive.")
+    local_labels = remap_labels(memory_raw_labels, current_seen_map)
+
+    was_training = model.training
+    model.eval()
+    try:
+        accumulated: torch.Tensor | None = None
+        total_examples = int(memory_raw_labels.shape[0])
+        for start in range(0, total_examples, reference_batch_size):
+            end = min(start + reference_batch_size, total_examples)
+            features_tensor = torch.from_numpy(
+                np.asarray(memory_features[start:end], dtype=np.float32)
+            ).to(device)
+            labels_tensor = torch.from_numpy(
+                np.asarray(local_labels[start:end], dtype=np.int64)
+            ).to(device)
+            _, _, reference_loss = classification_forward(
+                model,
+                features_tensor,
+                labels_tensor,
+                criterion,
+            )
+            gradients = torch.autograd.grad(
+                reference_loss,
+                parameters,
+                allow_unused=True,
+            )
+            flat_gradient = flatten_gradients(parameters, gradients)
+            weight = (end - start) / total_examples
+            if accumulated is None:
+                accumulated = flat_gradient * weight
+            else:
+                accumulated.add_(flat_gradient, alpha=weight)
+    finally:
+        model.train(was_training)
+    if accumulated is None:  # pragma: no cover - guarded by non-empty validation
+        raise RuntimeError("Reference gradient accumulation produced no chunks.")
+    return accumulated
+
+
+def apply_episodic_gradient_projection(
+    model: nn.Module,
+    criterion: nn.Module,
+    memory: TaskEpisodicMemory,
+    current_seen_map: dict[int, int],
+    device: str,
+    *,
+    method: str,
+    gem_reference_batch_size: int,
+    agem_reference_batch_size: int,
+    seed: int,
+    task_id: int,
+    epoch: int,
+    optimizer_step: int,
+) -> GradientProjectionAudit:
+    """Apply GEM/A-GEM to the accumulated current gradient before an update."""
+
+    if method not in GRADIENT_EPISODIC_METHODS:
+        raise ValueError(f"Unsupported episodic gradient method: {method}")
+    parameters = trainable_parameters(model)
+    current_gradient = flatten_gradients(parameters)
+
+    if method == "gem":
+        reference_blocks = []
+        for previous_task_id in memory.task_ids:
+            memory_features, memory_labels = memory.get_task(previous_task_id)
+            if memory_labels.shape[0] == 0:
+                continue
+            reference_blocks.append(
+                compute_episodic_reference_gradient(
+                    model,
+                    criterion,
+                    memory_features,
+                    memory_labels,
+                    current_seen_map,
+                    device,
+                    parameters,
+                    reference_batch_size=gem_reference_batch_size,
+                )
+            )
+        if not reference_blocks:
+            return GradientProjectionAudit(0, False, math.nan, math.nan)
+        reference_gradients = torch.stack(reference_blocks)
+        dots_before = reference_gradients @ current_gradient
+        projected = project_gem_gradient(current_gradient, reference_gradients)
+        dots_after = reference_gradients @ projected
+        violated = bool(torch.any(dots_before < 0))
+        constraint_count = int(reference_gradients.shape[0])
+    else:
+        if memory.total_size == 0:
+            return GradientProjectionAudit(0, False, math.nan, math.nan)
+        memory_features, memory_labels = memory.sample(
+            agem_reference_batch_size,
+            seed_components=[seed, task_id, epoch, optimizer_step],
+        )
+        reference_gradient = compute_episodic_reference_gradient(
+            model,
+            criterion,
+            memory_features,
+            memory_labels,
+            current_seen_map,
+            device,
+            parameters,
+            reference_batch_size=agem_reference_batch_size,
+        )
+        dot_before = torch.dot(current_gradient, reference_gradient)
+        projected = project_agem_gradient(current_gradient, reference_gradient)
+        dot_after = torch.dot(projected, reference_gradient)
+        dots_before = dot_before.reshape(1)
+        dots_after = dot_after.reshape(1)
+        violated = bool(dot_before < 0)
+        constraint_count = 1
+
+    assign_gradients(parameters, projected)
+    return GradientProjectionAudit(
+        constraint_count=constraint_count,
+        violated=violated,
+        minimum_dot_before=float(dots_before.min().detach().cpu()),
+        minimum_dot_after=float(dots_after.min().detach().cpu()),
+    )
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -543,6 +787,7 @@ def train_one_epoch(
     theta_star: dict[str, "torch.Tensor"] | None = None,
     ewc_lambda: float = 0.0,
     gradient_accumulation_steps: int = 1,
+    gradient_projector: Callable[[int], None] | None = None,
 ) -> float:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
@@ -559,22 +804,18 @@ def train_one_epoch(
         teacher_model.eval()
 
     optimizer.zero_grad(set_to_none=True)
+    optimizer_step = 0
     for batch_index, (features, labels) in enumerate(loader):
         features = features.to(device)
         labels = labels.to(device)
 
-        if isinstance(model, TabMClassifier):
-            member_logits, student_features = model.forward_members_with_latent(features)
-            logits = model.aggregate_member_logits(member_logits)
-            member_labels = labels.unsqueeze(1).expand(-1, member_logits.shape[1]).reshape(-1)
-            loss = criterion(member_logits.reshape(-1, member_logits.shape[-1]), member_labels)
-        elif teacher_model is not None and student_old_indices:
-            logits, student_features = model.forward_with_latent(features)
-            loss = criterion(logits, labels)
-        else:
-            logits = model(features)
-            student_features = None
-            loss = criterion(logits, labels)
+        logits, student_features, loss = classification_forward(
+            model,
+            features,
+            labels,
+            criterion,
+            include_latent=teacher_model is not None and bool(student_old_indices),
+        )
 
         if teacher_model is not None and student_old_indices:
             with torch.no_grad():
@@ -621,8 +862,11 @@ def train_one_epoch(
             or batch_index + 1 == len(loader)
         )
         if should_step:
+            if gradient_projector is not None:
+                gradient_projector(optimizer_step)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            optimizer_step += 1
 
         batch_size = labels.shape[0]
         total_loss += float(unscaled_loss.item()) * batch_size
@@ -789,6 +1033,11 @@ def main() -> None:
             raise ValueError("--total-memory-budget must be positive.")
         if args.replay_draws_per_epoch <= 0:
             raise ValueError("--replay-draws-per-epoch must be positive.")
+    if args.method in GRADIENT_EPISODIC_METHODS:
+        if args.episodic_memory_budget <= 0:
+            raise ValueError("--episodic-memory-budget must be positive.")
+        if args.agem_reference_batch_size <= 0:
+            raise ValueError("--agem-reference-batch-size must be positive.")
     if args.variant == "ddi_gcn" and (args.graph_cache is None or args.graph_mapping is None):
         raise ValueError("DDI-GCN requires --graph-cache and --graph-mapping.")
     if args.variant == "ddi_gcn" and args.export_s02:
@@ -871,6 +1120,15 @@ def main() -> None:
             memory_per_class=args.memory_per_class,
             random_seed=args.seed,
         )
+    episodic_memory = (
+        TaskEpisodicMemory(
+            total_budget=args.episodic_memory_budget,
+            total_tasks=num_tasks,
+            random_seed=args.seed,
+        )
+        if args.method in GRADIENT_EPISODIC_METHODS
+        else None
+    )
     previous_model: nn.Module | None = None
     previous_seen_map: dict[int, int] | None = None
     previous_seen_raw_classes: list[int] | None = None
@@ -889,7 +1147,11 @@ def main() -> None:
         )
         current_seen_map = build_seen_class_map(seen_raw_classes)
         inverse_seen_map = invert_class_map(current_seen_map)
-        memory_before = replay_buffer.total_size
+        memory_before = (
+            episodic_memory.total_size
+            if episodic_memory is not None
+            else replay_buffer.total_size
+        )
         memory_before_by_class = (
             dict(replay_buffer.memory_counts)
             if isinstance(replay_buffer, FixedBudgetReplayBuffer)
@@ -938,7 +1200,7 @@ def main() -> None:
             )
             train_features = train_seen.features
             train_raw_labels = train_seen.labels
-        elif args.method in {"sequential", "ewc"}:
+        elif args.method in {"sequential", "ewc"} | GRADIENT_EPISODIC_METHODS:
             train_features, train_raw_labels = build_sequential_training_arrays(
                 current_train.features,
                 current_train.labels,
@@ -982,6 +1244,9 @@ def main() -> None:
         validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False)
         samples_drawn_per_epoch = len(train_loader.sampler)
         old_class_count = len(previous_seen_map or {})
+        episodic_memory_examples_available = (
+            episodic_memory.total_size if episodic_memory is not None else 0
+        )
         expected_replay_draws = 0.0
         if args.method in LEGACY_REPLAY_METHODS and seen_raw_classes:
             expected_replay_draws = (
@@ -994,6 +1259,7 @@ def main() -> None:
             f"task={task_id} sampler={sampler_policy_name(args.method)} "
             f"current_examples={len(current_train.labels)} "
             f"replay_examples={replay_examples_available} "
+            f"episodic_memory_examples={episodic_memory_examples_available} "
             f"training_examples={len(train_local_labels)} "
             f"draws_per_epoch={samples_drawn_per_epoch}",
             payload_json=json.dumps(
@@ -1002,6 +1268,7 @@ def main() -> None:
                     "sampler_policy": sampler_policy_name(args.method),
                     "current_examples": int(len(current_train.labels)),
                     "replay_examples_available": replay_examples_available,
+                    "episodic_memory_examples_available": episodic_memory_examples_available,
                     "training_examples": int(len(train_local_labels)),
                     "samples_drawn_per_epoch": int(samples_drawn_per_epoch),
                     "expected_replay_draws_per_epoch": expected_replay_draws,
@@ -1062,9 +1329,35 @@ def main() -> None:
         best_state: dict[str, Any] | None = None
         patience_counter = 0
         epochs_trained = 0
+        projection_audits: list[GradientProjectionAudit] = []
 
         for epoch in range(1, args.epochs + 1):
             epochs_trained = epoch
+            gradient_projector: Callable[[int], None] | None = None
+            if episodic_memory is not None and episodic_memory.total_size > 0:
+
+                def gradient_projector(
+                    optimizer_step: int,
+                    *,
+                    current_epoch: int = epoch,
+                ) -> None:
+                    projection_audits.append(
+                        apply_episodic_gradient_projection(
+                            model,
+                            criterion,
+                            episodic_memory,
+                            current_seen_map,
+                            device,
+                            method=args.method,
+                            gem_reference_batch_size=args.batch_size,
+                            agem_reference_batch_size=args.agem_reference_batch_size,
+                            seed=args.seed,
+                            task_id=task_id,
+                            epoch=current_epoch,
+                            optimizer_step=optimizer_step,
+                        )
+                    )
+
             train_loss = train_one_epoch(
                 model,
                 train_loader,
@@ -1081,6 +1374,7 @@ def main() -> None:
                 theta_star=theta_star if args.method == "ewc" else None,
                 ewc_lambda=args.ewc_lambda if args.method == "ewc" else 0.0,
                 gradient_accumulation_steps=gradient_accumulation_steps,
+                gradient_projector=gradient_projector,
             )
             if fixed_sampler is not None:
                 if len(fixed_sampler.history) != epoch:
@@ -1133,6 +1427,50 @@ def main() -> None:
         if best_state is None or best_val_metrics is None:
             raise RuntimeError(f"Task {task_id} did not produce a valid checkpoint.")
 
+        projection_constraint_checks = sum(
+            audit.constraint_count for audit in projection_audits
+        )
+        projection_violations = sum(audit.violated for audit in projection_audits)
+        finite_before = [
+            audit.minimum_dot_before
+            for audit in projection_audits
+            if math.isfinite(audit.minimum_dot_before)
+        ]
+        finite_after = [
+            audit.minimum_dot_after
+            for audit in projection_audits
+            if math.isfinite(audit.minimum_dot_after)
+        ]
+        minimum_constraint_dot_before = min(finite_before, default=math.nan)
+        minimum_constraint_dot_after = min(finite_after, default=math.nan)
+        if args.method in GRADIENT_EPISODIC_METHODS:
+            logger.log_event(
+                "gradient_projection_audit",
+                f"task={task_id} method={args.method} "
+                f"optimizer_steps_checked={len(projection_audits)} "
+                f"violations={projection_violations}",
+                payload_json=json.dumps(
+                    {
+                        "task": task_id,
+                        "method": args.method,
+                        "optimizer_steps_checked": len(projection_audits),
+                        "constraint_checks": projection_constraint_checks,
+                        "violations": projection_violations,
+                        "minimum_dot_before": (
+                            minimum_constraint_dot_before
+                            if math.isfinite(minimum_constraint_dot_before)
+                            else None
+                        ),
+                        "minimum_dot_after": (
+                            minimum_constraint_dot_after
+                            if math.isfinite(minimum_constraint_dot_after)
+                            else None
+                        ),
+                    },
+                    sort_keys=True,
+                ),
+            )
+
         model.load_state_dict(best_state)
         checkpoint_path = checkpoint_dir / f"task_{task_id}_model.pt"
         if args.export_s02 and "validation" in args.s02_splits:
@@ -1166,7 +1504,17 @@ def main() -> None:
             }
         )
 
-        if args.method in ALL_REPLAY_METHODS:
+        if episodic_memory is not None:
+            episodic_memory.update(
+                task_id,
+                current_train.features,
+                current_train.labels,
+            )
+            episodic_memory.save_summary(memory_dir / "memory_summary.csv")
+            episodic_memory.save_snapshot(
+                memory_dir / f"memory_after_task_{task_id}.parquet"
+            )
+        elif args.method in ALL_REPLAY_METHODS:
             if isinstance(replay_buffer, FixedBudgetReplayBuffer):
                 replay_buffer.update(
                     current_train.features,
@@ -1177,7 +1525,11 @@ def main() -> None:
                 replay_buffer.update(current_train.features, current_train.labels)
             replay_buffer.save_summary(memory_dir / "memory_summary.csv")
             replay_buffer.save_snapshot(memory_dir / f"memory_after_task_{task_id}.parquet")
-        memory_after = replay_buffer.total_size
+        memory_after = (
+            episodic_memory.total_size
+            if episodic_memory is not None
+            else replay_buffer.total_size
+        )
 
         if args.method == FIXED_BUDGET_METHOD:
             if not isinstance(replay_buffer, FixedBudgetReplayBuffer) or fixed_sampler is None:
@@ -1227,6 +1579,7 @@ def main() -> None:
                 "seen_class_count": len(seen_raw_classes),
                 "current_dataset_size": int(len(current_train.labels)),
                 "replay_examples_available": replay_examples_available,
+                "episodic_memory_examples_available": episodic_memory_examples_available,
                 "training_dataset_size": int(len(train_local_labels)),
                 "validation_dataset_size": int(len(validation_local_labels)),
                 "memory_before": memory_before,
@@ -1248,12 +1601,34 @@ def main() -> None:
                     else np.nan
                 ),
                 "total_memory_budget": (
-                    args.total_memory_budget if args.method == FIXED_BUDGET_METHOD else np.nan
+                    args.total_memory_budget
+                    if args.method == FIXED_BUDGET_METHOD
+                    else (
+                        args.episodic_memory_budget
+                        if args.method in GRADIENT_EPISODIC_METHODS
+                        else np.nan
+                    )
+                ),
+                "episodic_memory_budget": (
+                    args.episodic_memory_budget
+                    if args.method in GRADIENT_EPISODIC_METHODS
+                    else np.nan
                 ),
                 "replay_draws_per_epoch_budget": (
                     args.replay_draws_per_epoch if args.method == FIXED_BUDGET_METHOD else np.nan
                 ),
                 "distillation_active": teacher_model is not None,
+                "gradient_projection_active": args.method in GRADIENT_EPISODIC_METHODS,
+                "gradient_projection_steps_checked": len(projection_audits),
+                "gradient_constraint_checks": projection_constraint_checks,
+                "gradient_constraint_violations": projection_violations,
+                "gradient_constraint_violation_rate": (
+                    projection_violations / len(projection_audits)
+                    if projection_audits
+                    else 0.0
+                ),
+                "minimum_constraint_dot_before": minimum_constraint_dot_before,
+                "minimum_constraint_dot_after": minimum_constraint_dot_after,
                 "batches_per_epoch": len(train_loader),
                 "epochs_trained": epochs_trained,
                 "gradient_accumulation_steps": gradient_accumulation_steps,
