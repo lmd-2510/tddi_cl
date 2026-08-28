@@ -58,6 +58,10 @@ from src.eval.s02_artifacts import (
     S02ExportContext,
     export_s02_artifacts,
 )
+from src.eval.member_predictions import (
+    MemberPredictionContext,
+    export_member_prediction_artifact,
+)
 from src.methods.ewc import compute_fisher, ewc_penalty, grow_head_state
 from src.methods.agem import project_agem_gradient
 from src.methods.gem import (
@@ -72,8 +76,21 @@ from src.methods.sequential import build_training_arrays as build_sequential_tra
 from src.models.mlp import MLP, preset_config
 from src.models.ddi_gcn import DDIGCNClassifier
 from src.models.tabm_classifier import TabMClassifier
+from src.models.tddi_paper_member import (
+    TDDI_PAPER_INPUT_DIM,
+    TDDIPaperMember,
+    TDDIPaperMemberConfig,
+    paper_member_manifest,
+)
+from src.training.ewc_checkpoint import (
+    LoadedEWCCheckpoint,
+    load_ewc_checkpoint,
+    restore_model_and_theta_star,
+    restore_rng_state,
+    save_ewc_checkpoint,
+)
 from src.utils.logging import RunLogger, ensure_run_paths
-from src.utils.seed import set_global_seed
+from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 
 
 FIXED_BUDGET_METHOD = "replay_distill_fixed_budget_uniform"
@@ -127,7 +144,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--variant",
-        choices=["small", "base", "large", "tddi", "tabm", "ddi_gcn"],
+        choices=[
+            "small",
+            "base",
+            "large",
+            "tddi",
+            "tddi_paper_member",
+            "tabm",
+            "ddi_gcn",
+        ],
         default="tddi",
     )
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -144,7 +169,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation", choices=["relu", "gelu"], default="gelu")
     parser.add_argument("--norm", choices=["none", "layernorm", "batchnorm"], default="layernorm")
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help=(
+            "Experiment seed. With no --member-id it also remains the legacy "
+            "training seed."
+        ),
+    )
+    parser.add_argument(
+        "--member-id",
+        type=int,
+        default=None,
+        help=(
+            "Optional ensemble member ID. When set, model/dropout/DataLoader RNG "
+            "uses a deterministic member seed derived from --seed."
+        ),
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--memory-per-class", type=int, default=50)
     parser.add_argument("--total-memory-budget", type=int, default=6800)
@@ -165,6 +207,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
+    parser.add_argument(
+        "--resume-ewc-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Resume an EWC run from a versioned task-boundary checkpoint. "
+            "The existing --outdir is reused without overwriting completed artifacts."
+        ),
+    )
     parser.add_argument("--focal-gamma", type=float, default=1.0)
     parser.add_argument("--graph-cache", type=Path, default=None)
     parser.add_argument("--graph-mapping", type=Path, default=None)
@@ -181,6 +232,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-s02", action="store_true")
     parser.add_argument(
         "--s02-splits",
+        nargs="+",
+        choices=["validation", "test"],
+        default=["validation", "test"],
+    )
+    parser.add_argument(
+        "--export-member-predictions",
+        action="store_true",
+        help="Export versioned per-member logits/probabilities for offline ensemble use.",
+    )
+    parser.add_argument(
+        "--member-prediction-splits",
         nargs="+",
         choices=["validation", "test"],
         default=["validation", "test"],
@@ -294,6 +356,180 @@ def sampler_policy_name(method: str) -> str:
     return "natural_shuffle_without_replacement"
 
 
+def seed_provenance(args: argparse.Namespace) -> dict[str, int | str | None]:
+    """Return the canonical seed metadata shared by manifests and audits."""
+
+    return {
+        "experiment_seed": args.experiment_seed,
+        "member_id": args.member_id,
+        "member_seed": args.member_seed,
+        "member_seed_derivation": args.member_seed_derivation,
+        "seed_mode": args.seed_mode,
+    }
+
+
+def build_ewc_checkpoint_config(
+    args: argparse.Namespace,
+    task_spec: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the immutable training contract checked when an EWC run resumes."""
+
+    config = {
+        "method": args.method,
+        "variant": args.variant,
+        "train": str(args.train.resolve()),
+        "validation": str(args.validation.resolve()),
+        "test": str(args.test.resolve()),
+        "feature_cols_sha256": _sha256_file(args.feature_cols),
+        "scaler_sha256": _sha256_file(args.scaler),
+        "task_file_sha256": _sha256_file(args.task_file),
+        "task_protocol": task_spec.get("protocol"),
+        "num_tasks": len(task_spec["tasks"]),
+        "batch_size": args.batch_size,
+        "effective_batch_size": args.effective_batch_size,
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "dropout": args.dropout,
+        "activation": args.activation,
+        "norm": args.norm,
+        "patience": args.patience,
+        "ewc_lambda": args.ewc_lambda,
+        "focal_gamma": args.focal_gamma,
+        "max_train_rows_per_task": args.max_train_rows_per_task,
+        "max_validation_rows_per_task": args.max_validation_rows_per_task,
+        "max_test_rows_per_task": args.max_test_rows_per_task,
+        "export_s02": args.export_s02,
+        "s02_splits": list(args.s02_splits),
+        "tabm_k": args.tabm_k,
+        "tabm_blocks": args.tabm_blocks,
+        "tabm_d_block": args.tabm_d_block,
+        "tabm_dropout": args.tabm_dropout,
+        "ddi_gcn_depth": args.ddi_gcn_depth,
+        "ddi_gcn_width": args.ddi_gcn_width,
+        "ddi_gcn_attention_dim": args.ddi_gcn_attention_dim,
+    }
+    if args.export_member_predictions:
+        config["export_member_predictions"] = True
+        config["member_prediction_splits"] = list(args.member_prediction_splits)
+    if args.variant == "tddi_paper_member":
+        config["model_architecture"] = paper_member_manifest(
+            dropout=args.dropout,
+            activation=args.activation,
+        )
+    return config
+
+
+def expected_seen_map_after_task(
+    tasks: list[dict[str, Any]],
+    completed_task_id: int,
+) -> dict[int, int]:
+    """Rebuild the canonical class map implied by a completed task boundary."""
+
+    if completed_task_id < 0 or completed_task_id >= len(tasks):
+        raise ValueError(
+            f"EWC completed task {completed_task_id} is outside 0..{len(tasks) - 1}."
+        )
+    task_ids = [int(task["task_id"]) for task in tasks]
+    if task_ids != list(range(len(tasks))):
+        raise ValueError("Task IDs must be contiguous from zero for EWC resume.")
+    seen_classes = {
+        int(class_id)
+        for task in tasks[: completed_task_id + 1]
+        for class_id in task["classes"]
+    }
+    return build_seen_class_map(seen_classes)
+
+
+def validate_resume_run_config(
+    path: Path,
+    checkpoint: LoadedEWCCheckpoint,
+) -> None:
+    """Bind a resume checkpoint to the pre-existing run directory."""
+
+    if not path.is_file():
+        raise FileNotFoundError(f"EWC resume requires the existing run config: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("run_id") != checkpoint.run_id:
+        raise ValueError("EWC checkpoint run_id does not match the existing run_config.json.")
+    resolved = payload.get("resolved")
+    if not isinstance(resolved, dict):
+        raise ValueError("Existing run_config.json is missing resolved metadata.")
+    mismatches = [
+        key
+        for key, expected in checkpoint.seed_metadata.items()
+        if resolved.get(key) != expected
+    ]
+    if mismatches:
+        raise ValueError(f"Existing run_config seed metadata mismatch: {mismatches}")
+
+
+def build_ewc_progress(
+    *,
+    result_matrix: np.ndarray,
+    result_rows: list[dict[str, Any]],
+    best_task_rows: list[dict[str, Any]],
+    training_audit_rows: list[dict[str, Any]],
+    classwise_tracker: ClasswiseTracker,
+) -> dict[str, Any]:
+    """Capture reporting state so a resumed run can finish the same artifacts."""
+
+    return {
+        "result_matrix": np.asarray(result_matrix, dtype=np.float64).copy(),
+        "result_rows": list(result_rows),
+        "best_task_rows": list(best_task_rows),
+        "training_audit_rows": list(training_audit_rows),
+        "class_trajectory_rows": classwise_tracker.trajectory_frame().to_dict("records"),
+    }
+
+
+def restore_ewc_progress(
+    checkpoint: LoadedEWCCheckpoint,
+    *,
+    num_tasks: int,
+    classwise_tracker: ClasswiseTracker,
+) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Validate and restore reporting state stored at the task boundary."""
+
+    required = {
+        "result_matrix",
+        "result_rows",
+        "best_task_rows",
+        "training_audit_rows",
+        "class_trajectory_rows",
+    }
+    missing = sorted(required - set(checkpoint.progress))
+    if missing:
+        raise ValueError(f"EWC checkpoint progress is missing keys: {missing}")
+    result_matrix = np.asarray(checkpoint.progress["result_matrix"], dtype=np.float64)
+    if result_matrix.shape != (num_tasks, num_tasks):
+        raise ValueError(
+            "EWC result matrix shape does not match the task count: "
+            f"{result_matrix.shape} != {(num_tasks, num_tasks)}."
+        )
+    result_rows = checkpoint.progress["result_rows"]
+    best_task_rows = checkpoint.progress["best_task_rows"]
+    training_audit_rows = checkpoint.progress["training_audit_rows"]
+    class_trajectory_rows = checkpoint.progress["class_trajectory_rows"]
+    if not all(
+        isinstance(rows, list)
+        for rows in (result_rows, best_task_rows, training_audit_rows, class_trajectory_rows)
+    ):
+        raise TypeError("EWC checkpoint progress row collections must be lists.")
+    expected_completed_count = checkpoint.completed_task_id + 1
+    if len(best_task_rows) != expected_completed_count:
+        raise ValueError("EWC best-task progress does not match completed_task_id.")
+    if len(training_audit_rows) != expected_completed_count:
+        raise ValueError("EWC training audit progress does not match completed_task_id.")
+    classwise_tracker.restore_trajectory(pd.DataFrame(class_trajectory_rows))
+    return (
+        result_matrix.copy(),
+        list(result_rows),
+        list(best_task_rows),
+        list(training_audit_rows),
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -343,7 +579,8 @@ def write_run_config(
         "sampler_policy": sampler_policy_name(args.method),
         "validation_policy": "all_seen_classes_for_early_stopping",
         "order_seed": task_spec.get("seed"),
-        "training_seed": args.seed,
+        "training_seed": args.member_seed,
+        **seed_provenance(args),
         "task_protocol": task_spec.get("protocol"),
         "num_tasks": len(task_spec["tasks"]),
         "task_file_sha256": _sha256_file(args.task_file),
@@ -401,6 +638,11 @@ def write_run_config(
                     "training_orchestration": _sha256_file(Path(__file__)),
                 },
             }
+        )
+    if args.variant == "tddi_paper_member":
+        resolved["model"] = paper_member_manifest(
+            dropout=args.dropout,
+            activation=args.activation,
         )
     model_implementation = PROJECT_ROOT / "src/models" / f"{args.variant}.py"
     if args.variant == "tabm":
@@ -480,7 +722,7 @@ def export_s02_evaluation(
         metadata,
         S02ExportContext(
             run_id=run_id,
-            seed=args.seed,
+            seed=args.experiment_seed,
             method=args.method,
             method_protocol=method_protocol_name(args.method, args.memory_per_class),
             train_task=task_id,
@@ -508,6 +750,62 @@ def export_s02_evaluation(
     )
 
 
+def export_member_evaluation(
+    result: EvaluationResult,
+    metadata: dict[str, np.ndarray] | None,
+    *,
+    run_paths: dict[str, Path],
+    run_id: str,
+    args: argparse.Namespace,
+    task_id: int,
+    split: str,
+    logger: RunLogger,
+) -> None:
+    """Publish one member's aligned outputs for later offline aggregation."""
+
+    if result.outputs is None or metadata is None:
+        raise RuntimeError(
+            f"Member {split} export requires outputs and drug-pair metadata."
+        )
+    if args.member_id is None:
+        raise ValueError("Member prediction export requires --member-id.")
+    context = MemberPredictionContext(
+        run_id=run_id,
+        method=args.method,
+        method_protocol=method_protocol_name(args.method, args.memory_per_class),
+        task_id=task_id,
+        split=split,
+        member_id=args.member_id,
+        experiment_seed=args.experiment_seed,
+        member_seed=args.member_seed,
+    )
+    artifact_path = export_member_prediction_artifact(
+        result.outputs,
+        metadata,
+        context,
+        run_paths["outdir"]
+        / "member_predictions"
+        / f"task_{task_id}"
+        / f"{split}.npz",
+    )
+    logger.log_event(
+        "member_predictions_exported",
+        f"task={task_id} split={split} member_id={args.member_id} "
+        f"rows={result.outputs.labels.shape[0]}",
+        payload_json=json.dumps(
+            {
+                "task": task_id,
+                "split": split,
+                "member_id": args.member_id,
+                "experiment_seed": args.experiment_seed,
+                "member_seed": args.member_seed,
+                "rows": int(result.outputs.labels.shape[0]),
+                "class_count": int(result.outputs.class_ids.shape[0]),
+                "artifact": str(artifact_path),
+            },
+            sort_keys=True,
+        ),
+    )
 def expand_model_for_seen_classes(
     previous_model: nn.Module | None,
     previous_seen_map: dict[int, int] | None,
@@ -528,7 +826,25 @@ def expand_model_for_seen_classes(
     ddi_gcn_attention_dim: int = 65,
 ) -> nn.Module:
     require_torch()
-    if variant == "tabm":
+    if variant == "tddi_paper_member":
+        if input_dim != TDDI_PAPER_INPUT_DIM:
+            raise ValueError(
+                "tddi_paper_member requires input_dim="
+                f"{TDDI_PAPER_INPUT_DIM}, got {input_dim}."
+            )
+        if norm != "layernorm":
+            raise ValueError(
+                "tddi_paper_member has fixed input LayerNorm; use --norm layernorm."
+            )
+        model = TDDIPaperMember(
+            TDDIPaperMemberConfig(
+                input_dim=input_dim,
+                num_classes=len(current_seen_map),
+                dropout=dropout,
+                activation=activation,  # type: ignore[arg-type]
+            )
+        )
+    elif variant == "tabm":
         model = TabMClassifier(
             input_dim=input_dim,
             num_classes=len(current_seen_map),
@@ -559,8 +875,26 @@ def expand_model_for_seen_classes(
         model = MLP(config)
     if previous_model is None or previous_seen_map is None:
         return model
+    return copy_previous_state_to_expanded_model(
+        previous_model,
+        model,
+        previous_seen_map,
+        current_seen_map,
+        variant=variant,
+    )
 
-    current_state = model.state_dict()
+
+def copy_previous_state_to_expanded_model(
+    previous_model: nn.Module,
+    expanded_model: nn.Module,
+    previous_seen_map: dict[int, int],
+    current_seen_map: dict[int, int],
+    *,
+    variant: str,
+) -> nn.Module:
+    """Copy a backbone and raw-class-aligned old head rows into a wider model."""
+
+    current_state = expanded_model.state_dict()
     previous_state = previous_model.state_dict()
     for key, value in previous_state.items():
         if not key.startswith("head.") and key in current_state and current_state[key].shape == value.shape:
@@ -585,8 +919,8 @@ def expand_model_for_seen_classes(
                 previous_index
             ].clone()
 
-    model.load_state_dict(current_state)
-    return model
+    expanded_model.load_state_dict(current_state)
+    return expanded_model
 
 
 @dataclass(frozen=True)
@@ -597,6 +931,16 @@ class GradientProjectionAudit:
     violated: bool
     minimum_dot_before: float
     minimum_dot_after: float
+
+
+@dataclass(frozen=True)
+class EpochLossComponents:
+    """Sample-weighted training losses for one completed epoch."""
+
+    classification_loss: float
+    raw_ewc_penalty: float
+    scaled_ewc_penalty: float
+    total_loss: float
 
 
 def classification_forward(
@@ -788,11 +1132,15 @@ def train_one_epoch(
     ewc_lambda: float = 0.0,
     gradient_accumulation_steps: int = 1,
     gradient_projector: Callable[[int], None] | None = None,
-) -> float:
+    return_loss_components: bool = False,
+) -> float | EpochLossComponents:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
     model.train()
     total_loss = 0.0
+    total_classification_loss = 0.0
+    total_raw_ewc_penalty = 0.0
+    total_scaled_ewc_penalty = 0.0
     total_examples = 0
 
     student_old_indices: list[int] = []
@@ -809,13 +1157,14 @@ def train_one_epoch(
         features = features.to(device)
         labels = labels.to(device)
 
-        logits, student_features, loss = classification_forward(
+        logits, student_features, classification_loss = classification_forward(
             model,
             features,
             labels,
             criterion,
             include_latent=teacher_model is not None and bool(student_old_indices),
         )
+        loss = classification_loss
 
         if teacher_model is not None and student_old_indices:
             with torch.no_grad():
@@ -836,8 +1185,12 @@ def train_one_epoch(
             feature_distill_loss = F.mse_loss(student_features, teacher_features)
             loss = loss + distill_alpha * distill_loss + feature_distill_weight * feature_distill_loss
 
-        if fisher is not None and theta_star is not None and ewc_lambda:
-            loss = loss + ewc_lambda * ewc_penalty(model, fisher, theta_star)
+        raw_ewc_penalty = torch.zeros((), device=loss.device)
+        scaled_ewc_penalty = torch.zeros((), device=loss.device)
+        if fisher is not None and theta_star is not None:
+            raw_ewc_penalty = ewc_penalty(model, fisher, theta_star)
+            scaled_ewc_penalty = ewc_lambda * raw_ewc_penalty
+            loss = loss + scaled_ewc_penalty
 
         unscaled_loss = loss
         microbatch_capacity = loader.batch_size
@@ -870,9 +1223,19 @@ def train_one_epoch(
 
         batch_size = labels.shape[0]
         total_loss += float(unscaled_loss.item()) * batch_size
+        total_classification_loss += float(classification_loss.detach().item()) * batch_size
+        total_raw_ewc_penalty += float(raw_ewc_penalty.detach().item()) * batch_size
+        total_scaled_ewc_penalty += float(scaled_ewc_penalty.detach().item()) * batch_size
         total_examples += batch_size
 
-    return total_loss / max(total_examples, 1)
+    denominator = max(total_examples, 1)
+    components = EpochLossComponents(
+        classification_loss=total_classification_loss / denominator,
+        raw_ewc_penalty=total_raw_ewc_penalty / denominator,
+        scaled_ewc_penalty=total_scaled_ewc_penalty / denominator,
+        total_loss=total_loss / denominator,
+    )
+    return components if return_loss_components else components.total_loss
 
 
 def build_fixed_budget_audit_rows(
@@ -1021,6 +1384,11 @@ def write_run_summary(
 def main() -> None:
     args = parse_args()
     require_torch()
+    seed_configuration = resolve_seed_configuration(args.seed, args.member_id)
+    args.experiment_seed = seed_configuration.experiment_seed
+    args.member_seed = seed_configuration.member_seed
+    args.seed_mode = seed_configuration.mode
+    args.member_seed_derivation = seed_configuration.derivation
     effective_batch_size = args.effective_batch_size or args.batch_size
     if args.batch_size <= 0 or effective_batch_size < args.batch_size:
         raise ValueError("Batch sizes must be positive and effective batch must be at least microbatch.")
@@ -1042,12 +1410,25 @@ def main() -> None:
         raise ValueError("DDI-GCN requires --graph-cache and --graph-mapping.")
     if args.variant == "ddi_gcn" and args.export_s02:
         raise ValueError("S02 descriptor export is not supported for DDI-GCN runs.")
+    if args.resume_ewc_checkpoint is not None and args.method != "ewc":
+        raise ValueError("--resume-ewc-checkpoint is only valid with --method ewc.")
+    if args.export_member_predictions and args.member_id is None:
+        raise ValueError("--export-member-predictions requires --member-id.")
 
-    run_id = uuid.uuid4().hex
-    run_paths = ensure_run_paths(args.outdir, require_empty=True)
-    set_global_seed(args.seed)
+    is_resume = args.resume_ewc_checkpoint is not None
+    if is_resume and not args.outdir.is_dir():
+        raise FileNotFoundError(
+            f"EWC resume requires the existing run output directory: {args.outdir}"
+        )
+    run_paths = ensure_run_paths(args.outdir, require_empty=not is_resume)
+    set_configured_seeds(seed_configuration)
     device = resolve_device(args.device)
     feature_columns = load_feature_columns(args.feature_cols)
+    if args.variant == "tddi_paper_member" and len(feature_columns) != TDDI_PAPER_INPUT_DIM:
+        raise ValueError(
+            "tddi_paper_member requires exactly "
+            f"{TDDI_PAPER_INPUT_DIM} numerical features, got {len(feature_columns)}."
+        )
     scaler_payload = load_scaler_payload(args.scaler)
     graph_bank = (
         load_graph_bank(args.graph_cache, args.graph_mapping)
@@ -1055,13 +1436,43 @@ def main() -> None:
         else None
     )
     task_spec = load_task_spec(args.task_file)
-    write_run_config(
-        run_paths["run_config_json"],
-        args=args,
-        run_id=run_id,
-        device=device,
-        task_spec=task_spec,
+    tasks = task_spec["tasks"]
+    num_tasks = len(tasks)
+    ewc_checkpoint_config = (
+        build_ewc_checkpoint_config(args, task_spec)
+        if args.method == "ewc"
+        else None
     )
+    resume_checkpoint: LoadedEWCCheckpoint | None = None
+    if is_resume:
+        if ewc_checkpoint_config is None:
+            raise RuntimeError("EWC resume config was not initialized.")
+        resume_checkpoint = load_ewc_checkpoint(
+            args.resume_ewc_checkpoint,
+            expected_seed_metadata=seed_provenance(args),
+            expected_config=ewc_checkpoint_config,
+        )
+        expected_resume_map = expected_seen_map_after_task(
+            tasks,
+            resume_checkpoint.completed_task_id,
+        )
+        if resume_checkpoint.seen_class_map != expected_resume_map:
+            raise ValueError(
+                "EWC checkpoint class map does not match the configured task protocol."
+            )
+        if resume_checkpoint.next_task_id >= num_tasks:
+            raise ValueError("EWC checkpoint already completed the final configured task.")
+        run_id = resume_checkpoint.run_id
+        validate_resume_run_config(run_paths["run_config_json"], resume_checkpoint)
+    else:
+        run_id = uuid.uuid4().hex
+        write_run_config(
+            run_paths["run_config_json"],
+            args=args,
+            run_id=run_id,
+            device=device,
+            task_spec=task_spec,
+        )
 
     checkpoint_dir = run_paths["outdir"] / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -1074,15 +1485,13 @@ def main() -> None:
         run_id=run_id,
     )
 
-    tasks = task_spec["tasks"]
-    num_tasks = len(tasks)
     first_task_by_class = build_first_task_lookup(tasks)
     train_count_by_class = load_class_counts(args.train)
     missing_train_counts = sorted(set(first_task_by_class) - set(train_count_by_class))
     if missing_train_counts:
         raise ValueError(f"Task classes missing from the full train split: {missing_train_counts}")
     classwise_tracker = ClasswiseTracker(
-        seed=args.seed,
+        seed=args.experiment_seed,
         method=args.method,
         first_task_by_class=first_task_by_class,
         train_count_by_class=train_count_by_class,
@@ -1093,38 +1502,55 @@ def main() -> None:
     training_audit_rows: list[dict[str, Any]] = []
     replay_budget_audit_rows: list[dict[str, Any]] = []
 
-    logger.log_event(
-        "run_started",
-        f"CIL training started run_id={run_id} method={args.method} "
-        f"protocol={method_protocol_name(args.method, args.memory_per_class)} "
-        f"tasks={num_tasks} device={device}",
-        payload_json=json.dumps(
-            {
-                "run_id": run_id,
-                "method_protocol": method_protocol_name(args.method, args.memory_per_class),
-                "sampler_policy": sampler_policy_name(args.method),
-                "validation_policy": "all_seen_classes_for_early_stopping",
-            },
-            sort_keys=True,
-        ),
-    )
+    if resume_checkpoint is None:
+        logger.log_event(
+            "run_started",
+            f"CIL training started run_id={run_id} method={args.method} "
+            f"protocol={method_protocol_name(args.method, args.memory_per_class)} "
+            f"tasks={num_tasks} device={device}",
+            payload_json=json.dumps(
+                {
+                    "run_id": run_id,
+                    "method_protocol": method_protocol_name(args.method, args.memory_per_class),
+                    "sampler_policy": sampler_policy_name(args.method),
+                    "validation_policy": "all_seen_classes_for_early_stopping",
+                    **seed_provenance(args),
+                },
+                sort_keys=True,
+            ),
+        )
+    else:
+        logger.log_event(
+            "run_resumed",
+            f"EWC run resumed after task={resume_checkpoint.completed_task_id} "
+            f"next_task={resume_checkpoint.next_task_id} "
+            f"checkpoint={args.resume_ewc_checkpoint}",
+            payload_json=json.dumps(
+                {
+                    "completed_task_id": resume_checkpoint.completed_task_id,
+                    "next_task_id": resume_checkpoint.next_task_id,
+                    **seed_provenance(args),
+                },
+                sort_keys=True,
+            ),
+        )
 
     replay_buffer: ReplayBuffer | FixedBudgetReplayBuffer
     if args.method == FIXED_BUDGET_METHOD:
         replay_buffer = FixedBudgetReplayBuffer(
             total_memory_budget=args.total_memory_budget,
-            random_seed=args.seed,
+            random_seed=args.experiment_seed,
         )
     else:
         replay_buffer = ReplayBuffer(
             memory_per_class=args.memory_per_class,
-            random_seed=args.seed,
+            random_seed=args.experiment_seed,
         )
     episodic_memory = (
         TaskEpisodicMemory(
             total_budget=args.episodic_memory_budget,
             total_tasks=num_tasks,
-            random_seed=args.seed,
+            random_seed=args.experiment_seed,
         )
         if args.method in GRADIENT_EPISODIC_METHODS
         else None
@@ -1134,8 +1560,49 @@ def main() -> None:
     previous_seen_raw_classes: list[int] | None = None
     fisher_total: dict[str, "torch.Tensor"] | None = None
     theta_star: dict[str, "torch.Tensor"] | None = None
+    start_task_id = 0
+    if resume_checkpoint is not None:
+        (
+            result_matrix,
+            result_rows,
+            best_task_rows,
+            training_audit_rows,
+        ) = restore_ewc_progress(
+            resume_checkpoint,
+            num_tasks=num_tasks,
+            classwise_tracker=classwise_tracker,
+        )
+        previous_seen_map = dict(resume_checkpoint.seen_class_map)
+        previous_seen_raw_classes = ordered_raw_classes(previous_seen_map)
+        previous_model = expand_model_for_seen_classes(
+            previous_model=None,
+            previous_seen_map=None,
+            current_seen_map=previous_seen_map,
+            variant=args.variant,
+            input_dim=len(feature_columns),
+            dropout=args.dropout,
+            activation=args.activation,
+            norm=args.norm,
+            graph_bank=graph_bank,
+            tabm_k=args.tabm_k,
+            tabm_blocks=args.tabm_blocks,
+            tabm_d_block=args.tabm_d_block,
+            tabm_dropout=args.tabm_dropout,
+            ddi_gcn_depth=args.ddi_gcn_depth,
+            ddi_gcn_width=args.ddi_gcn_width,
+            ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
+        )
+        theta_star = restore_model_and_theta_star(previous_model, resume_checkpoint)
+        fisher_total = {
+            name: value.detach().clone()
+            for name, value in resume_checkpoint.fisher_total.items()
+        }
+        start_task_id = resume_checkpoint.next_task_id
+        # Rebuilding the previous model consumes Torch RNG. Restore only after that
+        # construction so the first operation for the next task matches a continuous run.
+        restore_rng_state(resume_checkpoint.rng_state)
 
-    for task in tasks:
+    for task in tasks[start_task_id:]:
         task_id = int(task["task_id"])
         current_raw_classes = [int(class_id) for class_id in task["classes"]]
         seen_raw_classes = sorted(
@@ -1175,6 +1642,11 @@ def main() -> None:
             max_rows=args.max_train_rows_per_task,
             include_ranking_features=args.method == FIXED_BUDGET_METHOD,
         )
+        export_validation_s02 = args.export_s02 and "validation" in args.s02_splits
+        export_validation_member = (
+            args.export_member_predictions
+            and "validation" in args.member_prediction_splits
+        )
         validation_seen, _ = load_backbone_split(
             args,
             args.validation,
@@ -1182,7 +1654,7 @@ def main() -> None:
             scaler_payload,
             graph_bank,
             class_ids=seen_raw_classes,
-            include_metadata=args.export_s02 and "validation" in args.s02_splits,
+            include_metadata=export_validation_s02 or export_validation_member,
             max_rows=args.max_validation_rows_per_task,
         )
 
@@ -1231,7 +1703,7 @@ def main() -> None:
                 current_count=int(len(current_train.labels)),
                 replay_raw_labels=replay_raw_labels,
                 replay_draws_per_epoch=(0 if task_id == 0 else args.replay_draws_per_epoch),
-                seed=args.seed,
+                seed=args.experiment_seed,
                 task_id=task_id,
             )
             train_loader = DataLoader(
@@ -1297,6 +1769,12 @@ def main() -> None:
         ).to(device)
 
         if args.method == "ewc" and fisher_total is not None and previous_seen_map is not None:
+            fisher_total = {
+                name: value.to(device) for name, value in fisher_total.items()
+            }
+            if theta_star is None:
+                raise RuntimeError("EWC theta_star is missing for a resumed task.")
+            theta_star = {name: value.to(device) for name, value in theta_star.items()}
             reference_state = model.state_dict()
             fisher_total = grow_head_state(
                 fisher_total, previous_seen_map, current_seen_map, reference_state, zero_new_rows=True
@@ -1351,14 +1829,14 @@ def main() -> None:
                             method=args.method,
                             gem_reference_batch_size=args.batch_size,
                             agem_reference_batch_size=args.agem_reference_batch_size,
-                            seed=args.seed,
+                            seed=args.experiment_seed,
                             task_id=task_id,
                             epoch=current_epoch,
                             optimizer_step=optimizer_step,
                         )
                     )
 
-            train_loss = train_one_epoch(
+            loss_components = train_one_epoch(
                 model,
                 train_loader,
                 optimizer,
@@ -1375,7 +1853,11 @@ def main() -> None:
                 ewc_lambda=args.ewc_lambda if args.method == "ewc" else 0.0,
                 gradient_accumulation_steps=gradient_accumulation_steps,
                 gradient_projector=gradient_projector,
+                return_loss_components=True,
             )
+            if not isinstance(loss_components, EpochLossComponents):
+                raise RuntimeError("Training did not return epoch loss components.")
+            train_loss = loss_components.total_loss
             if fixed_sampler is not None:
                 if len(fixed_sampler.history) != epoch:
                     raise RuntimeError("Fixed replay sampler emitted an unexpected number of epochs.")
@@ -1397,12 +1879,37 @@ def main() -> None:
                 evaluation_class_indices=sorted(inverse_seen_map),
             )
             val_metrics = val_result.metrics
-            logger.log(
+            epoch_message = (
                 f"task={task_id} epoch={epoch}/{args.epochs} "
                 f"train_loss={train_loss:.6f} val_loss={val_metrics['loss']:.6f} "
                 f"val_macro_f1={val_metrics['macro_f1']:.6f} "
                 f"val_bal_acc={val_metrics['balanced_accuracy']:.6f}"
             )
+            if args.method == "ewc":
+                epoch_message += (
+                    f" classification_loss={loss_components.classification_loss:.6f}"
+                    f" raw_ewc_penalty={loss_components.raw_ewc_penalty:.6f}"
+                    f" scaled_ewc_penalty={loss_components.scaled_ewc_penalty:.6f}"
+                    f" total_loss={loss_components.total_loss:.6f}"
+                )
+                logger.log_event(
+                    "ewc_loss_components",
+                    epoch_message,
+                    payload_json=json.dumps(
+                        {
+                            "task": task_id,
+                            "epoch": epoch,
+                            "classification_loss": loss_components.classification_loss,
+                            "raw_ewc_penalty": loss_components.raw_ewc_penalty,
+                            "scaled_ewc_penalty": loss_components.scaled_ewc_penalty,
+                            "total_loss": loss_components.total_loss,
+                            "ewc_lambda": args.ewc_lambda,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            else:
+                logger.log(epoch_message)
 
             if best_val_metrics is None or val_metrics["macro_f1"] > best_val_metrics["macro_f1"]:
                 best_epoch = epoch
@@ -1473,7 +1980,7 @@ def main() -> None:
 
         model.load_state_dict(best_state)
         checkpoint_path = checkpoint_dir / f"task_{task_id}_model.pt"
-        if args.export_s02 and "validation" in args.s02_splits:
+        if export_validation_s02 or export_validation_member:
             validation_export_result = evaluate_model(
                 model,
                 validation_loader,
@@ -1483,17 +1990,29 @@ def main() -> None:
                 evaluation_class_indices=sorted(inverse_seen_map),
                 collect_outputs=True,
             )
-            export_s02_evaluation(
-                validation_export_result,
-                validation_seen.metadata,
-                run_paths=run_paths,
-                run_id=run_id,
-                args=args,
-                task_id=task_id,
-                split="validation",
-                checkpoint_path=checkpoint_path,
-                logger=logger,
-            )
+            if export_validation_s02:
+                export_s02_evaluation(
+                    validation_export_result,
+                    validation_seen.metadata,
+                    run_paths=run_paths,
+                    run_id=run_id,
+                    args=args,
+                    task_id=task_id,
+                    split="validation",
+                    checkpoint_path=checkpoint_path,
+                    logger=logger,
+                )
+            if export_validation_member:
+                export_member_evaluation(
+                    validation_export_result,
+                    validation_seen.metadata,
+                    run_paths=run_paths,
+                    run_id=run_id,
+                    args=args,
+                    task_id=task_id,
+                    split="validation",
+                    logger=logger,
+                )
             del validation_export_result
         best_task_rows.append(
             {
@@ -1544,7 +2063,7 @@ def main() -> None:
             replay_budget_audit_rows.extend(
                 build_fixed_budget_audit_rows(
                     run_id=run_id,
-                    seed=args.seed,
+                    seed=args.experiment_seed,
                     task_id=task_id,
                     seen_raw_classes=seen_raw_classes,
                     current_raw_classes=current_raw_classes,
@@ -1570,7 +2089,8 @@ def main() -> None:
         training_audit_rows.append(
             {
                 "run_id": run_id,
-                "seed": args.seed,
+                "seed": args.experiment_seed,
+                **seed_provenance(args),
                 "method": args.method,
                 "method_protocol": method_protocol_name(args.method, args.memory_per_class),
                 "task": task_id,
@@ -1714,6 +2234,11 @@ def main() -> None:
                     **metrics,
                 }
             )
+        export_test_s02 = args.export_s02 and "test" in args.s02_splits
+        export_test_member = (
+            args.export_member_predictions
+            and "test" in args.member_prediction_splits
+        )
         seen_test_arrays, _ = load_backbone_split(
             args,
             args.test,
@@ -1721,7 +2246,7 @@ def main() -> None:
             scaler_payload,
             graph_bank,
             class_ids=seen_raw_classes,
-            include_metadata=args.export_s02 and "test" in args.s02_splits,
+            include_metadata=export_test_s02 or export_test_member,
             max_rows=args.max_test_rows_per_task,
         )
         seen_test_labels = remap_labels(seen_test_arrays.labels, current_seen_map)
@@ -1735,13 +2260,13 @@ def main() -> None:
             inverse_seen_map,
             evaluation_class_indices=sorted(inverse_seen_map),
             include_classwise=True,
-            collect_outputs=args.export_s02 and "test" in args.s02_splits,
+            collect_outputs=export_test_s02 or export_test_member,
         )
         final_seen_metrics = final_seen_result.metrics
         classwise_metrics = final_seen_result.classwise_metrics
         if classwise_metrics is None:
             raise RuntimeError("Seen-class evaluation did not return class-wise metrics.")
-        if args.export_s02 and "test" in args.s02_splits:
+        if export_test_s02:
             export_s02_evaluation(
                 final_seen_result,
                 seen_test_arrays.metadata,
@@ -1751,6 +2276,17 @@ def main() -> None:
                 task_id=task_id,
                 split="test",
                 checkpoint_path=checkpoint_path,
+                logger=logger,
+            )
+        if export_test_member:
+            export_member_evaluation(
+                final_seen_result,
+                seen_test_arrays.metadata,
+                run_paths=run_paths,
+                run_id=run_id,
+                args=args,
+                task_id=task_id,
+                split="test",
                 logger=logger,
             )
         del final_seen_result
@@ -1770,6 +2306,41 @@ def main() -> None:
             f"seen_bal_acc={final_seen_metrics['balanced_accuracy']:.6f} "
             f"class_trajectory={trajectory_path} class_forgetting={forgetting_path}",
         )
+        if args.method == "ewc":
+            if fisher_total is None:
+                raise RuntimeError("EWC Fisher is missing at the completed task boundary.")
+            if ewc_checkpoint_config is None:
+                raise RuntimeError("EWC checkpoint config was not initialized.")
+            ewc_checkpoint_path = checkpoint_dir / "latest_ewc_state.pt"
+            save_ewc_checkpoint(
+                ewc_checkpoint_path,
+                run_id=run_id,
+                completed_task_id=task_id,
+                model_state=best_state,
+                fisher_total=fisher_total,
+                seen_class_map=current_seen_map,
+                seed_metadata=seed_provenance(args),
+                config=ewc_checkpoint_config,
+                progress=build_ewc_progress(
+                    result_matrix=result_matrix,
+                    result_rows=result_rows,
+                    best_task_rows=best_task_rows,
+                    training_audit_rows=training_audit_rows,
+                    classwise_tracker=classwise_tracker,
+                ),
+            )
+            logger.log_event(
+                "ewc_checkpoint_saved",
+                f"task={task_id} path={ewc_checkpoint_path}",
+                payload_json=json.dumps(
+                    {
+                        "completed_task_id": task_id,
+                        "next_task_id": task_id + 1,
+                        "path": str(ewc_checkpoint_path),
+                    },
+                    sort_keys=True,
+                ),
+            )
 
     result_matrix_frame = result_matrix_to_frame(result_matrix)
     forgetting_frame = compute_forgetting(result_matrix)

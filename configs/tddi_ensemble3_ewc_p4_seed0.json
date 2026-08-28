@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "study_name": "tddi_ensemble3_ewc_p4_seed0",
+  "experiment_seed": 0,
+  "member_ids": [0, 1, 2],
+  "protocol": {
+    "id": "P4",
+    "name": "constrained_mass_balanced",
+    "expected_task_count": 8,
+    "task_file": "outputs/tasks/constrained_mass_balanced_seed0_tasks.json"
+  },
+  "inputs": {
+    "train": "train_extracted.parquet",
+    "validation": "validation_extracted.parquet",
+    "test": "test_extracted.parquet",
+    "feature_columns": "outputs/audit/feature_columns.json",
+    "scaler": "outputs/preprocess/scaler.pkl"
+  },
+  "model": {
+    "variant": "tddi_paper_member",
+    "dropout": 0.2,
+    "activation": "gelu",
+    "normalization": "layernorm"
+  },
+  "training": {
+    "method": "ewc",
+    "method_protocol": "ewc_natural_sampling",
+    "microbatch_size": 64,
+    "effective_batch_size": 1024,
+    "epochs": 20,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 5,
+    "ewc_lambda": 1000.0,
+    "focal_gamma": 1.0,
+    "device": "cuda"
+  },
+  "prediction_splits": ["validation", "test"],
+  "outputs": {
+    "root": "outputs/tddi_ensemble3_ewc_p4_seed0",
+    "member_namespace": "member_{member_id}",
+    "ensemble_namespace": "offline_ensemble",
+    "manifest": "study_manifest.json"
+  }
+}

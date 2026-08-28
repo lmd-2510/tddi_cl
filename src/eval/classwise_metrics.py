@@ -133,6 +133,45 @@ class ClasswiseTracker:
     train_count_by_class: Mapping[int, int]
     _frames: list[pd.DataFrame] = field(default_factory=list, init=False, repr=False)
 
+    def restore_trajectory(self, trajectory: pd.DataFrame) -> None:
+        """Restore completed task rows from a validated task-boundary checkpoint."""
+
+        if self._frames:
+            raise RuntimeError("Cannot restore a class trajectory into a non-empty tracker.")
+        trajectory = trajectory.copy()
+        if trajectory.empty:
+            return
+        missing_columns = sorted(set(TRAJECTORY_COLUMNS) - set(trajectory.columns))
+        if missing_columns:
+            raise ValueError(f"Restored class trajectory is missing columns: {missing_columns}")
+        trajectory = trajectory[TRAJECTORY_COLUMNS]
+        if set(trajectory["seed"].astype(int)) != {int(self.seed)}:
+            raise ValueError("Restored class trajectory seed does not match the run.")
+        if set(trajectory["method"].astype(str)) != {self.method}:
+            raise ValueError("Restored class trajectory method does not match the run.")
+        key_columns = ["seed", "method", "train_task", "class_id"]
+        if trajectory.duplicated(key_columns).any():
+            raise ValueError("Restored class trajectory contains duplicate keys.")
+        task_ids = sorted(trajectory["train_task"].astype(int).unique().tolist())
+        if task_ids != list(range(task_ids[-1] + 1)):
+            raise ValueError("Restored class trajectory tasks must be contiguous from zero.")
+        for class_id, first_task in zip(
+            trajectory["class_id"].astype(int),
+            trajectory["first_task"].astype(int),
+        ):
+            if self.first_task_by_class.get(class_id) != first_task:
+                raise ValueError("Restored class trajectory first-task metadata does not match.")
+        for class_id, train_count in zip(
+            trajectory["class_id"].astype(int),
+            trajectory["train_count"].astype(int),
+        ):
+            if self.train_count_by_class.get(class_id) != train_count:
+                raise ValueError("Restored class trajectory train-count metadata does not match.")
+        self._frames = [
+            frame.reset_index(drop=True)
+            for _, frame in trajectory.groupby("train_task", sort=True)
+        ]
+
     def add_task(self, train_task: int, class_metrics: pd.DataFrame) -> None:
         missing_columns = sorted(set(CLASS_METRIC_COLUMNS) - set(class_metrics.columns))
         if missing_columns:

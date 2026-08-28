@@ -115,6 +115,16 @@ def _build_sample_ids(
     return sample_ids, drug_ids_a, drug_ids_b
 
 
+def build_stable_sample_ids(
+    metadata: Mapping[str, np.ndarray],
+    expected_rows: int,
+) -> np.ndarray:
+    """Build validated, order-preserving drug-pair IDs for prediction artifacts."""
+
+    sample_ids, _, _ = _build_sample_ids(metadata, expected_rows)
+    return sample_ids
+
+
 def _validate_outputs(outputs: PredictionOutputs) -> tuple[int, int, int]:
     logits = np.asarray(outputs.logits)
     probabilities = np.asarray(outputs.probabilities)
