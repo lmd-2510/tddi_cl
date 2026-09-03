@@ -26,13 +26,13 @@ is_complete_run() {
 }
 
 for seed in "${SEEDS[@]}"; do
-  task_file="${AGEM_TASK_FILE:-${PROJECT_ROOT}/outputs/tasks/constrained_mass_balanced_seed${seed}_tasks.json}"
+  task_file="${AGEM_TASK_FILE:-${PROJECT_ROOT}/outputs/tasks/tail_to_head_tasks.json}"
   if [[ ! -s "${task_file}" ]]; then
     echo "Missing A-GEM task file: ${task_file}" >&2
     exit 1
   fi
 
-  run_dir="${AGEM_OUTPUT_ROOT}/p4_seed${seed}_agem_mlptddi"
+  run_dir="${AGEM_OUTPUT_ROOT}/p3_seed${seed}_agem_tddi_paper_member"
   if [[ -n "${AGEM_RUN_DIR:-}" ]]; then
     if (( ${#SEEDS[@]} != 1 )); then
       echo "AGEM_RUN_DIR can only be used with one seed." >&2
@@ -70,7 +70,7 @@ for seed in "${SEEDS[@]}"; do
     --task-file "${task_file}" \
     --outdir "${run_dir}" \
     --method agem \
-    --variant tddi \
+    --variant tddi_paper_member \
     --batch-size "${AGEM_BATCH_SIZE}" \
     --epochs "${AGEM_EPOCHS}" \
     --lr 0.001 \

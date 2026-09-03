@@ -49,8 +49,8 @@ LayerNorm(3780) -> Linear(7560) -> activation/dropout
 
 File cũng cung cấp `forward`, `encode`, `forward_with_latent` và metadata kiến trúc.
 
-**Tác dụng:** Tạo backbone mới gần kích thước T-DDI paper mà không thay đổi variant
-`tddi` cũ `3780 -> 1024 -> 512`.
+**Tác dụng:** Đây là backbone T-DDI numerical-only duy nhất của study. Các MLP
+`small/base/large` chỉ là baseline chung và không được gọi là T-DDI.
 
 ### `src/training/ewc_checkpoint.py`
 
@@ -250,7 +250,7 @@ class alignment và offline ensemble invocation bằng synthetic artifacts nhỏ
 
 ## 6. Những phần không bị thay đổi
 
-- Variant `tddi` cũ vẫn là `3780 -> 1024 -> 512`.
+- Alias `tddi` cũ đã bị loại bỏ để tránh chạy nhầm baseline MLP.
 - Config và runner study P0-P8 không được đưa ensemble mới vào.
 - Baseline EWC vẫn dùng Focal Loss để train và empirical diagonal Fisher dựa trên
   cross-entropy, không thêm Fisher decay hoặc balanced Fisher.

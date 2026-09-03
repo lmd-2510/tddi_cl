@@ -25,13 +25,13 @@ is_complete_run() {
 }
 
 for seed in "${SEEDS[@]}"; do
-  task_file="${GEM_TASK_FILE:-${PROJECT_ROOT}/outputs/tasks/constrained_mass_balanced_seed${seed}_tasks.json}"
+  task_file="${GEM_TASK_FILE:-${PROJECT_ROOT}/outputs/tasks/tail_to_head_tasks.json}"
   if [[ ! -s "${task_file}" ]]; then
     echo "Missing GEM task file: ${task_file}" >&2
     exit 1
   fi
 
-  run_dir="${GEM_OUTPUT_ROOT}/p4_seed${seed}_gem_mlptddi"
+  run_dir="${GEM_OUTPUT_ROOT}/p3_seed${seed}_gem_tddi_paper_member"
   if [[ -n "${GEM_RUN_DIR:-}" ]]; then
     if (( ${#SEEDS[@]} != 1 )); then
       echo "GEM_RUN_DIR can only be used with one seed." >&2
@@ -69,7 +69,7 @@ for seed in "${SEEDS[@]}"; do
     --task-file "${task_file}" \
     --outdir "${run_dir}" \
     --method gem \
-    --variant tddi \
+    --variant tddi_paper_member \
     --batch-size "${GEM_BATCH_SIZE}" \
     --epochs "${GEM_EPOCHS}" \
     --lr 0.001 \

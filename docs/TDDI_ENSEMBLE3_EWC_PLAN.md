@@ -370,8 +370,8 @@ docs/TDDI_ENSEMBLE3_EWC_PLAN.md:
 LayerNorm input 3780 -> Linear 7560 -> activation/dropout -> Linear 7560 ->
 activation/dropout -> expandable head C_t.
 
-Không đổi variant tddi=3780->1024->512 hiện tại và không sửa kết quả P0-P8. Đặt tên
-variant mới rõ ràng, ví dụ tddi_paper_member. Hidden dimensions và dropout/activation
+Không gắn tên T-DDI cho các MLP baseline nhỏ. Đặt tên variant paper-size rõ ràng là
+tddi_paper_member. Hidden dimensions và dropout/activation
 phải được ghi trong config/manifest. Model phải hỗ trợ forward, encode,
 forward_with_latent và head expansion theo interface hiện có.
 

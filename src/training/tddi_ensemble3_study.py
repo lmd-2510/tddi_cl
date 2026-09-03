@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sequential, resumable orchestration for the three-member T-DDI EWC study."""
+"""Sequential orchestration for supported three-member T-DDI CIL studies."""
 
 from __future__ import annotations
 
@@ -31,6 +31,11 @@ from src.eval.offline_ensemble import (  # noqa: E402
     aggregate_member_predictions,
     load_offline_ensemble_artifact,
 )
+from src.data.class_mapping import build_seen_class_map  # noqa: E402
+from src.training.replay_checkpoint import (  # noqa: E402
+    LoadedReplayCheckpoint,
+    load_replay_checkpoint,
+)
 from src.utils.seed import (  # noqa: E402
     MEMBER_SEED_DERIVATION,
     derive_member_seed,
@@ -42,7 +47,29 @@ STUDY_MANIFEST_SCHEMA_VERSION = 1
 STUDY_MANIFEST_KIND = "ddi_cil_tddi_ensemble3_study"
 MEMBER_IDS = (0, 1, 2)
 COMPLETION_FILES = ("run_summary.md", "metrics.csv", "forgetting.csv")
-RESUME_CHECKPOINT = Path("checkpoints/latest_ewc_state.pt")
+EWC_METHOD = "ewc"
+EWC_METHOD_PROTOCOL = "ewc_natural_sampling"
+REPLAY_METHOD = "replay_distill_fixed_budget_uniform"
+REPLAY_METHOD_PROTOCOL = REPLAY_METHOD
+SUPPORTED_METHODS = (EWC_METHOD, REPLAY_METHOD)
+PAPER_MEMBER_VARIANT = "tddi_paper_member"
+SUPPORTED_STUDY_VARIANTS = (PAPER_MEMBER_VARIANT,)
+SUPPORTED_PROTOCOLS = {
+    "P3": ("tail_to_head", None),
+    "P4": ("constrained_mass_balanced", 0),
+}
+EWC_RESUME_CHECKPOINT = Path("checkpoints/latest_ewc_state.pt")
+REPLAY_RESUME_CHECKPOINT = Path("checkpoints/latest_replay_distill_state.pt")
+# Backward-compatible public constant used by the original EWC orchestrator.
+RESUME_CHECKPOINT = EWC_RESUME_CHECKPOINT
+REPLAY_CHECKPOINT_POLICY = {
+    "enabled": True,
+    "boundary": "task",
+    "checkpoint_path": REPLAY_RESUME_CHECKPOINT.as_posix(),
+    "resume_cli": "--resume-replay-checkpoint",
+    "skip_completed": True,
+    "fail_incomplete_without_checkpoint": True,
+}
 CommandRunner = Callable[[Sequence[str], Path], None]
 
 
@@ -68,13 +95,21 @@ class StudyConfig:
     normalization: str
     method: str
     method_protocol: str
+    optimizer: str
     microbatch_size: int
     effective_batch_size: int
+    gradient_accumulation_steps: int
     epochs: int
     learning_rate: float
     weight_decay: float
     patience: int
-    ewc_lambda: float
+    ewc_lambda: float | None
+    total_memory_budget: int | None
+    replay_draws_per_epoch: int | None
+    distill_alpha: float | None
+    temperature: float | None
+    feature_distill_weight: float | None
+    checkpoint_resume_policy: Mapping[str, Any]
     focal_gamma: float
     device: str
     prediction_splits: tuple[str, ...]
@@ -139,7 +174,7 @@ def load_study_config(
     *,
     project_root: str | Path = PROJECT_ROOT,
 ) -> StudyConfig:
-    """Load the locked seed-0/P4/three-member study contract."""
+    """Load a locked seed-0/three-member T-DDI study contract."""
 
     path = Path(path).resolve()
     if not path.is_file():
@@ -163,32 +198,67 @@ def load_study_config(
     model = _object(payload.get("model"), "model")
     training = _object(payload.get("training"), "training")
     outputs = _object(payload.get("outputs"), "outputs")
-    if protocol.get("id") != "P4" or protocol.get("name") != "constrained_mass_balanced":
-        raise ValueError("tddi_ensemble3 study is locked to protocol P4.")
-    if model.get("variant") != "tddi_paper_member":
-        raise ValueError("tddi_ensemble3 requires variant=tddi_paper_member.")
+    protocol_id = str(protocol.get("id", ""))
+    protocol_name = str(protocol.get("name", ""))
+    if protocol_id not in SUPPORTED_PROTOCOLS:
+        raise ValueError(
+            f"Unsupported tddi_ensemble3 protocol {protocol_id!r}; "
+            f"expected one of {sorted(SUPPORTED_PROTOCOLS)}."
+        )
+    expected_protocol_name, expected_task_seed = SUPPORTED_PROTOCOLS[protocol_id]
+    if protocol_name != expected_protocol_name:
+        raise ValueError(
+            f"Protocol {protocol_id} requires name={expected_protocol_name!r}."
+        )
+    variant = str(model.get("variant", ""))
+    if variant != PAPER_MEMBER_VARIANT:
+        raise ValueError(
+            "tddi_ensemble3 requires the paper member variant "
+            f"{PAPER_MEMBER_VARIANT!r}; got {variant!r}."
+        )
     if model.get("activation") not in {"relu", "gelu"}:
         raise ValueError("model.activation must be relu or gelu.")
     if model.get("normalization") != "layernorm":
-        raise ValueError("tddi_paper_member study requires input LayerNorm.")
-    if training.get("method") != "ewc" or training.get("method_protocol") != "ewc_natural_sampling":
+        raise ValueError("T-DDI numerical study requires normalization=layernorm.")
+    method = str(training.get("method", ""))
+    method_protocol = str(training.get("method_protocol", ""))
+    if method not in SUPPORTED_METHODS:
+        raise ValueError(
+            "training.method must be one of "
+            f"{list(SUPPORTED_METHODS)}, got {method!r}."
+        )
+    if method == EWC_METHOD and method_protocol != EWC_METHOD_PROTOCOL:
         raise ValueError("tddi_ensemble3 requires the baseline EWC protocol.")
+    if method == REPLAY_METHOD and method_protocol != REPLAY_METHOD_PROTOCOL:
+        raise ValueError(
+            "Replay ensemble requires method_protocol="
+            f"{REPLAY_METHOD_PROTOCOL!r}."
+        )
     prediction_splits = tuple(str(value) for value in payload.get("prediction_splits", []))
     if prediction_splits != ("validation", "test"):
         raise ValueError("prediction_splits must be exactly ['validation', 'test'].")
 
     task_file = _resolve_path(protocol.get("task_file"), project_root, "protocol.task_file")
     if not task_file.is_file():
-        raise FileNotFoundError(f"Missing P4 task file: {task_file}")
-    task_spec = _object(json.loads(task_file.read_text(encoding="utf-8")), "P4 task file")
-    if task_spec.get("protocol") != "constrained_mass_balanced" or int(task_spec.get("seed", -1)) != 0:
-        raise ValueError("Task file must be the P4 experiment-seed-0 schedule.")
+        raise FileNotFoundError(f"Missing {protocol_id} task file: {task_file}")
+    task_spec = _object(
+        json.loads(task_file.read_text(encoding="utf-8")),
+        f"{protocol_id} task file",
+    )
+    task_seed = task_spec.get("seed")
+    if task_spec.get("protocol") != protocol_name or task_seed != expected_task_seed:
+        raise ValueError(
+            f"Task file does not match protocol {protocol_id}/{protocol_name}; "
+            f"expected task seed {expected_task_seed!r}."
+        )
     raw_tasks = task_spec.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
-        raise ValueError("P4 task file must contain a non-empty tasks list.")
+        raise ValueError(f"{protocol_id} task file must contain a non-empty tasks list.")
     expected_task_count = int(protocol.get("expected_task_count", 0))
     if len(raw_tasks) != expected_task_count or expected_task_count <= 0:
-        raise ValueError("P4 task count does not match protocol.expected_task_count.")
+        raise ValueError(
+            f"{protocol_id} task count does not match protocol.expected_task_count."
+        )
     task_ids = [int(_object(task, "task").get("task_id", -1)) for task in raw_tasks]
     if task_ids != list(range(expected_task_count)):
         raise ValueError("Task IDs must be contiguous from zero.")
@@ -198,7 +268,25 @@ def load_study_config(
         for raw_class_id in _object(task, "task").get("classes", [])
     ]
     if not all_classes or len(set(all_classes)) != len(all_classes):
-        raise ValueError("P4 tasks must contain non-empty, disjoint raw class IDs.")
+        raise ValueError(
+            f"{protocol_id} tasks must contain non-empty, disjoint raw class IDs."
+        )
+    task_layout = [
+        len(_object(task, "task").get("classes", []))
+        for task in raw_tasks
+    ]
+    if "expected_task_layout" in protocol:
+        expected_layout = [int(value) for value in protocol["expected_task_layout"]]
+        if task_layout != expected_layout:
+            raise ValueError(
+                f"{protocol_id} task layout mismatch: {task_layout} != {expected_layout}."
+            )
+    if "expected_class_count" in protocol:
+        expected_class_count = int(protocol["expected_class_count"])
+        if len(all_classes) != expected_class_count:
+            raise ValueError(
+                f"{protocol_id} class count does not match protocol.expected_class_count."
+            )
 
     microbatch_size = int(training.get("microbatch_size", 0))
     effective_batch_size = int(training.get("effective_batch_size", 0))
@@ -208,14 +296,73 @@ def load_study_config(
         or effective_batch_size % microbatch_size
     ):
         raise ValueError("Invalid microbatch/effective batch configuration.")
+    optimizer = str(training.get("optimizer", "adamw")).casefold()
+    if optimizer != "adamw":
+        raise ValueError("tddi_ensemble3 training.optimizer must be adamw.")
+    gradient_accumulation_steps = effective_batch_size // microbatch_size
+    configured_accumulation = int(
+        training.get("gradient_accumulation_steps", gradient_accumulation_steps)
+    )
+    if configured_accumulation != gradient_accumulation_steps:
+        raise ValueError(
+            "training.gradient_accumulation_steps must equal "
+            "effective_batch_size / microbatch_size."
+        )
     epochs = int(training.get("epochs", 0))
     patience = int(training.get("patience", -1))
     if epochs <= 0 or patience < 0:
         raise ValueError("training.epochs must be positive and patience non-negative.")
-    for key in ("learning_rate", "weight_decay", "ewc_lambda", "focal_gamma"):
+    for key in ("learning_rate", "weight_decay", "focal_gamma"):
         value = float(training.get(key, -1.0))
         if not np.isfinite(value) or value < 0.0:
             raise ValueError(f"training.{key} must be finite and non-negative.")
+    ewc_lambda: float | None = None
+    total_memory_budget: int | None = None
+    replay_draws_per_epoch: int | None = None
+    distill_alpha: float | None = None
+    temperature: float | None = None
+    feature_distill_weight: float | None = None
+    if method == EWC_METHOD:
+        ewc_lambda = float(training.get("ewc_lambda", -1.0))
+        if not np.isfinite(ewc_lambda) or ewc_lambda < 0.0:
+            raise ValueError("training.ewc_lambda must be finite and non-negative.")
+        checkpoint_resume_policy: Mapping[str, Any] = {
+            "enabled": True,
+            "boundary": "task",
+            "checkpoint_path": EWC_RESUME_CHECKPOINT.as_posix(),
+            "resume_cli": "--resume-ewc-checkpoint",
+            "skip_completed": True,
+            "fail_incomplete_without_checkpoint": True,
+        }
+    else:
+        total_memory_budget = int(training.get("total_memory_budget", 0))
+        replay_draws_per_epoch = int(training.get("replay_draws_per_epoch", 0))
+        if total_memory_budget != 6800:
+            raise ValueError("Replay training.total_memory_budget must equal 6800.")
+        if replay_draws_per_epoch != 6800:
+            raise ValueError("Replay training.replay_draws_per_epoch must equal 6800.")
+        if int(training.get("replay_starts_at_task", 1)) != 1:
+            raise ValueError("Replay training.replay_starts_at_task must equal 1.")
+        distill_alpha = float(training.get("distill_alpha", -1.0))
+        temperature = float(training.get("temperature", 0.0))
+        feature_distill_weight = float(training.get("feature_distill_weight", -1.0))
+        for key, value in (
+            ("distill_alpha", distill_alpha),
+            ("feature_distill_weight", feature_distill_weight),
+        ):
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"Replay training.{key} must be finite and non-negative.")
+        if not np.isfinite(temperature) or temperature <= 0.0:
+            raise ValueError("Replay training.temperature must be finite and positive.")
+        checkpoint_resume_policy = _object(
+            training.get("checkpoint_resume_policy"),
+            "training.checkpoint_resume_policy",
+        )
+        if dict(checkpoint_resume_policy) != REPLAY_CHECKPOINT_POLICY:
+            raise ValueError(
+                "Replay training.checkpoint_resume_policy does not match the locked "
+                "task-boundary resume policy."
+            )
     dropout = float(model.get("dropout", -1.0))
     if not 0.0 <= dropout < 1.0:
         raise ValueError("model.dropout must lie in [0, 1).")
@@ -238,8 +385,8 @@ def load_study_config(
         study_name=study_name,
         experiment_seed=0,
         member_ids=member_ids,  # type: ignore[arg-type]
-        protocol_id="P4",
-        protocol_name="constrained_mass_balanced",
+        protocol_id=protocol_id,
+        protocol_name=protocol_name,
         expected_task_count=expected_task_count,
         task_file=task_file,
         train=_resolve_path(inputs.get("train"), project_root, "inputs.train"),
@@ -249,19 +396,27 @@ def load_study_config(
             inputs.get("feature_columns"), project_root, "inputs.feature_columns"
         ),
         scaler=_resolve_path(inputs.get("scaler"), project_root, "inputs.scaler"),
-        variant="tddi_paper_member",
+        variant=variant,
         dropout=dropout,
         activation=str(model.get("activation", "")),
         normalization=str(model.get("normalization", "")),
-        method="ewc",
-        method_protocol="ewc_natural_sampling",
+        method=method,
+        method_protocol=method_protocol,
+        optimizer=optimizer,
         microbatch_size=microbatch_size,
         effective_batch_size=effective_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         epochs=epochs,
         learning_rate=float(training["learning_rate"]),
         weight_decay=float(training["weight_decay"]),
         patience=patience,
-        ewc_lambda=float(training["ewc_lambda"]),
+        ewc_lambda=ewc_lambda,
+        total_memory_budget=total_memory_budget,
+        replay_draws_per_epoch=replay_draws_per_epoch,
+        distill_alpha=distill_alpha,
+        temperature=temperature,
+        feature_distill_weight=feature_distill_weight,
+        checkpoint_resume_policy=dict(checkpoint_resume_policy),
         focal_gamma=float(training["focal_gamma"]),
         device=str(training.get("device", "auto")),
         prediction_splits=prediction_splits,
@@ -317,14 +472,42 @@ def _all_predictions_exist(config: StudyConfig, member_id: int) -> bool:
     )
 
 
-def _completed_task_from_events(outdir: Path) -> int | None:
+def _resume_checkpoint_relative_path(config: StudyConfig) -> Path:
+    return (
+        EWC_RESUME_CHECKPOINT
+        if config.method == EWC_METHOD
+        else REPLAY_RESUME_CHECKPOINT
+    )
+
+
+def _resume_cli_flag(config: StudyConfig) -> str:
+    return (
+        "--resume-ewc-checkpoint"
+        if config.method == EWC_METHOD
+        else "--resume-replay-checkpoint"
+    )
+
+
+def _checkpoint_event_type(config: StudyConfig) -> str:
+    return (
+        "ewc_checkpoint_saved"
+        if config.method == EWC_METHOD
+        else "replay_checkpoint_saved"
+    )
+
+
+def _completed_task_from_events(
+    outdir: Path,
+    *,
+    event_type: str = "ewc_checkpoint_saved",
+) -> int | None:
     events_path = outdir / "events.csv"
     if not events_path.is_file():
         return None
     completed: list[int] = []
     with events_path.open("r", newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            if row.get("event_type") != "ewc_checkpoint_saved":
+            if row.get("event_type") != event_type:
                 continue
             try:
                 payload = json.loads(row.get("payload_json") or "{}")
@@ -332,6 +515,118 @@ def _completed_task_from_events(outdir: Path) -> int | None:
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 continue
     return max(completed) if completed else None
+
+
+def _expected_seen_map(config: StudyConfig, completed_task_id: int) -> dict[int, int]:
+    if completed_task_id < 0 or completed_task_id >= config.expected_task_count:
+        raise ValueError(
+            f"Checkpoint completed_task_id={completed_task_id} is outside the "
+            f"configured task range 0..{config.expected_task_count - 1}."
+        )
+    seen = {
+        int(raw_class_id)
+        for task in config.tasks[: completed_task_id + 1]
+        for raw_class_id in task["classes"]
+    }
+    return build_seen_class_map(seen)
+
+
+def _validate_replay_resume_checkpoint(
+    config: StudyConfig,
+    member_id: int,
+    checkpoint_path: Path,
+) -> LoadedReplayCheckpoint:
+    checkpoint = load_replay_checkpoint(checkpoint_path)
+    expected_seed = derive_member_seed(config.experiment_seed, member_id)
+    expected_seed_metadata = {
+        "experiment_seed": config.experiment_seed,
+        "member_id": member_id,
+        "member_seed": expected_seed,
+        "member_seed_derivation": MEMBER_SEED_DERIVATION,
+        "seed_mode": "member",
+    }
+    mismatched_seed_keys = [
+        key
+        for key, expected in expected_seed_metadata.items()
+        if checkpoint.seed_metadata.get(key) != expected
+    ]
+    if mismatched_seed_keys:
+        raise ValueError(
+            f"Replay checkpoint seed metadata mismatch: {mismatched_seed_keys}."
+        )
+    expected_contract = {
+        "method": config.method,
+        "variant": config.variant,
+        "task_file_sha256": config.task_file_sha256,
+        "batch_size": config.microbatch_size,
+        "effective_batch_size": config.effective_batch_size,
+        "epochs": config.epochs,
+        "lr": config.learning_rate,
+        "weight_decay": config.weight_decay,
+        "dropout": config.dropout,
+        "activation": config.activation,
+        "norm": config.normalization,
+        "patience": config.patience,
+        "focal_gamma": config.focal_gamma,
+        "distill_alpha": config.distill_alpha,
+        "temperature": config.temperature,
+        "feature_distill_weight": config.feature_distill_weight,
+        "total_memory_budget": config.total_memory_budget,
+        "replay_draws_per_epoch": config.replay_draws_per_epoch,
+    }
+    mismatched_config_keys = [
+        key
+        for key, expected in expected_contract.items()
+        if checkpoint.config.get(key) != expected
+    ]
+    if mismatched_config_keys:
+        raise ValueError(
+            f"Replay checkpoint training contract mismatch: {mismatched_config_keys}."
+        )
+    expected_map = _expected_seen_map(config, checkpoint.completed_task_id)
+    if checkpoint.seen_class_map != expected_map:
+        raise ValueError("Replay checkpoint class map does not match configured tasks.")
+    required_progress = {
+        "result_matrix",
+        "result_rows",
+        "best_task_rows",
+        "training_audit_rows",
+        "replay_budget_audit_rows",
+        "class_trajectory_rows",
+    }
+    missing_progress = sorted(required_progress - set(checkpoint.progress))
+    if missing_progress:
+        raise ValueError(
+            f"Replay checkpoint progress is missing keys: {missing_progress}."
+        )
+    result_matrix = np.asarray(checkpoint.progress["result_matrix"])
+    if result_matrix.shape != (
+        config.expected_task_count,
+        config.expected_task_count,
+    ):
+        raise ValueError("Replay checkpoint result matrix has the wrong task shape.")
+    completed_count = checkpoint.completed_task_id + 1
+    for key in ("best_task_rows", "training_audit_rows"):
+        rows = checkpoint.progress[key]
+        if not isinstance(rows, list) or len(rows) != completed_count:
+            raise ValueError(
+                f"Replay checkpoint {key} does not match completed_task_id."
+            )
+    for key in ("result_rows", "replay_budget_audit_rows", "class_trajectory_rows"):
+        if not isinstance(checkpoint.progress[key], list):
+            raise TypeError(f"Replay checkpoint {key} must be a list.")
+    run_config_path = member_outdir(config, member_id) / "run_config.json"
+    if not run_config_path.is_file():
+        raise FileNotFoundError(
+            f"Replay resume requires the member run_config.json: {run_config_path}"
+        )
+    run_config = _object(
+        json.loads(run_config_path.read_text(encoding="utf-8")),
+        "member run_config.json",
+    )
+    if run_config.get("run_id") != checkpoint.run_id:
+        raise ValueError("Replay checkpoint run_id does not match member run_config.json.")
+    return checkpoint
 
 
 def _member_status(config: StudyConfig, member_id: int) -> tuple[str, int | None, Path | None]:
@@ -345,12 +640,35 @@ def _member_status(config: StudyConfig, member_id: int) -> tuple[str, int | None
                 "refusing to overwrite or retrain it."
             )
         return "complete", config.expected_task_count - 1, None
-    checkpoint = outdir / RESUME_CHECKPOINT
+    checkpoint = outdir / _resume_checkpoint_relative_path(config)
     if _is_nonempty_file(checkpoint):
-        return "resume", _completed_task_from_events(outdir), checkpoint
+        if config.method == REPLAY_METHOD:
+            try:
+                loaded = _validate_replay_resume_checkpoint(config, member_id, checkpoint)
+            except Exception as error:
+                raise RuntimeError(
+                    f"Incomplete member {member_id} has an invalid replay checkpoint: "
+                    f"{checkpoint}: {error}"
+                ) from error
+            if loaded.next_task_id >= config.expected_task_count:
+                raise RuntimeError(
+                    f"Incomplete member {member_id} has a final-task replay checkpoint "
+                    "but is missing completion artifacts; refusing to overwrite it."
+                )
+            return "resume", loaded.completed_task_id, checkpoint
+        return (
+            "resume",
+            _completed_task_from_events(
+                outdir,
+                event_type=_checkpoint_event_type(config),
+            ),
+            checkpoint,
+        )
     if outdir.exists() and any(outdir.iterdir()):
+        checkpoint_name = "EWC" if config.method == EWC_METHOD else "replay"
         raise RuntimeError(
-            f"Incomplete member {member_id} has no resumable EWC checkpoint: {outdir}"
+            f"Incomplete member {member_id} has no resumable {checkpoint_name} "
+            f"checkpoint: {outdir}"
         )
     return "fresh", None, None
 
@@ -400,8 +718,6 @@ def _training_command(
         config.normalization,
         "--patience",
         str(config.patience),
-        "--ewc-lambda",
-        str(config.ewc_lambda),
         "--focal-gamma",
         str(config.focal_gamma),
         "--seed",
@@ -414,8 +730,36 @@ def _training_command(
         "--member-prediction-splits",
         *config.prediction_splits,
     ]
+    if config.method == EWC_METHOD:
+        if config.ewc_lambda is None:
+            raise RuntimeError("EWC study config is missing ewc_lambda.")
+        command.extend(("--ewc-lambda", str(config.ewc_lambda)))
+    else:
+        replay_values = (
+            config.total_memory_budget,
+            config.replay_draws_per_epoch,
+            config.distill_alpha,
+            config.temperature,
+            config.feature_distill_weight,
+        )
+        if any(value is None for value in replay_values):
+            raise RuntimeError("Replay study config is missing replay/distillation values.")
+        command.extend(
+            (
+                "--total-memory-budget",
+                str(config.total_memory_budget),
+                "--replay-draws-per-epoch",
+                str(config.replay_draws_per_epoch),
+                "--distill-alpha",
+                str(config.distill_alpha),
+                "--temperature",
+                str(config.temperature),
+                "--feature-distill-weight",
+                str(config.feature_distill_weight),
+            )
+        )
     if resume_checkpoint is not None:
-        command.extend(("--resume-ewc-checkpoint", str(resume_checkpoint)))
+        command.extend((_resume_cli_flag(config), str(resume_checkpoint)))
     return tuple(command)
 
 
@@ -596,7 +940,11 @@ def _manifest_payload(
                 "member_seed_derivation": MEMBER_SEED_DERIVATION,
                 "run_id": _read_run_id(outdir),
                 "outdir": str(outdir),
-                "resume_checkpoint": str(outdir / RESUME_CHECKPOINT),
+                "run_config": str(outdir / "run_config.json"),
+                "run_config_sha256": _sha256_file(outdir / "run_config.json"),
+                "resume_checkpoint": str(
+                    outdir / _resume_checkpoint_relative_path(config)
+                ),
                 "completion_files": [str(outdir / name) for name in COMPLETION_FILES],
             }
         )
@@ -637,6 +985,17 @@ def _manifest_payload(
         "study_name": config.study_name,
         "study_config": str(config.source_path),
         "study_config_sha256": config.sha256,
+        "method": config.method,
+        "method_protocol": config.method_protocol,
+        "model": {
+            "variant": config.variant,
+            "hidden_dimensions": (
+                [7560, 7560]
+            ),
+            "dropout": config.dropout,
+            "activation": config.activation,
+            "normalization": config.normalization,
+        },
         "experiment_seed": config.experiment_seed,
         "protocol": {
             "id": config.protocol_id,
@@ -644,6 +1003,7 @@ def _manifest_payload(
             "task_file": str(config.task_file),
             "task_file_sha256": config.task_file_sha256,
         },
+        "checkpoint_resume_policy": dict(config.checkpoint_resume_policy),
         "execution_policy": "sequential_members_never_concurrent",
         "execution_order": list(config.member_ids),
         "members": members,
@@ -752,7 +1112,9 @@ def print_dry_run(plan: StudyPlan) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Plan or explicitly execute sequential tddi_ensemble3 EWC members."
+        description=(
+            "Plan or explicitly execute supported sequential tddi_ensemble3 CIL members."
+        )
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--python", default=sys.executable)

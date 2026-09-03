@@ -66,7 +66,13 @@ def _ensemble(split: str):
     return aggregate_member_predictions([_member(member_id, split=split) for member_id in range(3)])
 
 
-def _write_config(path: Path, *, grid: list[float] | None = None) -> Path:
+def _write_config(
+    path: Path,
+    *,
+    grid: list[float] | None = None,
+    confidence_score: str | None = None,
+    probability_source: str | None = None,
+) -> Path:
     payload = {
         "schema_version": 1,
         "candidate_grid": grid if grid is not None else [0.0, 0.5, 0.8],
@@ -77,6 +83,10 @@ def _write_config(path: Path, *, grid: list[float] | None = None) -> Path:
         },
         "calibration_bins": 5,
     }
+    if confidence_score is not None:
+        payload["confidence_score"] = confidence_score
+    if probability_source is not None:
+        payload["probability_source"] = probability_source
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
@@ -105,12 +115,17 @@ def test_selection_uses_predeclared_grid_and_records_required_metadata(tmp_path:
     assert selected.validation_macro_f1 == pytest.approx(1.0)
     assert selected.validation_coverage == pytest.approx(0.5)
     assert selected.source_split == "validation"
+    assert selected.confidence_score == "entropy_confidence"
+    assert selected.probability_source == "raw"
     assert selected.config_sha256 == load_threshold_selection_config(config_path).sha256
     assert selected.timestamp_utc.endswith("Z")
     assert frozen.loaded_from_path == frozen_path.resolve()
 
     payload = json.loads(frozen_path.read_text(encoding="utf-8"))
     assert payload["candidate_grid"] == [0.0, 0.5, 0.8]
+    assert payload["schema_version"] == 3
+    assert payload["confidence_score"] == "entropy_confidence"
+    assert payload["probability_source"] == "raw"
     assert payload["selection_rule"]["name"] == "max_macro_f1_subject_to_min_coverage"
     assert payload["selected_threshold"] == 0.5
     assert payload["validation_metrics"] == {
@@ -121,6 +136,103 @@ def test_selection_uses_predeclared_grid_and_records_required_metadata(tmp_path:
         "total_count": 4,
     }
     assert payload["source"]["split"] == "validation"
+    assert len(payload["candidate_results"]) == len(payload["candidate_grid"])
+    assert [row["threshold"] for row in payload["candidate_results"]] == payload[
+        "candidate_grid"
+    ]
+
+
+def test_legacy_config_defaults_to_entropy_confidence(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path / "legacy.json")
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "confidence_score" not in payload
+
+    config = load_threshold_selection_config(config_path)
+
+    assert config.confidence_score == "entropy_confidence"
+    assert config.probability_source == "raw"
+
+
+def test_full_p3_primary_and_sensitivity_configs_are_separate() -> None:
+    primary_path = Path(
+        "configs/tddi_ensemble_confidence_threshold_full_p3_primary.json"
+    )
+    sensitivity_path = Path(
+        "configs/tddi_ensemble_confidence_threshold_full_p3_low_coverage_sensitivity.json"
+    )
+
+    primary = load_threshold_selection_config(primary_path)
+    sensitivity = load_threshold_selection_config(sensitivity_path)
+
+    assert primary.confidence_score == sensitivity.confidence_score == "entropy_confidence"
+    assert primary.probability_source == sensitivity.probability_source == "raw"
+    assert primary.minimum_coverage == 0.5
+    assert sensitivity.minimum_coverage == 0.1
+    assert primary.candidate_grid == sensitivity.candidate_grid
+    assert primary.source_path != sensitivity.source_path
+
+
+def test_explicit_max_probability_score_changes_threshold_selection(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path / "max_probability.json",
+        confidence_score="max_probability",
+    )
+    config = load_threshold_selection_config(config_path)
+    validation = _ensemble("validation")
+    ensemble_path = export_offline_ensemble_artifact(
+        validation,
+        tmp_path / "validation_max_probability.npz",
+    )
+
+    selected = select_confidence_threshold(
+        validation,
+        config,
+        source_ensemble_path=ensemble_path,
+    )
+
+    assert selected.confidence_score == "max_probability"
+    assert selected.selected_threshold == 0.8
+    assert len(selected.candidate_results) == len(config.candidate_grid)
+    assert all(
+        candidate["confidence_score"] == "max_probability"
+        for candidate in selected.candidate_results
+    )
+    frozen_path = export_frozen_threshold_artifact(
+        selected,
+        tmp_path / "max_probability_frozen.json",
+    )
+    frozen = load_frozen_threshold_artifact(frozen_path, config_path=config_path)
+    report = evaluate_with_frozen_threshold(_ensemble("test"), frozen)
+    assert report["threshold_score_name"] == "max_probability"
+    assert report["threshold_value"] == 0.8
+    assert report["threshold_probability_source"] == "raw"
+    assert report["high_confidence"]["coverage"] == 0.5
+    assert report["entropy_confidence_selective_metrics"]["coverage"] == 0.25
+    assert report["full_set"]["ece_score_name"] == "max_probability"
+
+
+def test_calibrated_probability_source_never_silently_uses_raw_ensemble(
+    tmp_path: Path,
+) -> None:
+    config = load_threshold_selection_config(
+        _write_config(
+            tmp_path / "calibrated_source.json",
+            probability_source="calibrated",
+        )
+    )
+    validation = _ensemble("validation")
+    ensemble_path = export_offline_ensemble_artifact(
+        validation,
+        tmp_path / "validation_raw.npz",
+    )
+
+    assert config.probability_source == "calibrated"
+    with pytest.raises(ValueError, match="silently thresholding raw probabilities"):
+        select_confidence_threshold(
+            validation,
+            config,
+            source_ensemble_path=ensemble_path,
+        )
 
 
 def test_selection_rejects_test_split(tmp_path: Path) -> None:
@@ -141,6 +253,11 @@ def test_test_evaluation_requires_frozen_artifact_loaded_from_disk(tmp_path: Pat
 
     report = evaluate_with_frozen_threshold(test_ensemble, frozen)
     assert report["evaluation_split"] == "test"
+    assert report["schema_version"] == 2
+    assert report["threshold_score_name"] == "entropy_confidence"
+    assert report["threshold_value"] == 0.5
+    assert report["threshold_probability_source"] == "raw"
+    assert report["threshold"]["score_name"] == "entropy_confidence"
     assert report["threshold"]["value"] == 0.5
     assert report["high_confidence"] == {
         "selected_count": 2,
@@ -158,12 +275,28 @@ def test_test_evaluation_requires_frozen_artifact_loaded_from_disk(tmp_path: Pat
     assert full["ece"] == pytest.approx(
         expected_calibration_error(PROBABILITIES, dense_labels, num_bins=5)
     )
+    assert full["ece_score_name"] == "max_probability"
+    assert full["max_probability_ece"] == pytest.approx(full["ece"])
     assert full["negative_log_likelihood"] == pytest.approx(
         negative_log_likelihood(PROBABILITIES, dense_labels)
     )
     assert full["brier_score"] == pytest.approx(
         multiclass_brier_score(PROBABILITIES, dense_labels)
     )
+    assert report["entropy_confidence_selective_metrics"] == {
+        "threshold_score_name": "entropy_confidence",
+        "probability_source": "raw",
+        "threshold_value": 0.5,
+        "selected_count": 2,
+        "total_count": 4,
+        "accuracy": 1.0,
+        "macro_f1": 1.0,
+        "coverage": 0.5,
+    }
+    assert report["selection_candidates"]["source_split"] == "validation"
+    assert report["selection_candidates"]["confidence_score"] == "entropy_confidence"
+    assert report["selection_candidates"]["candidate_grid"] == [0.0, 0.5, 0.8]
+    assert len(report["selection_candidates"]["results"]) == 3
     report_path = export_threshold_report(report, tmp_path / "test_report.json")
     assert json.loads(report_path.read_text(encoding="utf-8"))["evaluation_split"] == "test"
 
@@ -180,6 +313,23 @@ def test_frozen_threshold_load_rejects_config_change_and_test_provenance(tmp_pat
     tampered_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="must be validation"):
         load_frozen_threshold_artifact(tampered_path)
+
+
+def test_legacy_frozen_threshold_load_defaults_to_entropy_confidence(tmp_path: Path) -> None:
+    config_path, _, _, frozen_path, _ = _select_and_freeze(tmp_path)
+    payload = json.loads(frozen_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    payload.pop("confidence_score")
+    payload.pop("probability_source")
+    for candidate in payload["candidate_results"]:
+        candidate.pop("confidence_score")
+    legacy_path = tmp_path / "legacy_frozen_threshold.json"
+    legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_frozen_threshold_artifact(legacy_path, config_path=config_path)
+
+    assert loaded.confidence_score == "entropy_confidence"
+    assert loaded.probability_source == "raw"
 
 
 def test_frozen_threshold_rejects_mismatched_test_context(tmp_path: Path) -> None:

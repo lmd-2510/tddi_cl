@@ -50,8 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outdir", required=True, type=Path)
     parser.add_argument(
         "--variant",
-        choices=["small", "base", "large", "tddi"],
-        default="tddi",
+        choices=["small", "base", "large"],
+        default="base",
     )
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=20)

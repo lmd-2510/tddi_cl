@@ -2,28 +2,27 @@
 
 Ngày audit: 2026-08-27  
 Phạm vi: `EWC × tddi_ensemble3 × P4 × experiment_seed=0`  
-Trạng thái: audit-only; chưa thay đổi model, training behavior hoặc kết quả P0-P8.
+Trạng thái: tài liệu lịch sử của nhánh EWC; study replay-distill P3 hiện tại dùng
+`docs/TDDI_PAPER_REPLAY_DISTILL_P3_8TASK_GPU_RUNBOOK.md`.
 
 ## 1. CLI, config, model, seed, optimizer và output
 
 ### Hiện trạng chính xác
 
 - Entrypoint training là `src/training/train_cil.py::main`, lấy tham số từ `parse_args()`.
-- Model được chọn bằng `--variant`; choices hiện tại: `small`, `base`, `large`, `tddi`, `tabm`, `ddi_gcn`.
+- Model được chọn bằng `--variant`; T-DDI paper-size dùng riêng
+  `tddi_paper_member`. Các MLP `small/base/large` chỉ là baseline chung.
 - Method được chọn bằng `--method`; `ewc` đã là một choice hợp lệ.
 - Seed duy nhất hiện tại là `--seed`. `main()` gọi `set_global_seed(args.seed)` đúng một lần trước khi load task/model. Seed này đang đồng thời chi phối Python, NumPy, Torch, model initialization, dropout và DataLoader shuffle.
 - Model được tạo lại ở đầu mỗi task bởi `expand_model_for_seen_classes()`.
 - Optimizer được tạo lại sau model expansion ở mỗi task bằng `torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)`.
 - Classification loss là `FocalLoss(gamma=args.focal_gamma)`.
 - Output được quyết định bởi `--outdir`; `ensure_run_paths(..., require_empty=True)` từ chối ghi vào directory không rỗng.
-- `scripts/run_protocol_study.sh` đang khóa `METHOD=replay_distill_fixed_budget_uniform`, `VARIANT=tddi`, seeds `0..4` và tự dựng run directory dưới `outputs/runs_backbones`.
 - P4 seed 0 dùng task file `outputs/tasks/constrained_mass_balanced_seed0_tasks.json`.
-- `configs/protocol_study_tddi.json` là hợp đồng study bị khóa. `train_cil.py` không có `--config` và không đọc trực tiếp JSON này; runner shell đang mirror các giá trị bằng CLI arguments.
 
 ### Invariant phải giữ
 
-- Không thêm ensemble vào `scripts/run_protocol_study.sh` hoặc sửa `configs/protocol_study_tddi.json` theo cách làm thay đổi study P0-P8.
-- Study mới phải có config, runner và output root riêng.
+- Mỗi study mới phải có config, runner và output root riêng.
 - CLI cũ chỉ truyền `--seed` phải giữ behavior cũ.
 - AdamW phải tiếp tục được tạo sau head expansion để optimizer nhìn thấy toàn bộ parameter mới.
 

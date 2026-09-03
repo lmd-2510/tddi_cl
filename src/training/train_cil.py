@@ -89,6 +89,13 @@ from src.training.ewc_checkpoint import (
     restore_rng_state,
     save_ewc_checkpoint,
 )
+from src.training.replay_checkpoint import (
+    LoadedReplayCheckpoint,
+    load_replay_checkpoint,
+    restore_fixed_replay_buffer,
+    restore_replay_model,
+    save_replay_checkpoint,
+)
 from src.utils.logging import RunLogger, ensure_run_paths
 from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 
@@ -119,7 +126,7 @@ class FocalLoss(nn.Module if nn is not None else object):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train the locked T-DDI protocol study or explicit legacy baselines."
+        description="Train the locked T-DDI protocol study or generic baseline models."
     )
     parser.add_argument("--train", required=True, type=Path)
     parser.add_argument("--validation", required=True, type=Path)
@@ -148,12 +155,11 @@ def parse_args() -> argparse.Namespace:
             "small",
             "base",
             "large",
-            "tddi",
             "tddi_paper_member",
             "tabm",
             "ddi_gcn",
         ],
-        default="tddi",
+        default="tddi_paper_member",
     )
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument(
@@ -214,6 +220,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Resume an EWC run from a versioned task-boundary checkpoint. "
             "The existing --outdir is reused without overwriting completed artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--resume-replay-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Resume replay_distill_fixed_budget_uniform from a versioned "
+            "task-boundary checkpoint in the existing --outdir."
         ),
     )
     parser.add_argument("--focal-gamma", type=float, default=1.0)
@@ -368,6 +383,22 @@ def seed_provenance(args: argparse.Namespace) -> dict[str, int | str | None]:
     }
 
 
+def fixed_replay_seed_provenance(
+    args: argparse.Namespace,
+) -> dict[str, int | str]:
+    """Describe shared-buffer and member-specific sampler seed responsibilities."""
+
+    if args.method != FIXED_BUDGET_METHOD:
+        return {}
+    return {
+        "replay_buffer_seed": args.experiment_seed,
+        "replay_buffer_seed_role": "experiment_seed",
+        "sampler_seed": args.member_seed,
+        "sampler_seed_role": "member_seed",
+        "sampler_seed_derivation": args.member_seed_derivation,
+    }
+
+
 def build_ewc_checkpoint_config(
     args: argparse.Namespace,
     task_spec: dict[str, Any],
@@ -420,19 +451,82 @@ def build_ewc_checkpoint_config(
     return config
 
 
+def build_replay_checkpoint_config(
+    args: argparse.Namespace,
+    task_spec: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the immutable contract for fixed-budget replay resume."""
+
+    config = {
+        "method": args.method,
+        "variant": args.variant,
+        "device": args.device,
+        "train": str(args.train.resolve()),
+        "validation": str(args.validation.resolve()),
+        "test": str(args.test.resolve()),
+        "feature_cols_sha256": _sha256_file(args.feature_cols),
+        "scaler_sha256": _sha256_file(args.scaler),
+        "task_file_sha256": _sha256_file(args.task_file),
+        "task_protocol": task_spec.get("protocol"),
+        "num_tasks": len(task_spec["tasks"]),
+        "batch_size": args.batch_size,
+        "effective_batch_size": args.effective_batch_size,
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "dropout": args.dropout,
+        "activation": args.activation,
+        "norm": args.norm,
+        "patience": args.patience,
+        "focal_gamma": args.focal_gamma,
+        "distill_alpha": args.distill_alpha,
+        "temperature": args.temperature,
+        "feature_distill_weight": args.feature_distill_weight,
+        "total_memory_budget": args.total_memory_budget,
+        "replay_draws_per_epoch": args.replay_draws_per_epoch,
+        "sampler_metadata": fixed_replay_seed_provenance(args),
+        "max_train_rows_per_task": args.max_train_rows_per_task,
+        "max_validation_rows_per_task": args.max_validation_rows_per_task,
+        "max_test_rows_per_task": args.max_test_rows_per_task,
+        "export_s02": args.export_s02,
+        "s02_splits": list(args.s02_splits),
+        "tabm_k": args.tabm_k,
+        "tabm_blocks": args.tabm_blocks,
+        "tabm_d_block": args.tabm_d_block,
+        "tabm_dropout": args.tabm_dropout,
+        "ddi_gcn_depth": args.ddi_gcn_depth,
+        "ddi_gcn_width": args.ddi_gcn_width,
+        "ddi_gcn_attention_dim": args.ddi_gcn_attention_dim,
+    }
+    if args.export_member_predictions:
+        config["export_member_predictions"] = True
+        config["member_prediction_splits"] = list(args.member_prediction_splits)
+    if args.variant == "tddi_paper_member":
+        config["model_architecture"] = paper_member_manifest(
+            dropout=args.dropout,
+            activation=args.activation,
+        )
+    return config
+
+
 def expected_seen_map_after_task(
     tasks: list[dict[str, Any]],
     completed_task_id: int,
+    *,
+    resume_kind: str = "EWC",
 ) -> dict[int, int]:
     """Rebuild the canonical class map implied by a completed task boundary."""
 
     if completed_task_id < 0 or completed_task_id >= len(tasks):
         raise ValueError(
-            f"EWC completed task {completed_task_id} is outside 0..{len(tasks) - 1}."
+            f"{resume_kind} completed task {completed_task_id} is outside "
+            f"0..{len(tasks) - 1}."
         )
     task_ids = [int(task["task_id"]) for task in tasks]
     if task_ids != list(range(len(tasks))):
-        raise ValueError("Task IDs must be contiguous from zero for EWC resume.")
+        raise ValueError(
+            f"Task IDs must be contiguous from zero for {resume_kind} resume."
+        )
     seen_classes = {
         int(class_id)
         for task in tasks[: completed_task_id + 1]
@@ -452,6 +546,29 @@ def validate_resume_run_config(
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("run_id") != checkpoint.run_id:
         raise ValueError("EWC checkpoint run_id does not match the existing run_config.json.")
+    resolved = payload.get("resolved")
+    if not isinstance(resolved, dict):
+        raise ValueError("Existing run_config.json is missing resolved metadata.")
+    mismatches = [
+        key
+        for key, expected in checkpoint.seed_metadata.items()
+        if resolved.get(key) != expected
+    ]
+    if mismatches:
+        raise ValueError(f"Existing run_config seed metadata mismatch: {mismatches}")
+
+
+def validate_replay_resume_run_config(
+    path: Path,
+    checkpoint: LoadedReplayCheckpoint,
+) -> None:
+    """Bind a fixed-replay checkpoint to its pre-existing run directory."""
+
+    if not path.is_file():
+        raise FileNotFoundError(f"Replay resume requires the existing run config: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("run_id") != checkpoint.run_id:
+        raise ValueError("Replay checkpoint run_id does not match run_config.json.")
     resolved = payload.get("resolved")
     if not isinstance(resolved, dict):
         raise ValueError("Existing run_config.json is missing resolved metadata.")
@@ -530,6 +647,84 @@ def restore_ewc_progress(
     )
 
 
+def build_replay_progress(
+    *,
+    result_matrix: np.ndarray,
+    result_rows: list[dict[str, Any]],
+    best_task_rows: list[dict[str, Any]],
+    training_audit_rows: list[dict[str, Any]],
+    replay_budget_audit_rows: list[dict[str, Any]],
+    classwise_tracker: ClasswiseTracker,
+) -> dict[str, Any]:
+    """Capture all reporting state needed to append after replay resume."""
+
+    return {
+        "result_matrix": np.asarray(result_matrix, dtype=np.float64).copy(),
+        "result_rows": list(result_rows),
+        "best_task_rows": list(best_task_rows),
+        "training_audit_rows": list(training_audit_rows),
+        "replay_budget_audit_rows": list(replay_budget_audit_rows),
+        "class_trajectory_rows": classwise_tracker.trajectory_frame().to_dict("records"),
+    }
+
+
+def restore_replay_progress(
+    checkpoint: LoadedReplayCheckpoint,
+    *,
+    num_tasks: int,
+    classwise_tracker: ClasswiseTracker,
+) -> tuple[
+    np.ndarray,
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Validate and restore reporting state stored at a replay boundary."""
+
+    required = {
+        "result_matrix",
+        "result_rows",
+        "best_task_rows",
+        "training_audit_rows",
+        "replay_budget_audit_rows",
+        "class_trajectory_rows",
+    }
+    missing = sorted(required - set(checkpoint.progress))
+    if missing:
+        raise ValueError(f"Replay checkpoint progress is missing keys: {missing}")
+    result_matrix = np.asarray(checkpoint.progress["result_matrix"], dtype=np.float64)
+    if result_matrix.shape != (num_tasks, num_tasks):
+        raise ValueError(
+            "Replay result matrix shape does not match the task count: "
+            f"{result_matrix.shape} != {(num_tasks, num_tasks)}."
+        )
+    row_keys = (
+        "result_rows",
+        "best_task_rows",
+        "training_audit_rows",
+        "replay_budget_audit_rows",
+        "class_trajectory_rows",
+    )
+    if not all(isinstance(checkpoint.progress[key], list) for key in row_keys):
+        raise TypeError("Replay checkpoint progress row collections must be lists.")
+    expected_completed_count = checkpoint.completed_task_id + 1
+    if len(checkpoint.progress["best_task_rows"]) != expected_completed_count:
+        raise ValueError("Replay best-task progress does not match completed_task_id.")
+    if len(checkpoint.progress["training_audit_rows"]) != expected_completed_count:
+        raise ValueError("Replay training audit progress does not match completed_task_id.")
+    classwise_tracker.restore_trajectory(
+        pd.DataFrame(checkpoint.progress["class_trajectory_rows"])
+    )
+    return (
+        result_matrix.copy(),
+        list(checkpoint.progress["result_rows"]),
+        list(checkpoint.progress["best_task_rows"]),
+        list(checkpoint.progress["training_audit_rows"]),
+        list(checkpoint.progress["replay_budget_audit_rows"]),
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -588,6 +783,7 @@ def write_run_config(
     if args.method == FIXED_BUDGET_METHOD:
         resolved.update(
             {
+                **fixed_replay_seed_provenance(args),
                 "total_memory_budget": args.total_memory_budget,
                 "replay_draws_per_epoch": args.replay_draws_per_epoch,
                 "memory_allocation_policy": "capacity_constrained_max_min_raw_class_id",
@@ -645,7 +841,9 @@ def write_run_config(
             activation=args.activation,
         )
     model_implementation = PROJECT_ROOT / "src/models" / f"{args.variant}.py"
-    if args.variant == "tabm":
+    if args.variant in {"small", "base", "large"}:
+        model_implementation = PROJECT_ROOT / "src/models/mlp.py"
+    elif args.variant == "tabm":
         model_implementation = PROJECT_ROOT / "src/models/tabm_classifier.py"
     elif args.variant == "ddi_gcn":
         model_implementation = PROJECT_ROOT / "src/models/ddi_gcn.py"
@@ -1412,13 +1610,29 @@ def main() -> None:
         raise ValueError("S02 descriptor export is not supported for DDI-GCN runs.")
     if args.resume_ewc_checkpoint is not None and args.method != "ewc":
         raise ValueError("--resume-ewc-checkpoint is only valid with --method ewc.")
+    if (
+        args.resume_replay_checkpoint is not None
+        and args.method != FIXED_BUDGET_METHOD
+    ):
+        raise ValueError(
+            "--resume-replay-checkpoint is only valid with "
+            f"--method {FIXED_BUDGET_METHOD}."
+        )
+    if (
+        args.resume_ewc_checkpoint is not None
+        and args.resume_replay_checkpoint is not None
+    ):
+        raise ValueError("Only one resume checkpoint option may be used.")
     if args.export_member_predictions and args.member_id is None:
         raise ValueError("--export-member-predictions requires --member-id.")
 
-    is_resume = args.resume_ewc_checkpoint is not None
+    is_ewc_resume = args.resume_ewc_checkpoint is not None
+    is_replay_resume = args.resume_replay_checkpoint is not None
+    is_resume = is_ewc_resume or is_replay_resume
     if is_resume and not args.outdir.is_dir():
+        resume_kind = "EWC" if is_ewc_resume else "Replay"
         raise FileNotFoundError(
-            f"EWC resume requires the existing run output directory: {args.outdir}"
+            f"{resume_kind} resume requires the existing run output directory: {args.outdir}"
         )
     run_paths = ensure_run_paths(args.outdir, require_empty=not is_resume)
     set_configured_seeds(seed_configuration)
@@ -1443,8 +1657,14 @@ def main() -> None:
         if args.method == "ewc"
         else None
     )
+    replay_checkpoint_config = (
+        build_replay_checkpoint_config(args, task_spec)
+        if args.method == FIXED_BUDGET_METHOD
+        else None
+    )
     resume_checkpoint: LoadedEWCCheckpoint | None = None
-    if is_resume:
+    replay_resume_checkpoint: LoadedReplayCheckpoint | None = None
+    if is_ewc_resume:
         if ewc_checkpoint_config is None:
             raise RuntimeError("EWC resume config was not initialized.")
         resume_checkpoint = load_ewc_checkpoint(
@@ -1464,6 +1684,29 @@ def main() -> None:
             raise ValueError("EWC checkpoint already completed the final configured task.")
         run_id = resume_checkpoint.run_id
         validate_resume_run_config(run_paths["run_config_json"], resume_checkpoint)
+    elif is_replay_resume:
+        if replay_checkpoint_config is None:
+            raise RuntimeError("Replay resume config was not initialized.")
+        replay_resume_checkpoint = load_replay_checkpoint(
+            args.resume_replay_checkpoint,
+            expected_seed_metadata=seed_provenance(args),
+            expected_config=replay_checkpoint_config,
+        )
+        expected_resume_map = expected_seen_map_after_task(
+            tasks,
+            replay_resume_checkpoint.completed_task_id,
+            resume_kind="Replay",
+        )
+        if replay_resume_checkpoint.seen_class_map != expected_resume_map:
+            raise ValueError(
+                "Replay checkpoint class map does not match the configured task protocol."
+            )
+        if replay_resume_checkpoint.next_task_id >= num_tasks:
+            raise ValueError("Replay checkpoint already completed the final configured task.")
+        run_id = replay_resume_checkpoint.run_id
+        validate_replay_resume_run_config(
+            run_paths["run_config_json"], replay_resume_checkpoint
+        )
     else:
         run_id = uuid.uuid4().hex
         write_run_config(
@@ -1502,7 +1745,7 @@ def main() -> None:
     training_audit_rows: list[dict[str, Any]] = []
     replay_budget_audit_rows: list[dict[str, Any]] = []
 
-    if resume_checkpoint is None:
+    if not is_resume:
         logger.log_event(
             "run_started",
             f"CIL training started run_id={run_id} method={args.method} "
@@ -1519,7 +1762,7 @@ def main() -> None:
                 sort_keys=True,
             ),
         )
-    else:
+    elif resume_checkpoint is not None:
         logger.log_event(
             "run_resumed",
             f"EWC run resumed after task={resume_checkpoint.completed_task_id} "
@@ -1534,13 +1777,38 @@ def main() -> None:
                 sort_keys=True,
             ),
         )
+    else:
+        if replay_resume_checkpoint is None:
+            raise RuntimeError("Replay resume checkpoint was not loaded.")
+        logger.log_event(
+            "run_resumed",
+            f"Replay run resumed after task={replay_resume_checkpoint.completed_task_id} "
+            f"next_task={replay_resume_checkpoint.next_task_id} "
+            f"checkpoint={args.resume_replay_checkpoint}",
+            payload_json=json.dumps(
+                {
+                    "completed_task_id": replay_resume_checkpoint.completed_task_id,
+                    "next_task_id": replay_resume_checkpoint.next_task_id,
+                    **seed_provenance(args),
+                },
+                sort_keys=True,
+            ),
+        )
 
     replay_buffer: ReplayBuffer | FixedBudgetReplayBuffer
     if args.method == FIXED_BUDGET_METHOD:
-        replay_buffer = FixedBudgetReplayBuffer(
-            total_memory_budget=args.total_memory_budget,
-            random_seed=args.experiment_seed,
-        )
+        if replay_resume_checkpoint is not None:
+            replay_buffer = restore_fixed_replay_buffer(
+                replay_resume_checkpoint.replay_buffer_state,
+                expected_seen_class_map=replay_resume_checkpoint.seen_class_map,
+                expected_total_memory_budget=args.total_memory_budget,
+                expected_random_seed=args.experiment_seed,
+            )
+        else:
+            replay_buffer = FixedBudgetReplayBuffer(
+                total_memory_budget=args.total_memory_budget,
+                random_seed=args.experiment_seed,
+            )
     else:
         replay_buffer = ReplayBuffer(
             memory_per_class=args.memory_per_class,
@@ -1601,6 +1869,46 @@ def main() -> None:
         # Rebuilding the previous model consumes Torch RNG. Restore only after that
         # construction so the first operation for the next task matches a continuous run.
         restore_rng_state(resume_checkpoint.rng_state)
+    elif replay_resume_checkpoint is not None:
+        (
+            result_matrix,
+            result_rows,
+            best_task_rows,
+            training_audit_rows,
+            replay_budget_audit_rows,
+        ) = restore_replay_progress(
+            replay_resume_checkpoint,
+            num_tasks=num_tasks,
+            classwise_tracker=classwise_tracker,
+        )
+        previous_seen_map = dict(replay_resume_checkpoint.seen_class_map)
+        previous_seen_raw_classes = list(replay_resume_checkpoint.seen_raw_classes)
+        previous_model = expand_model_for_seen_classes(
+            previous_model=None,
+            previous_seen_map=None,
+            current_seen_map=previous_seen_map,
+            variant=args.variant,
+            input_dim=len(feature_columns),
+            dropout=args.dropout,
+            activation=args.activation,
+            norm=args.norm,
+            graph_bank=graph_bank,
+            tabm_k=args.tabm_k,
+            tabm_blocks=args.tabm_blocks,
+            tabm_d_block=args.tabm_d_block,
+            tabm_dropout=args.tabm_dropout,
+            ddi_gcn_depth=args.ddi_gcn_depth,
+            ddi_gcn_width=args.ddi_gcn_width,
+            ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
+        )
+        restore_replay_model(previous_model, replay_resume_checkpoint)
+        previous_model.eval()
+        for parameter in previous_model.parameters():
+            parameter.requires_grad_(False)
+        start_task_id = replay_resume_checkpoint.next_task_id
+        # Model reconstruction consumes Torch RNG; reset it so task N starts exactly
+        # where the uninterrupted trajectory did at the preceding task boundary.
+        restore_rng_state(replay_resume_checkpoint.rng_state)
 
     for task in tasks[start_task_id:]:
         task_id = int(task["task_id"])
@@ -1703,7 +2011,11 @@ def main() -> None:
                 current_count=int(len(current_train.labels)),
                 replay_raw_labels=replay_raw_labels,
                 replay_draws_per_epoch=(0 if task_id == 0 else args.replay_draws_per_epoch),
-                seed=args.experiment_seed,
+                # Buffer membership is shared under experiment_seed, while the
+                # presentation order is deliberately independent per member.
+                # Legacy runs resolve member_seed == experiment_seed, preserving
+                # their exact sampler behavior.
+                seed=args.member_seed,
                 task_id=task_id,
             )
             train_loader = DataLoader(
@@ -2105,6 +2417,7 @@ def main() -> None:
                 "memory_before": memory_before,
                 "memory_after": memory_after,
                 "sampler_policy": sampler_policy_name(args.method),
+                **fixed_replay_seed_provenance(args),
                 "samples_drawn_per_epoch": int(samples_drawn_per_epoch),
                 "expected_replay_draws_per_epoch": expected_replay_draws,
                 "expected_current_draws_per_epoch": (
@@ -2163,7 +2476,9 @@ def main() -> None:
             index=False,
         )
 
-        if args.method in DISTILL_METHODS:
+        # Legacy replay_distill keeps its historical per-task teacher artifact.
+        # Fixed-budget replay reconstructs the teacher from its boundary model_state.
+        if args.method == "replay_distill":
             teacher_checkpoint = checkpoint_dir / f"task_{task_id}_teacher.pt"
             torch.save(best_state, teacher_checkpoint)
 
@@ -2194,6 +2509,10 @@ def main() -> None:
             ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
         )
         previous_model.load_state_dict(best_state)
+        if args.method == FIXED_BUDGET_METHOD:
+            previous_model.eval()
+            for parameter in previous_model.parameters():
+                parameter.requires_grad_(False)
         previous_seen_map = dict(current_seen_map)
         previous_seen_raw_classes = ordered_raw_classes(current_seen_map)
         save_class_map(run_paths["outdir"] / f"seen_class_map_task_{task_id}.json", current_seen_map)
@@ -2337,6 +2656,43 @@ def main() -> None:
                         "completed_task_id": task_id,
                         "next_task_id": task_id + 1,
                         "path": str(ewc_checkpoint_path),
+                    },
+                    sort_keys=True,
+                ),
+            )
+        elif args.method == FIXED_BUDGET_METHOD:
+            if not isinstance(replay_buffer, FixedBudgetReplayBuffer):
+                raise RuntimeError("Fixed-budget replay buffer is missing at task boundary.")
+            if replay_checkpoint_config is None:
+                raise RuntimeError("Replay checkpoint config was not initialized.")
+            replay_checkpoint_path = checkpoint_dir / "latest_replay_distill_state.pt"
+            save_replay_checkpoint(
+                replay_checkpoint_path,
+                run_id=run_id,
+                completed_task_id=task_id,
+                model_state=best_state,
+                seen_class_map=current_seen_map,
+                seen_raw_classes=ordered_raw_classes(current_seen_map),
+                replay_buffer=replay_buffer,
+                seed_metadata=seed_provenance(args),
+                config=replay_checkpoint_config,
+                progress=build_replay_progress(
+                    result_matrix=result_matrix,
+                    result_rows=result_rows,
+                    best_task_rows=best_task_rows,
+                    training_audit_rows=training_audit_rows,
+                    replay_budget_audit_rows=replay_budget_audit_rows,
+                    classwise_tracker=classwise_tracker,
+                ),
+            )
+            logger.log_event(
+                "replay_checkpoint_saved",
+                f"task={task_id} path={replay_checkpoint_path}",
+                payload_json=json.dumps(
+                    {
+                        "completed_task_id": task_id,
+                        "next_task_id": task_id + 1,
+                        "path": str(replay_checkpoint_path),
                     },
                     sort_keys=True,
                 ),

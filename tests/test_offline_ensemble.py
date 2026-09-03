@@ -11,6 +11,7 @@ from src.eval.member_predictions import (
     MemberPredictionContext,
 )
 from src.eval.offline_ensemble import (
+    _normalize_mi_by_member_count,
     aggregate_member_predictions,
     export_offline_ensemble_artifact,
     load_offline_ensemble_artifact,
@@ -57,6 +58,36 @@ def _numerical_members() -> list[MemberPredictionArtifact]:
         _member(1, [[0.1, 0.9], [0.8, 0.2]]),
         _member(2, [[0.5, 0.5], [0.8, 0.2]]),
     ]
+
+
+def _three_different_class_members(
+    class_count: int,
+) -> list[MemberPredictionArtifact]:
+    raw_class_ids = np.arange(100, 100 + class_count, dtype=np.int64)
+    members = []
+    for member_id in range(3):
+        probabilities = np.zeros((1, class_count), dtype=np.float32)
+        probabilities[0, member_id] = 1.0
+        members.append(
+            MemberPredictionArtifact(
+                context=MemberPredictionContext(
+                    run_id=f"run-member-{member_id}",
+                    method="ewc",
+                    method_protocol="ewc_natural_sampling",
+                    task_id=1,
+                    split="validation",
+                    member_id=member_id,
+                    experiment_seed=0,
+                    member_seed=100 + member_id,
+                ),
+                sample_ids=np.asarray(["A|B"]),
+                labels=np.asarray([raw_class_ids[0]], dtype=np.int64),
+                raw_class_ids=raw_class_ids,
+                logits=np.zeros_like(probabilities),
+                probabilities=probabilities,
+            )
+        )
+    return members
 
 
 def _binary_entropy(probability: float) -> float:
@@ -111,7 +142,24 @@ def test_offline_ensemble_matches_hand_computed_probability_and_ue_values() -> N
         rtol=1e-7,
         atol=1e-12,
     )
+    np.testing.assert_allclose(
+        artifact.total_probability_variance,
+        [0.21333333333333335, 0.0],
+        rtol=1e-7,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        artifact.member_normalized_mi,
+        [expected_mi_first / np.log(3.0), 0.0],
+        rtol=1e-7,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(artifact.entropy_confidence[0], 0.0, atol=1e-12)
     np.testing.assert_allclose(artifact.confidence[0], 0.0, atol=1e-12)
+    np.testing.assert_array_equal(artifact.confidence, artifact.entropy_confidence)
+    np.testing.assert_allclose(artifact.max_probability, [0.5, 0.8], rtol=1e-7)
+    assert artifact.entropy_confidence[0] != artifact.max_probability[0]
+    assert artifact.context.member_count == 3
     np.testing.assert_allclose(artifact.pairwise_disagreement, [2.0 / 3.0, 0.0])
 
 
@@ -185,6 +233,8 @@ def test_offline_ensemble_rejects_every_required_alignment_mismatch() -> None:
 
     with pytest.raises(ValueError, match="exactly 3"):
         aggregate_member_predictions(base[:2])
+
+
 def test_identical_members_have_near_zero_epistemic_uncertainty() -> None:
     probabilities = np.asarray([[0.7, 0.3], [0.2, 0.8]], dtype=np.float32)
     artifact = aggregate_member_predictions(
@@ -193,8 +243,47 @@ def test_identical_members_have_near_zero_epistemic_uncertainty() -> None:
 
     np.testing.assert_allclose(artifact.mutual_information, 0.0, atol=1e-12)
     np.testing.assert_allclose(artifact.normalized_mi, 0.0, atol=1e-12)
+    np.testing.assert_allclose(artifact.member_normalized_mi, 0.0, atol=1e-12)
     np.testing.assert_allclose(artifact.mean_probability_variance, 0.0, atol=1e-12)
+    np.testing.assert_allclose(artifact.total_probability_variance, 0.0, atol=1e-12)
     np.testing.assert_allclose(artifact.pairwise_disagreement, 0.0, atol=0.0)
+
+
+def test_three_members_predicting_three_classes_have_hand_computed_maximum_mi() -> None:
+    artifact = aggregate_member_predictions(_three_different_class_members(3))
+
+    np.testing.assert_allclose(artifact.probabilities, [[1.0 / 3.0] * 3], rtol=1e-7)
+    np.testing.assert_allclose(artifact.predictive_entropy, np.log(3.0), rtol=1e-7)
+    np.testing.assert_allclose(artifact.expected_member_entropy, 0.0, atol=0.0)
+    np.testing.assert_allclose(artifact.mutual_information, np.log(3.0), rtol=1e-7)
+    np.testing.assert_allclose(artifact.member_normalized_mi, 1.0, rtol=1e-7)
+    np.testing.assert_allclose(artifact.pairwise_disagreement, 1.0, atol=0.0)
+
+
+def test_member_normalized_mi_is_stable_when_class_count_changes() -> None:
+    three_classes = aggregate_member_predictions(_three_different_class_members(3))
+    six_classes = aggregate_member_predictions(_three_different_class_members(6))
+
+    np.testing.assert_allclose(
+        three_classes.member_normalized_mi,
+        six_classes.member_normalized_mi,
+        rtol=1e-7,
+    )
+    np.testing.assert_allclose(three_classes.member_normalized_mi, 1.0, rtol=1e-7)
+    assert three_classes.normalized_mi[0] > six_classes.normalized_mi[0]
+
+
+def test_member_normalized_mi_is_safe_for_one_or_zero_members() -> None:
+    mutual_information = np.asarray([0.0, 0.5], dtype=np.float64)
+
+    np.testing.assert_array_equal(
+        _normalize_mi_by_member_count(mutual_information, 1),
+        np.zeros(2),
+    )
+    np.testing.assert_array_equal(
+        _normalize_mi_by_member_count(mutual_information, 0),
+        np.zeros(2),
+    )
 
 
 def test_single_class_normalization_is_safe() -> None:
@@ -217,7 +306,10 @@ def test_single_class_normalization_is_safe() -> None:
     np.testing.assert_allclose(artifact.mutual_information, 0.0)
     np.testing.assert_allclose(artifact.normalized_entropy, 0.0)
     np.testing.assert_allclose(artifact.normalized_mi, 0.0)
+    np.testing.assert_allclose(artifact.member_normalized_mi, 0.0)
+    np.testing.assert_allclose(artifact.entropy_confidence, 1.0)
     np.testing.assert_allclose(artifact.confidence, 1.0)
+    np.testing.assert_allclose(artifact.max_probability, 1.0)
 
 
 def test_offline_ensemble_export_load_round_trip(tmp_path: Path) -> None:
@@ -242,7 +334,59 @@ def test_offline_ensemble_export_load_round_trip(tmp_path: Path) -> None:
         "normalized_entropy",
         "normalized_mi",
         "mean_probability_variance",
+        "total_probability_variance",
+        "member_normalized_mi",
+        "entropy_confidence",
+        "max_probability",
         "confidence",
         "pairwise_disagreement",
     ):
         np.testing.assert_array_equal(getattr(loaded, field), getattr(original, field))
+
+
+def test_schema_one_artifact_loads_with_derived_schema_two_fields(tmp_path: Path) -> None:
+    original = aggregate_member_predictions(
+        _numerical_members(),
+        source_artifact_paths=["m0.npz", "m1.npz", "m2.npz"],
+    )
+    schema_two_path = export_offline_ensemble_artifact(
+        original,
+        tmp_path / "schema_two.npz",
+    )
+    schema_two_only_fields = {
+        "member_count",
+        "total_probability_variance",
+        "member_normalized_mi",
+        "entropy_confidence",
+        "max_probability",
+    }
+    with np.load(schema_two_path, allow_pickle=False) as payload:
+        legacy_payload = {
+            key: np.asarray(payload[key])
+            for key in payload.files
+            if key not in schema_two_only_fields
+        }
+    legacy_payload["schema_version"] = np.asarray(1, dtype=np.int32)
+    schema_one_path = tmp_path / "schema_one.npz"
+    np.savez_compressed(schema_one_path, **legacy_payload)
+
+    loaded = load_offline_ensemble_artifact(schema_one_path)
+
+    assert loaded.context.member_count == 3
+    np.testing.assert_allclose(
+        loaded.entropy_confidence,
+        1.0 - loaded.normalized_entropy,
+    )
+    np.testing.assert_allclose(
+        loaded.max_probability,
+        loaded.probabilities.max(axis=1),
+    )
+    np.testing.assert_allclose(
+        loaded.total_probability_variance,
+        loaded.mean_probability_variance * loaded.class_count,
+    )
+    np.testing.assert_allclose(
+        loaded.member_normalized_mi,
+        loaded.mutual_information / np.log(3.0),
+    )
+    np.testing.assert_array_equal(loaded.confidence, loaded.entropy_confidence)

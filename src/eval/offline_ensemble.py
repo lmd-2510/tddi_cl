@@ -23,7 +23,8 @@ from src.eval.member_predictions import (  # noqa: E402
 )
 
 
-OFFLINE_ENSEMBLE_SCHEMA_VERSION = 1
+OFFLINE_ENSEMBLE_SCHEMA_VERSION = 2
+LEGACY_OFFLINE_ENSEMBLE_SCHEMA_VERSION = 1
 OFFLINE_ENSEMBLE_KIND = "ddi_cil_offline_probability_ensemble"
 EXPECTED_MEMBER_COUNT = 3
 
@@ -38,6 +39,7 @@ class OfflineEnsembleContext:
     member_ids: tuple[int, int, int]
     member_seeds: tuple[int, int, int]
     source_run_ids: tuple[str, str, str]
+    member_count: int = EXPECTED_MEMBER_COUNT
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,10 @@ class OfflineEnsembleArtifact:
     normalized_entropy: np.ndarray
     normalized_mi: np.ndarray
     mean_probability_variance: np.ndarray
+    total_probability_variance: np.ndarray
+    member_normalized_mi: np.ndarray
+    entropy_confidence: np.ndarray
+    max_probability: np.ndarray
     confidence: np.ndarray
     pairwise_disagreement: np.ndarray
     source_artifact_paths: tuple[str, str, str]
@@ -96,6 +102,21 @@ def _entropy(probabilities: np.ndarray) -> np.ndarray:
     logarithms = np.zeros_like(probabilities, dtype=np.float64)
     np.log(probabilities, out=logarithms, where=probabilities > 0.0)
     return -np.sum(probabilities * logarithms, axis=-1)
+
+
+def _normalize_mi_by_member_count(
+    mutual_information: np.ndarray,
+    member_count: int,
+) -> np.ndarray:
+    """Normalize epistemic uncertainty by the ensemble-size entropy ceiling."""
+
+    if member_count <= 1:
+        return np.zeros_like(mutual_information, dtype=np.float64)
+    return np.clip(
+        np.asarray(mutual_information, dtype=np.float64) / float(np.log(member_count)),
+        0.0,
+        1.0,
+    )
 
 
 def aggregate_member_predictions(
@@ -154,8 +175,19 @@ def aggregate_member_predictions(
         normalization = float(np.log(class_count))
         normalized_entropy = np.clip(predictive_entropy / normalization, 0.0, 1.0)
         normalized_mi = np.clip(mutual_information / normalization, 0.0, 1.0)
-    confidence = 1.0 - normalized_entropy
-    mean_probability_variance = member_probabilities.var(axis=0).mean(axis=1)
+    entropy_confidence = 1.0 - normalized_entropy
+    # Backward-compatible alias. This is entropy-derived confidence, not the
+    # maximum softmax/ensemble probability.
+    confidence = entropy_confidence.copy()
+    max_probability = mean_probabilities64.max(axis=1)
+    probability_variance = member_probabilities.var(axis=0)
+    mean_probability_variance = probability_variance.mean(axis=1)
+    total_probability_variance = probability_variance.sum(axis=1)
+    member_count = len(artifacts)
+    member_normalized_mi = _normalize_mi_by_member_count(
+        mutual_information,
+        member_count,
+    )
     member_predictions = member_probabilities.argmax(axis=2)
     disagreements = []
     for left in range(EXPECTED_MEMBER_COUNT):
@@ -185,6 +217,7 @@ def aggregate_member_predictions(
             source_run_ids=tuple(  # type: ignore[arg-type]
                 member.context.run_id for member in artifacts
             ),
+            member_count=member_count,
         ),
         sample_ids=sample_ids,
         labels=labels,
@@ -197,6 +230,10 @@ def aggregate_member_predictions(
         normalized_entropy=normalized_entropy,
         normalized_mi=normalized_mi,
         mean_probability_variance=mean_probability_variance,
+        total_probability_variance=total_probability_variance,
+        member_normalized_mi=member_normalized_mi,
+        entropy_confidence=entropy_confidence,
+        max_probability=max_probability,
         confidence=confidence,
         pairwise_disagreement=pairwise_disagreement,
         source_artifact_paths=sources,  # type: ignore[arg-type]
@@ -215,6 +252,8 @@ def _validate_ensemble_artifact(artifact: OfflineEnsembleArtifact) -> None:
         raise ValueError("Offline ensemble member IDs must be distinct.")
     if len(context.member_seeds) != EXPECTED_MEMBER_COUNT:
         raise ValueError("Offline ensemble must record three member seeds.")
+    if context.member_count != len(context.member_ids):
+        raise ValueError("Offline ensemble member_count does not match member_ids.")
     rows = artifact.sample_ids.shape[0]
     classes = artifact.raw_class_ids.shape[0]
     if rows == 0 or classes == 0:
@@ -255,6 +294,10 @@ def _validate_ensemble_artifact(artifact: OfflineEnsembleArtifact) -> None:
         "normalized_entropy",
         "normalized_mi",
         "mean_probability_variance",
+        "total_probability_variance",
+        "member_normalized_mi",
+        "entropy_confidence",
+        "max_probability",
         "confidence",
         "pairwise_disagreement",
     )
@@ -283,17 +326,59 @@ def _validate_ensemble_artifact(artifact: OfflineEnsembleArtifact) -> None:
     )
     if not np.allclose(artifact.mutual_information, expected_mi, rtol=1e-10, atol=1e-12):
         raise ValueError("Mutual information does not match its entropy decomposition.")
-    for name in ("normalized_entropy", "normalized_mi", "confidence", "pairwise_disagreement"):
+    for name in (
+        "normalized_entropy",
+        "normalized_mi",
+        "member_normalized_mi",
+        "entropy_confidence",
+        "max_probability",
+        "confidence",
+        "pairwise_disagreement",
+    ):
         values = np.asarray(getattr(artifact, name))
         if np.any(values < -tolerance) or np.any(values > 1.0 + tolerance):
             raise ValueError(f"Offline ensemble {name} must lie in [0, 1].")
+    expected_entropy_confidence = 1.0 - artifact.normalized_entropy
     if not np.allclose(
-        artifact.confidence,
-        1.0 - artifact.normalized_entropy,
+        artifact.entropy_confidence,
+        expected_entropy_confidence,
         rtol=1e-10,
         atol=1e-12,
     ):
-        raise ValueError("Offline ensemble confidence must equal 1-normalized_entropy.")
+        raise ValueError("Offline ensemble entropy_confidence must equal 1-normalized_entropy.")
+    if not np.array_equal(artifact.confidence, artifact.entropy_confidence):
+        raise ValueError(
+            "Offline ensemble confidence must be an exact alias of entropy_confidence."
+        )
+    expected_max_probability = artifact.probabilities.max(axis=1)
+    if not np.allclose(
+        artifact.max_probability,
+        expected_max_probability,
+        rtol=1e-6,
+        atol=1e-7,
+    ):
+        raise ValueError("Offline ensemble max_probability does not match probabilities.")
+    expected_total_variance = artifact.mean_probability_variance * classes
+    if not np.allclose(
+        artifact.total_probability_variance,
+        expected_total_variance,
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        raise ValueError(
+            "Offline ensemble total probability variance must equal class_count times mean variance."
+        )
+    expected_member_normalized_mi = _normalize_mi_by_member_count(
+        artifact.mutual_information,
+        context.member_count,
+    )
+    if not np.allclose(
+        artifact.member_normalized_mi,
+        expected_member_normalized_mi,
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        raise ValueError("Offline ensemble member_normalized_mi does not match MI/log(M).")
 
 
 def export_offline_ensemble_artifact(
@@ -322,6 +407,7 @@ def export_offline_ensemble_artifact(
                 experiment_seed=np.asarray(context.experiment_seed, dtype=np.int64),
                 member_ids=np.asarray(context.member_ids, dtype=np.int32),
                 member_seeds=np.asarray(context.member_seeds, dtype=np.int64),
+                member_count=np.asarray(context.member_count, dtype=np.int32),
                 source_run_ids=np.asarray(context.source_run_ids),
                 source_artifact_paths=np.asarray(artifact.source_artifact_paths),
                 sample_ids=artifact.sample_ids,
@@ -335,6 +421,10 @@ def export_offline_ensemble_artifact(
                 normalized_entropy=artifact.normalized_entropy,
                 normalized_mi=artifact.normalized_mi,
                 mean_probability_variance=artifact.mean_probability_variance,
+                total_probability_variance=artifact.total_probability_variance,
+                member_normalized_mi=artifact.member_normalized_mi,
+                entropy_confidence=artifact.entropy_confidence,
+                max_probability=artifact.max_probability,
                 confidence=artifact.confidence,
                 pairwise_disagreement=artifact.pairwise_disagreement,
             )
@@ -355,12 +445,12 @@ def _read_scalar(payload: Mapping[str, np.ndarray], key: str) -> object:
 
 
 def load_offline_ensemble_artifact(path: str | Path) -> OfflineEnsembleArtifact:
-    """Load and validate a versioned offline ensemble artifact."""
+    """Load schema 1/2 artifacts and derive schema-2 UE fields when needed."""
 
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Missing offline ensemble artifact: {path}")
-    required = {
+    legacy_required = {
         "schema_version",
         "artifact_kind",
         "method",
@@ -386,14 +476,29 @@ def load_offline_ensemble_artifact(path: str | Path) -> OfflineEnsembleArtifact:
         "confidence",
         "pairwise_disagreement",
     }
+    schema_two_required = {
+        "member_count",
+        "total_probability_variance",
+        "member_normalized_mi",
+        "entropy_confidence",
+        "max_probability",
+    }
     with np.load(path, allow_pickle=False) as payload:
+        if "schema_version" not in payload.files:
+            raise ValueError("Offline ensemble artifact is missing keys: ['schema_version']")
+        schema_version = int(_read_scalar(payload, "schema_version"))
+        if schema_version not in {
+            LEGACY_OFFLINE_ENSEMBLE_SCHEMA_VERSION,
+            OFFLINE_ENSEMBLE_SCHEMA_VERSION,
+        }:
+            raise ValueError(f"Unsupported offline ensemble schema version: {schema_version}.")
+        required = set(legacy_required)
+        if schema_version == OFFLINE_ENSEMBLE_SCHEMA_VERSION:
+            required.update(schema_two_required)
         missing = sorted(required - set(payload.files))
         if missing:
             raise ValueError(f"Offline ensemble artifact is missing keys: {missing}")
-        schema_version = int(_read_scalar(payload, "schema_version"))
         kind = str(_read_scalar(payload, "artifact_kind"))
-        if schema_version != OFFLINE_ENSEMBLE_SCHEMA_VERSION:
-            raise ValueError(f"Unsupported offline ensemble schema version: {schema_version}.")
         if kind != OFFLINE_ENSEMBLE_KIND:
             raise ValueError(f"Unexpected offline ensemble artifact kind: {kind!r}.")
         member_ids = tuple(int(value) for value in payload["member_ids"].tolist())
@@ -405,6 +510,35 @@ def load_offline_ensemble_artifact(path: str | Path) -> OfflineEnsembleArtifact:
             for values in (member_ids, member_seeds, source_run_ids, sources)
         ):
             raise ValueError("Offline ensemble provenance must contain exactly three members.")
+        member_count = (
+            int(_read_scalar(payload, "member_count"))
+            if schema_version >= OFFLINE_ENSEMBLE_SCHEMA_VERSION
+            else len(member_ids)
+        )
+        probabilities = np.asarray(payload["probabilities"])
+        raw_class_ids = np.asarray(payload["raw_class_ids"])
+        mutual_information = np.asarray(payload["mutual_information"])
+        normalized_entropy = np.asarray(payload["normalized_entropy"])
+        mean_probability_variance = np.asarray(payload["mean_probability_variance"])
+        if schema_version == LEGACY_OFFLINE_ENSEMBLE_SCHEMA_VERSION:
+            # Schema 1 already stored every quantity required to derive the new
+            # schema-2 views, so pilot artifacts do not need to be regenerated.
+            entropy_confidence = 1.0 - normalized_entropy
+            max_probability = probabilities.max(axis=1)
+            total_probability_variance = (
+                mean_probability_variance * raw_class_ids.shape[0]
+            )
+            member_normalized_mi = _normalize_mi_by_member_count(
+                mutual_information,
+                member_count,
+            )
+        else:
+            entropy_confidence = np.asarray(payload["entropy_confidence"])
+            max_probability = np.asarray(payload["max_probability"])
+            total_probability_variance = np.asarray(
+                payload["total_probability_variance"]
+            )
+            member_normalized_mi = np.asarray(payload["member_normalized_mi"])
         artifact = OfflineEnsembleArtifact(
             context=OfflineEnsembleContext(
                 method=str(_read_scalar(payload, "method")),
@@ -415,18 +549,23 @@ def load_offline_ensemble_artifact(path: str | Path) -> OfflineEnsembleArtifact:
                 member_ids=member_ids,  # type: ignore[arg-type]
                 member_seeds=member_seeds,  # type: ignore[arg-type]
                 source_run_ids=source_run_ids,  # type: ignore[arg-type]
+                member_count=member_count,
             ),
             sample_ids=np.asarray(payload["sample_ids"]),
             labels=np.asarray(payload["labels"]),
-            raw_class_ids=np.asarray(payload["raw_class_ids"]),
-            probabilities=np.asarray(payload["probabilities"]),
+            raw_class_ids=raw_class_ids,
+            probabilities=probabilities,
             predictions=np.asarray(payload["predictions"]),
             predictive_entropy=np.asarray(payload["predictive_entropy"]),
             expected_member_entropy=np.asarray(payload["expected_member_entropy"]),
-            mutual_information=np.asarray(payload["mutual_information"]),
-            normalized_entropy=np.asarray(payload["normalized_entropy"]),
+            mutual_information=mutual_information,
+            normalized_entropy=normalized_entropy,
             normalized_mi=np.asarray(payload["normalized_mi"]),
-            mean_probability_variance=np.asarray(payload["mean_probability_variance"]),
+            mean_probability_variance=mean_probability_variance,
+            total_probability_variance=total_probability_variance,
+            member_normalized_mi=member_normalized_mi,
+            entropy_confidence=entropy_confidence,
+            max_probability=max_probability,
             confidence=np.asarray(payload["confidence"]),
             pairwise_disagreement=np.asarray(payload["pairwise_disagreement"]),
             source_artifact_paths=sources,  # type: ignore[arg-type]

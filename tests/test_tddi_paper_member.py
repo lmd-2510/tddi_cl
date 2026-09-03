@@ -121,8 +121,8 @@ def test_paper_member_head_expansion_copies_old_class_rows() -> None:
 def test_paper_member_manifest_records_derived_architecture(tmp_path: Path) -> None:
     task_file = tmp_path / "tasks.json"
     task_spec = {
-        "protocol": "P4",
-        "seed": 0,
+        "protocol": "tail_to_head",
+        "seed": None,
         "tasks": [{"task_id": 0, "classes": [10, 30]}],
     }
     task_file.write_text(json.dumps(task_spec), encoding="utf-8")

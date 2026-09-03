@@ -13,8 +13,15 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.data.class_mapping import build_seen_class_map
+from src.data.fixed_budget_replay import FixedBudgetReplayBuffer, FixedReplaySampler
 from src.models.mlp import MLP, preset_config
-from src.training.train_cil import parse_args, seed_provenance, write_run_config
+from src.training.train_cil import (
+    FIXED_BUDGET_METHOD,
+    fixed_replay_seed_provenance,
+    parse_args,
+    seed_provenance,
+    write_run_config,
+)
 from src.utils.seed import (
     LEGACY_SEED_DERIVATION,
     MEMBER_SEED_DERIVATION,
@@ -87,6 +94,77 @@ class SeedDerivationTest(unittest.TestCase):
         torch.testing.assert_close(expected[2], actual[2], rtol=0, atol=0)
 
 
+class FixedReplayMemberSeedTest(unittest.TestCase):
+    _REPLAY_LABELS = np.repeat(np.asarray([10, 30, 50], dtype=np.int64), 4)
+
+    @classmethod
+    def _sampler_orders(cls, member_id: int) -> list[list[int]]:
+        configuration = resolve_seed_configuration(0, member_id)
+        sampler = FixedReplaySampler(
+            current_count=12,
+            replay_raw_labels=cls._REPLAY_LABELS,
+            replay_draws_per_epoch=12,
+            seed=configuration.member_seed,
+            task_id=1,
+        )
+        return [list(iter(sampler)), list(iter(sampler))]
+
+    def test_same_experiment_seed_and_member_produce_same_sampler_order(self) -> None:
+        self.assertEqual(self._sampler_orders(0), self._sampler_orders(0))
+
+    def test_different_members_produce_different_sampler_orders(self) -> None:
+        first_order = self._sampler_orders(0)[0]
+        second_order = self._sampler_orders(1)[0]
+        self.assertNotEqual(first_order, second_order)
+        self.assertNotEqual(
+            [index for index in first_order if index < 12],
+            [index for index in second_order if index < 12],
+        )
+        self.assertNotEqual(
+            [index for index in first_order if index >= 12],
+            [index for index in second_order if index >= 12],
+        )
+
+    def test_replay_buffer_identity_remains_shared_between_members(self) -> None:
+        features = np.arange(96, dtype=np.float32).reshape(24, 4)
+        labels = np.repeat(np.asarray([10, 30, 50], dtype=np.int64), 8)
+        buffers = []
+        for member_id in (0, 1, 2):
+            configuration = resolve_seed_configuration(7, member_id)
+            buffer = FixedBudgetReplayBuffer(
+                total_memory_budget=12,
+                random_seed=configuration.experiment_seed,
+            )
+            buffer.update(features, labels)
+            buffers.append(buffer)
+
+        expected_features, expected_labels = buffers[0].get_all()
+        for buffer in buffers[1:]:
+            actual_features, actual_labels = buffer.get_all()
+            self.assertEqual(buffer.memory_counts, buffers[0].memory_counts)
+            np.testing.assert_array_equal(actual_features, expected_features)
+            np.testing.assert_array_equal(actual_labels, expected_labels)
+
+    def test_legacy_identity_seed_preserves_fixed_sampler_order(self) -> None:
+        legacy = resolve_seed_configuration(19)
+        self.assertEqual(legacy.member_seed, legacy.experiment_seed)
+        previous_sampler = FixedReplaySampler(
+            current_count=12,
+            replay_raw_labels=self._REPLAY_LABELS,
+            replay_draws_per_epoch=12,
+            seed=legacy.experiment_seed,
+            task_id=1,
+        )
+        resolved_sampler = FixedReplaySampler(
+            current_count=12,
+            replay_raw_labels=self._REPLAY_LABELS,
+            replay_draws_per_epoch=12,
+            seed=legacy.member_seed,
+            task_id=1,
+        )
+        self.assertEqual(list(iter(previous_sampler)), list(iter(resolved_sampler)))
+
+
 class SeedCliAndProvenanceTest(unittest.TestCase):
     _REQUIRED = [
         "--train", "train.parquet",
@@ -122,7 +200,7 @@ class SeedCliAndProvenanceTest(unittest.TestCase):
             member_seed_derivation=configuration.derivation,
             method="ewc",
             memory_per_class=50,
-            variant="tddi",
+            variant="small",
             graph_cache=None,
             task_file=task_file,
         )
@@ -177,6 +255,44 @@ class SeedCliAndProvenanceTest(unittest.TestCase):
             build_seen_class_map([30, 10, 70]),
             {10: 0, 30: 1, 70: 2},
         )
+
+    def test_fixed_replay_run_config_records_shared_and_member_seed_roles(self) -> None:
+        task_spec = {
+            "protocol": "constrained_mass_balanced",
+            "seed": 5,
+            "tasks": [{"task_id": 0, "classes": [10, 30]}],
+        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            task_file = root / "tasks.json"
+            task_file.write_text(json.dumps(task_spec), encoding="utf-8")
+            args = self._run_args(task_file, member_id=1)
+            args.method = FIXED_BUDGET_METHOD
+            args.total_memory_budget = 6800
+            args.replay_draws_per_epoch = 6800
+            path = root / "run_config.json"
+            write_run_config(
+                path,
+                args=args,
+                run_id="fixed-member-1",
+                device="cpu",
+                task_spec=task_spec,
+            )
+            resolved = json.loads(path.read_text(encoding="utf-8"))["resolved"]
+
+        expected = {
+            "replay_buffer_seed": 5,
+            "replay_buffer_seed_role": "experiment_seed",
+            "sampler_seed": derive_member_seed(5, 1),
+            "sampler_seed_role": "member_seed",
+            "sampler_seed_derivation": MEMBER_SEED_DERIVATION,
+        }
+        self.assertEqual(
+            fixed_replay_seed_provenance(args),
+            expected,
+        )
+        for key, value in expected.items():
+            self.assertEqual(resolved[key], value)
 
 
 if __name__ == "__main__":
