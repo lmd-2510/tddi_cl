@@ -489,7 +489,52 @@ echo $! | tee "$FULL_ROOT/calibration_nohup.pid"
 Primary threshold ở mục 13 vẫn ghi `probability_source=raw`. Không trộn calibrated
 probability vào primary report nếu chưa tạo một config threshold riêng ghi rõ nguồn.
 
-## 15. Trình tự ngắn gọn
+## 15. Dựng final report bổ sung metric
+
+Bước này không train và không chạy inference. Nó đọc offline ensemble, frozen
+threshold và các file forgetting đã có để bổ sung Balanced Accuracy, Weighted F1,
+ensemble/task forgetting và ensemble diversity.
+
+Nếu `final_results` đã chứa báo cáo cũ, dùng `--overwrite`. Flag này chỉ thay các file
+report dẫn xuất, không sửa prediction, checkpoint hoặc threshold artifact.
+
+```bash
+export FULL_ROOT="outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_v1"
+
+nohup env PYTHONUNBUFFERED=1 \
+  python src/eval/build_final_report.py \
+  --full-root "$FULL_ROOT" \
+  --task-file outputs/tasks/tail_to_head_tasks.json \
+  --overwrite \
+  > "$FULL_ROOT/final_report_build.log" 2>&1 < /dev/null &
+
+echo $! | tee "$FULL_ROOT/final_report_build.pid"
+```
+
+Theo dõi và kiểm tra:
+
+```bash
+tail -f "$FULL_ROOT/final_report_build.log"
+
+ls -lh "$FULL_ROOT/final_results"
+test -s "$FULL_ROOT/final_results/ensemble3_p3_final_report.md"
+test -s "$FULL_ROOT/final_results/ensemble3_p3_task_summary.csv"
+test -s "$FULL_ROOT/final_results/ensemble3_p3_forgetting_summary.csv"
+test -s "$FULL_ROOT/final_results/ensemble3_p3_member_forgetting_summary.csv"
+test -s "$FULL_ROOT/final_results/ensemble3_p3_diversity_summary.csv"
+```
+
+Các output mới:
+
+- `ensemble3_p3_task_summary.csv`: metric full/threshold và diversity theo task;
+- `ensemble3_p3_paper_table.csv`: bảng rút gọn;
+- `ensemble3_p3_task_matrix.csv`: ensemble Macro-F1 theo train/eval task;
+- `ensemble3_p3_forgetting_summary.csv`: forgetting của ensemble;
+- `ensemble3_p3_member_forgetting_summary.csv`: forgetting của ba member;
+- `ensemble3_p3_diversity_summary.csv`: diversity theo task;
+- `ensemble3_p3_final_report.md`: báo cáo cuối cùng.
+
+## 16. Trình tự ngắn gọn
 
 1. Preflight data/P3/GPU/RAM/disk.
 2. Unit tests và dry-run.
@@ -500,3 +545,4 @@ probability vào primary report nếu chưa tạo một config threshold riêng 
 7. UE audit.
 8. Threshold trên validation → frozen artifact → test report.
 9. Temperature calibration nếu cần báo cáo calibration phụ.
+10. Dựng final report bổ sung metric từ artifact hiện có.

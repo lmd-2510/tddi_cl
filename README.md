@@ -53,7 +53,11 @@ Chỉ thêm `--execute` khi thực sự muốn chạy trên máy GPU.
 
 1. `docs/TDDI_PAPER_REPLAY_DISTILL_P3_8TASK_GPU_RUNBOOK.md` — lệnh full run từng member.
 2. `docs/TDDI_REPLAY_DISTILL_ENSEMBLE3_FILES_GUIDE.md` — tác dụng của từng file.
-3. `docs/TDDI_ENSEMBLE3_EWC_PLAN.md` — lịch sử thiết kế paper-size member/EWC.
+3. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — kết quả Ensemble3 P3 và giải thích metric.
+
+Final report mở rộng (Balanced Accuracy, Weighted F1, forgetting và ensemble diversity)
+được dựng lại từ artifact đã có bằng `src/eval/build_final_report.py`; không cần train lại.
+Lệnh chạy bằng `nohup` trên server nằm trong runbook P3 ở trên.
 
 Ba member phải chạy tuần tự. Sau khi đủ ba prediction artifact, offline ensemble lấy
 mean probabilities và UE audit báo cáo entropy, mutual information, variance,
