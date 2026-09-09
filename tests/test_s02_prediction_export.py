@@ -161,8 +161,8 @@ class S02ArtifactTest(unittest.TestCase):
             json.dumps(
                 {
                     "run_id": "run-abc",
-                    "arguments": {"seed": 17, "method": "replay_distill"},
-                    "resolved": {"method_protocol": "replay_distill_balanced_per_class_cap50"},
+                    "arguments": {"seed": 17, "method": "replay_distill_fixed_budget_uniform"},
+                    "resolved": {"method_protocol": "replay_distill_fixed_budget_uniform"},
                 }
             ),
             encoding="utf-8",
@@ -175,8 +175,8 @@ class S02ArtifactTest(unittest.TestCase):
         return S02ExportContext(
             run_id=run_id,
             seed=17,
-            method="replay_distill",
-            method_protocol="replay_distill_balanced_per_class_cap50",
+            method="replay_distill_fixed_budget_uniform",
+            method_protocol="replay_distill_fixed_budget_uniform",
             train_task=0,
             split=split,
             checkpoint_path=self.checkpoint,

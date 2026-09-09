@@ -304,7 +304,7 @@ def test_full8_p3_config_is_locked_to_requested_contract() -> None:
     )
 
     assert config.task_file.as_posix().endswith(
-        "outputs/tasks/tail_to_head_tasks.json"
+        "study_assets/task_protocols/tail_to_head_tasks.json"
     )
     assert config.protocol_id == "P3"
     assert config.protocol_name == "tail_to_head"

@@ -45,9 +45,9 @@ for file in \
   train_extracted.parquet \
   validation_extracted.parquet \
   test_extracted.parquet \
-  outputs/audit/feature_columns.json \
-  outputs/preprocess/scaler.pkl \
-  outputs/tasks/tail_to_head_tasks.json
+  study_assets/data_schema/feature_columns.json \
+  study_assets/preprocessing/scaler.pkl \
+  study_assets/task_protocols/tail_to_head_tasks.json
 do
   test -s "$file" || { echo "[MISSING] $file"; exit 1; }
   echo "[OK] $file"
@@ -64,7 +64,7 @@ import hashlib
 import json
 from pathlib import Path
 
-path = Path("outputs/tasks/tail_to_head_tasks.json")
+path = Path("study_assets/task_protocols/tail_to_head_tasks.json")
 payload = json.loads(path.read_text(encoding="utf-8"))
 tasks = payload["tasks"]
 layout = [len(task["classes"]) for task in tasks]
@@ -83,7 +83,7 @@ assert layout == [38, 20, 20, 20, 20, 20, 20, 20]
 assert len(classes) == len(set(classes)) == 178
 PY
 
-sha256sum outputs/tasks/tail_to_head_tasks.json \
+sha256sum study_assets/task_protocols/tail_to_head_tasks.json \
   | tee outputs/remote_preflight/p3_task_sha256.txt
 ```
 
@@ -140,7 +140,7 @@ python src/training/tddi_ensemble3_study.py \
 Dry-run phải cho thấy:
 
 - `--variant tddi_paper_member`;
-- task-file `outputs/tasks/tail_to_head_tasks.json`;
+- task-file `study_assets/task_protocols/tail_to_head_tasks.json`;
 - output namespace chứa `p3_seed0`;
 - member seeds `409845317`, `215626784`, `3041879697`;
 - batch 64, effective batch 1024, epochs 20;
@@ -375,7 +375,7 @@ Chạy UE cho đủ task/split:
 nohup env FULL_ROOT="$FULL_ROOT" bash -c '
 set -euo pipefail
 cd "$HOME/DrugDrug/cil-tddi/cil-tddi"
-TASK_FILE="outputs/tasks/tail_to_head_tasks.json"
+TASK_FILE="study_assets/task_protocols/tail_to_head_tasks.json"
 COUNTS="$FULL_ROOT/ue_audit_inputs/train_class_counts.csv"
 
 for task in {0..7}; do
@@ -504,7 +504,7 @@ export FULL_ROOT="outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_v1"
 nohup env PYTHONUNBUFFERED=1 \
   python src/eval/build_final_report.py \
   --full-root "$FULL_ROOT" \
-  --task-file outputs/tasks/tail_to_head_tasks.json \
+  --task-file study_assets/task_protocols/tail_to_head_tasks.json \
   --overwrite \
   > "$FULL_ROOT/final_report_build.log" 2>&1 < /dev/null &
 

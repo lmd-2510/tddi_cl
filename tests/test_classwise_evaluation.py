@@ -81,7 +81,7 @@ class ClasswiseTrackerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tracker = ClasswiseTracker(
             seed=7,
-            method="sequential",
+            method="replay_distill_fixed_budget_uniform",
             first_task_by_class={10: 0, 20: 1},
             train_count_by_class={10: 100, 20: 5},
         )
@@ -207,7 +207,7 @@ class ClasswiseTrackerTest(unittest.TestCase):
 
         missing_metadata_tracker = ClasswiseTracker(
             seed=0,
-            method="sequential",
+            method="replay_distill_fixed_budget_uniform",
             first_task_by_class={10: 0},
             train_count_by_class={},
         )

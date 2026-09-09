@@ -37,7 +37,7 @@ from src.eval.offline_ensemble import (  # noqa: E402
 DEFAULT_FULL_ROOT = Path(
     "outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_v1"
 )
-DEFAULT_TASK_FILE = Path("outputs/tasks/tail_to_head_tasks.json")
+DEFAULT_TASK_FILE = Path("study_assets/task_protocols/tail_to_head_tasks.json")
 EXPECTED_PROTOCOL = "tail_to_head"
 EXPECTED_MEMBER_IDS = (0, 1, 2)
 

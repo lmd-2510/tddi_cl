@@ -5,6 +5,11 @@ data/*.zip
 outputs/runs*
 outputs/advanced_protocols/
 outputs/graph_cache/
+outputs/full/
+outputs/pilot/
+outputs/smoke/
+outputs/remote_preflight/
+outputs/remote_data/
 dist/
 __pycache__/
 *.pyc

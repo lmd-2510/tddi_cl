@@ -72,7 +72,6 @@ from src.methods.gem import (
     trainable_parameters,
 )
 from src.methods.replay import build_training_arrays as build_replay_training_arrays
-from src.methods.sequential import build_training_arrays as build_sequential_training_arrays
 from src.models.mlp import MLP, preset_config
 from src.models.ddi_gcn import DDIGCNClassifier
 from src.models.tabm_classifier import TabMClassifier
@@ -101,9 +100,9 @@ from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 
 
 FIXED_BUDGET_METHOD = "replay_distill_fixed_budget_uniform"
-LEGACY_REPLAY_METHODS = {"replay", "replay_distill"}
-DISTILL_METHODS = {"replay_distill", FIXED_BUDGET_METHOD}
-ALL_REPLAY_METHODS = LEGACY_REPLAY_METHODS | {FIXED_BUDGET_METHOD}
+STANDARD_REPLAY_METHODS = {"replay"}
+DISTILL_METHODS = {FIXED_BUDGET_METHOD}
+ALL_REPLAY_METHODS = STANDARD_REPLAY_METHODS | {FIXED_BUDGET_METHOD}
 GRADIENT_EPISODIC_METHODS = {"gem", "agem"}
 
 
@@ -138,10 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--method",
         choices=[
-            "sequential",
-            "joint_seen",
             "replay",
-            "replay_distill",
             FIXED_BUDGET_METHOD,
             "ewc",
             "gem",
@@ -348,12 +344,8 @@ def build_student_old_indices(
 def method_protocol_name(method: str, memory_per_class: int) -> str:
     if method == "replay":
         return f"replay_balanced_per_class_cap{memory_per_class}"
-    if method == "replay_distill":
-        return f"replay_distill_balanced_per_class_cap{memory_per_class}"
     if method == FIXED_BUDGET_METHOD:
         return FIXED_BUDGET_METHOD
-    if method == "joint_seen":
-        return "cumulative_joint_seen_natural_sampling"
     if method == "gem":
         return "gem_task_episodic_gradient_projection"
     if method == "agem":
@@ -362,7 +354,7 @@ def method_protocol_name(method: str, memory_per_class: int) -> str:
 
 
 def sampler_policy_name(method: str) -> str:
-    if method in LEGACY_REPLAY_METHODS:
+    if method in STANDARD_REPLAY_METHODS:
         return "inverse_class_frequency_with_replacement"
     if method == FIXED_BUDGET_METHOD:
         return "current_once_plus_fixed_class_uniform_replay"
@@ -1968,23 +1960,9 @@ def main() -> None:
 
         replay_examples_available = 0
         replay_raw_labels = np.empty((0,), dtype=np.int64)
-        if args.method == "joint_seen":
-            train_seen, _ = load_backbone_split(
-                args,
-                args.train,
-                feature_columns,
-                scaler_payload,
-                graph_bank,
-                class_ids=seen_raw_classes,
-                max_rows=args.max_train_rows_per_task,
-            )
-            train_features = train_seen.features
-            train_raw_labels = train_seen.labels
-        elif args.method in {"sequential", "ewc"} | GRADIENT_EPISODIC_METHODS:
-            train_features, train_raw_labels = build_sequential_training_arrays(
-                current_train.features,
-                current_train.labels,
-            )
+        if args.method == "ewc" or args.method in GRADIENT_EPISODIC_METHODS:
+            train_features = current_train.features
+            train_raw_labels = current_train.labels
         else:
             replay_features, replay_raw_labels = replay_buffer.get_all()
             replay_examples_available = int(replay_raw_labels.shape[0])
@@ -2003,7 +1981,7 @@ def main() -> None:
         train_dataset = build_tensor_dataset(train_features, train_local_labels)
         validation_dataset = build_tensor_dataset(validation_seen.features, validation_local_labels)
         fixed_sampler: FixedReplaySampler | None = None
-        if args.method in LEGACY_REPLAY_METHODS:
+        if args.method in STANDARD_REPLAY_METHODS:
             sampler = build_balanced_sampler(train_local_labels)
             train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler)
         elif args.method == FIXED_BUDGET_METHOD:
@@ -2032,7 +2010,7 @@ def main() -> None:
             episodic_memory.total_size if episodic_memory is not None else 0
         )
         expected_replay_draws = 0.0
-        if args.method in LEGACY_REPLAY_METHODS and seen_raw_classes:
+        if args.method in STANDARD_REPLAY_METHODS and seen_raw_classes:
             expected_replay_draws = (
                 samples_drawn_per_epoch * old_class_count / len(seen_raw_classes)
             )
@@ -2475,12 +2453,6 @@ def main() -> None:
             run_paths["training_audit_csv"],
             index=False,
         )
-
-        # Legacy replay_distill keeps its historical per-task teacher artifact.
-        # Fixed-budget replay reconstructs the teacher from its boundary model_state.
-        if args.method == "replay_distill":
-            teacher_checkpoint = checkpoint_dir / f"task_{task_id}_teacher.pt"
-            torch.save(best_state, teacher_checkpoint)
 
         if args.method == "ewc":
             fisher_new = compute_fisher(model, train_loader, device)

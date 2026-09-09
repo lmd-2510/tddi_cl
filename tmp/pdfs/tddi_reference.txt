@@ -1,0 +1,1633 @@
+ARTICLE IN PRESS
+https://doi.org/10.1038/s41746-026-03025-2
+Received: 15 February 2026
+Accepted: 8 July 2026
+Cite this article as: Kha, Q.-H.,
+Nguyen, D.-Q., Hoang, P .P . et al.
+Robust Prediction of Drug
+Interactions using Chemical
+Descriptors. npj Digit. Med. (2026).
+https://doi.org/10.1038/
+s41746-026-03025-2
+Quang-Hien Kha, Duc-Quang-Anh Nguyen, Phi Pham Van Hoang, Uyen Khoi-Minh
+Huynh, Khoa D. Pham, Minh-Thu Phung, Tan-Phat Huynh, Hoang-Bach-Dat Le, Nguyen-
+Phat Vo, Minh-Hieu Do, Khanh T. Q. Le, Ngoc-Thac Pham, Huong-Giang Le, Ky-Phat
+Nguyen, Phan Nguyen, Thanh-Huy Nguyen, Phat K. Huynh, Minh H. N. Le, Min Xu &
+Nguyen Quoc Khanh Le
+We are providing an unedited version of this manuscript to give early access to its
+findings.  Before final  publication, the manuscript will undergo further editing. Please
+note there may be errors present which affect  the content, and all legal disclaimers
+apply.
+If this paper is publishing under a Transparent Peer Review model then Peer
+Review reports will publish with the final  article.
+© The Author(s) 2026. Open Access This article is licensed under a Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International
+License, which permits any non-commercial use, sharing, distribution and reproduction in any medium or format, as long as you give appropriate credit
+to the original author(s) and the source, provide a link to the Creative Commons licence, and indicate if you modified  the licensed material. You do not
+have permission under this licence to share adapted material derived from this article or parts of it. The images or other third party material in this
+article are included in the article's Creative Commons licence, unless indicated otherwise in a credit line to the material. If material is not included in the
+article's Creative Commons licence and your intended use is not permitted by statutory regulation or exceeds the permitted use, you will need to obtain
+permission directly from the copyright holder. To view a copy of this licence, visit http://creativecommons.org/licenses/by-nc-nd/4.0/.
+npj Digital Medicine
+Article in Press
+Robust Prediction of Drug Interactions using
+Chemical Descriptors
+
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+Robust Prediction of Drug Interactions using
+Chemical Descriptors
+Quang-Hien Kha1,2, Duc-Quang-Anh Nguyen2,3,4,
+Phi Pham-Van-Hoang2, Uyen Khoi-Minh Huynh2,5,
+Khoa D. Pham2,6, Minh-Thu Phung2,7,8, Tan-Phat Huynh2,9, 
+Hoang-Bach-Dat Le2,10,11, Nguyen-Phat Vo2,12,
+Minh-Hieu Do10,11, Khanh T. Q. Le2,6, Ngoc-Thac Pham13,14, 
+Huong-Giang Le13, Ky-Phat Nguyen2,7, Phan Nguyen2,15, 
+Thanh-Huy Nguyen16, Phat K. Huynh6, Minh H. N. Le1,2,17, 
+Min Xu16,18, Nguyen Quoc Khanh Le2,19,20*
+1International Ph.D. Program in Medicine, College of Medicine, Taipei 
+Medical University, Taipei 110301, Taiwan.
+2AIBioMed Research Group, Taipei Medical University, Taipei 110301, 
+Taiwan.
+3International School - Vietnam National University, G7, Xuan Thuy, 
+Cau Giay, Ha Noi 122000, Vietnam.
+4London Digital Twin Research Centre, Middlesex University, London 
+NW4 4BT, United Kingdom.
+5Faculty of Biological Sciences, Nong Lam University, Ho Chi Minh 
+City 700000, Vietnam.
+6PASSIO Laboratory, North Carolina Agricultural and Technical State 
+University, Greensboro, NC 27411, United States.
+7International Master Program in Medicine, College of Medicine, Taipei 
+Medical University, Taipei 110301, Taiwan.
+8Department of Embryology - Pathology - Forensic Medicine, Faculty of 
+Medicine, Can Tho University of Medicine and Pharmacy, Can Tho 
+900000, Vietnam.
+9International Advanced Technology Program, College of Engineering, 
+National Taiwan University of Science and Technology, Taipei 106, 
+Taiwan.
+10Faculty of Information Technology, University of Science, Ho Chi 
+Minh City 700000, Vietnam.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+11Vietnam National University Ho Chi Minh City (VNU-HCM), Ho Chi
+Minh City 700000, Vietnam.
+12Faculty of Computer Science and Engineering, Ho Chi Minh City
+University of Technology (HCMUT), VNU-HCM, Ho Chi Minh City
+700000, Vietnam.
+13Department of Pharmacognosy and Traditional Pharmacy, School of
+Pharmacy, University of Medicine and Pharmacy at Ho Chi Minh City,
+Ho Chi Minh City 700000, Vietnam.
+14PhD Program in Clinical Drug Development of Herbal Medicine,
+College of Pharmacy, Taipei Medical University, Taipei 110301, Taiwan.
+15School of Computing, Korea Advanced Institute of Science and
+Technology (KAIST), Daejeon 34141, Republic of Korea.
+16Computational Biology Department, Carnegie Mellon University,
+Pittsburgh, PA 15213, United States.
+17Section of Cardiovascular Medicine, Department of Internal Medicine,
+Yale School of Medicine, New Haven, Connecticut, CT 06519, United
+States.
+18Computer Vision Department, Mohamed bin Zayed University of
+Artificial Intelligence, Abu Dhabi, United Arab Emirates.
+19In-Service Master Program in Artificial Intelligence in Medicine,
+College of Medicine, Taipei Medical University, Taipei 110301, Taiwan.
+20Translational Imaging Research Center, Taipei Medical University
+Hospital, Taipei 110301, Taiwan.
+*Corresponding author(s). E-mail(s): khanhlee@tmu.edu.tw;
+Contributing authors: d142111015@tmu.edu.tw; anhnd@vnuis.edu.vn;
+hoangphi1311.gpa@gmail.com; 21126572@st.hcmuaf.edu.vn;
+kdpham@aggies.ncat.edu; m142114003@tmu.edu.tw;
+b11135035@mail.ntust.edu.tw; lhbdat22@clc.fitus.edu.vn;
+phat.vonguyenphat@hcmut.edu.vn; dmhieu22@clc.fitus.edu.vn;
+letranquockhanh07@gmail.com; d339112005@tmu.edu.tw;
+lhgiang@ump.edu.vn; m142113007@tmu.edu.tw; nhphan@kaist.ac.kr;
+thanhhun@andrew.cmu.edu; pkhuynh@ncat.edu; minh.h.le@yale.edu;
+mxu1@cs.cmu.edu;
+Abstract
+Polypharmacy requires accurate prediction of drug-drug interactions to pre-
+vent adverse events, yet existing models often lack reliability and explainability.
+We propose T-DDI, a descriptor-based deep learning framework for multi-class
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+drug-drug interaction prediction. Rather than relying on complex graph embed-
+dings, T-DDI uses explicit physicochemical descriptors and an uncertainty-aware
+estimator to handle severe class imbalance. Evaluated on 868,069 drug pairs
+spanning 178 interaction types, T-DDI achieves a Macro F1 of 0.8452 on the
+held-out test set, improving to 0.8992 within the high-confidence subset (87.91%
+of test samples), outperforming all evaluated baselines within the architectures
+and datasets considered here. An illustrative prospective case-study assessment
+on five newly FDA-approved drugs from late 2025 showed that T-DDI can gen-
+erate mechanistically plausible DDI hypotheses for compounds not used during
+model development. T-DDI pairs confidence-stratified predictions with LIME-
+based feature-level explanations and a web application for screening, supporting
+more reliable drug safety monitoring.
+Keywords: Drug-drug interactions, Tabular deep learning, Uncertainty-aware
+estimator, Explainable AI, Physicochemical descriptors
+Introduction
+Drug-drug interactions (DDIs) present a growing challenge in modern healthcare, 
+which is driven by the global rise in complex therapies and aging populations [1, 2]. 
+Polypharmacy, defined as the  use of five or more medications, has nearly  doubled over 
+the past two decades among U.S. adults aged 65 and older. As of 2020, over 40% of this 
+demographic reported polypharmacy [3]. This trend is even more severe in high-risk 
+groups; for instance, more than 95% of patients with cardiovascular disease experi-
+ence polypharmacy, with the majority facing at least one potentially severe DDI [4]. A 
+recent study confirmed this trend, showing that the prevalence of clinically significant 
+DDIs among community-dwelling older adults nearly doubled within two years, rising 
+from 23.3% to 45.2% in those aged 70 and above [5]. Such simultaneous medication use 
+naturally increases the risk of overlapping or interfering pharmacological effects. Clin-
+ical data indicate that up to 93.3% of patients receiving complex regimens experience 
+DDIs, with approximately 21% exhibiting clinically significant fluctuations in biomark-
+ers such as International Normalized Ratio (INR) [6, 7]. Consequently, this increased 
+exposure is linked to a rise in adverse drug events (ADEs), lower quality of life, hos-
+pitalizations, and withdrawals of drugs from the market[5, 8, 9]. Because the sheer 
+number of possible drug pairs exceeds the capacity of manual checking, identifying 
+harmful interactions is no longer just a logistical issue but a critical safety requirement, 
+demanding advanced computational methods for real-world practice [5, 9].
+To address this scale, computational pharmacology has largely focused on deep 
+learning models that use high-dimensional structural representations. Graph Neu-
+ral Networks (GNNs) and their variants, such as MuGNN and MIRACLE, have 
+become the standard, using attention mechanisms and contrastive learning to cap-
+ture molecular topology [10, 11]. More recently, transformer-based architectures like 
+MolTrans have shown the value of substructure-aware attention for modeling explicit 
+chemical interactions [12]. Advances in multi-perspective molecular representation,
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+including models that integrate 3D spatial visual information with traditional fin-
+gerprints and graph features [13], as well as graph-based metapath approaches for 
+drug association prediction [14, 15], have further expanded the landscape of compu-
+tational drug research. In parallel, large language model (LLM) frameworks are being 
+applied to drug repurposing through multisource prompt strategies [16], and novel 
+global-local graph perspectives have been proposed for drug-protein interaction pre-
+diction [17]. However, a common assumption in structural embedding approaches is 
+that increasingly complex representations (e.g., learned representations of Simplified 
+Molecular-Input Line-Entry System (SMILES) strings or molecular graphs) automat-
+ically lead to better prediction. This assumption remains largely unexamined. In the 
+context of tabular physicochemical data, such high-dimensional embeddings can intro-
+duce unnecessary noise, potentially masking the clear signals provided by explicit 
+numerical descriptors [18].
+Furthermore, while state-of-the-art (SOTA) models achieve impressive accuracy on 
+benchmarks, they often neglect a key aspect of clinical use: reliability. Existing frame-
+works frequently operate as “black boxes” that provide high-confidence predictions 
+even for rare or ambiguous cases [19]. This issue is worsened in multi-class DDI classifi-
+cation, where the data suffers from severe class imbalance [20]. In such settings, which 
+involve hundreds of interaction types rather than simple binary outcomes, standard 
+models tend to be overconfident in minority classes, creating risks for clinical decision 
+support [21]. The challenge, therefore, is not only to predict interactions accurately 
+but also to quantify uncertainty and provide post hoc feature-level explanations for 
+individual predictions.
+In this work, we challenge the trend toward complexity by presenting Tabu-
+lar Reliable Uncertainty DDI prediction (T-DDI), a descriptor-based framework for 
+large-scale, multi-class drug interaction classification ( Fig.  1). Our  study  makes two 
+main contributions: (1) a systematic evaluation showing that, within the architectures 
+and datasets considered here, dense physicochemical descriptors outperform attention-
+driven structural embeddings; and (2) an Uncertainty-aware Estimator (UE) that 
+stratifies p redictions b y c onfidence to  mi tigate th e ri sks of  se vere cl ass imbalance. 
+Validating our framework on a comprehensive dataset encompassing 178 DDI types 
+and 868,069 drug pairs, we show that T-DDI achieves better performance than the 
+compared algorithms in the multi-class DDI classification task, including the updated 
+DDI2018 benchmark [20]. We also pair confidence-stratified pr edictions wi th post 
+hoc feature-level explanations using Local Interpretable Model-agnostic Explanations 
+(LIME) [22] and optional natural-language summaries generated by Gemini [23] in a 
+user-centric interface. This study emphasizes reliability, parsimony, and feature-level 
+explanation in pharmacovigilance rather than introducing a fundamentally new model 
+primitive.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+Results
+Introducing a large-scale benchmark DDI2025 dataset
+To comprehensively evaluate the framework, we curated a large-scale benchmark 
+dataset, hereafter referred to as DDI2025, which extends substantially beyond stan-
+dard resources. The DDI2025 dataset comprises 868,069 drug-drug pairs (Fig. 1) 
+annotated with 178 interaction types, spanning a wide range of pharmacokinetic 
+(PK) and pharmacodynamic (PD) mechanisms. Compared with the standard 86-class 
+benchmark widely adopted in the field [20], our dataset more than doubles the num-
+ber of interaction categories and quadruples the sample size. The distribution is highly 
+imbalanced (Fig. 2A, B and Supplementary Table 5), with the most frequent type 
+accounting for around 13% of all pairs. In contrast, 121 interaction types appear in 
+fewer than 0.1% of samples, posing a severely imbalanced classification challenge. The 
+dataset is made publicly available at the Data availability section.
+Numerical physicochemical descriptors drive predictive
+superiority over learned embeddings
+We first evaluated the hypothesis that explicit numerical descriptors could outperform 
+complex learned embeddings in tabular architectures. As shown in Table 1, T-DDI with 
+numerical-only features achieved a top-1 Accuracy of 0.9374 ± 0.0004, outperforming 
+all traditional machine learning baselines and deep tabular models including BiSHop 
+(0.9275) and FT-Transformer (0.9184).
+Crucially, our ablation study (Table 2, “Categorical-branch ablation (DDI2025 
+test set)”) reveals a counter-intuitive finding r egarding f eature r epresentation. The 
+standard TabTransformer configuration, which incorporates  the  CLS  token, SMILES 
+embeddings, and categorical embeddings, achieved an accuracy of only 0.8758 and 
+a Macro F1 of 0.7022 on the DDI2025 test set. By stripping away these com-
+plex, high-dimensional categorical inputs and relying solely on engineered numerical 
+physicochemical descriptors (e.g., MR VSA, EState VSA, SlogP VSA, LabuteASA, 
+MTPSA, PEOE VSA, VSA EState; all are explained in the Methods section), T-DDI 
+gained +0.0676 in Accuracy and a substantial increase of +0.1430 in Macro F1.
+This performance gap suggests that for structured tabular DDI data, dense 
+numerical signals provide a more robust representation than sparse, attention-driven 
+categorical embeddings, which may introduce noise into the transformer attention 
+mechanism. We note that this finding i s s pecific to  th e Ta bTransformer architec-
+ture evaluated on our DDI datasets; whether it generalizes to all architectures or 
+molecular property prediction tasks remains an open question that warrants further 
+investigation.
+Feature selection and overfitting mitigation
+We implemented a dedicated feature-selection workflow o n d evelopment d ata (i.e., 
+train and validation sets) only. The pipeline evaluated six reduced feature-count 
+variants ranging from 1,500 to 2,858 descriptors using full three-fold T-DDI cross-
+validation. Across all configurations, the uncompressed 3,780-descriptor set achieved
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+the highest mean Accuracy (0.9373) and Weighted F1 (0.9370) (Supplementary 
+Table 3, re-training the T-DDI architecture from scratch within the feature-selection 
+sweep), whereas the 2,858-feature subset yielded only a higher Macro F1 gain (0.8337 
+vs. 0.8295) but lower Accuracy (0.9350) and Weighted F1 (0.9346); more aggressive 
+compression to 2,700, 2,400, 2,100, 1,800, and 1,500 descriptors further reduced overall 
+performance.
+The remaining results from feature subsets can be found in Supplementary Table 3. 
+After careful consideration, we retained all 3,780 descriptors for the final model, as we 
+prioritized the strongest overall predictive performance over any long-tail performance 
+trade-off.
+However, operating in this uncompressed, high-dimensional space inherently raises 
+the risk of overfitting. To secure the model’s generalizability, we augmented the train-
+ing pipeline with multiple regularization. Specifically, we used weight decay, focal loss, 
+early stopping, and three-fold ensembling to reduce overfitting and  stabilize  learning 
+on rare interaction types. Dropout and attention-specific hyperparameters apply only 
+to the categorical TabTransformer ablation, not to the final n umerical-only T-DDI 
+configuration. D etailed d erivations o f t hese m itigating s trategies a re o utlined i n the 
+Methods section.
+Uncertainty quantification and  risk  stratification
+To address the challenge of predicting rare interaction types, we analyzed the distri-
+bution of the model’s confidence scores.  As shown  in  Fig.  2C, the  scores  are  strongly 
+skewed toward high values, indicating that the model generally outputs decisive 
+predictions.
+Applying the out-of-fold (OOF) threshold-selection procedure described in the 
+Methods section to the DDI2025 development set yielded thigh = 0.88, the smallest 
+threshold achieving at least 95% OOF accuracy while retaining 92.32% of development-
+set predictions (641,133 of 694,455 samples). No development-set samples fell below 
+tlow = 0.5. When these thresholds were applied to the held-out test set, 87.91% of 
+predictions fell into the high-confidence s ubset ( 152,622 o f 1 73,614 s amples) a nd the 
+remaining 12.09% into the medium-confidence subset (20,992 samples), with no sam-
+ples below 0.5. Fig. 2D, E illustrates the same overall pattern. The full OOF threshold 
+sweep is provided in Supplementary Table 1 and Supplementary Figure 2.
+Applying this OOF-selected high-confidence fi lter im proved he ld-out te st perfor-
+mance from 0.9434 Accuracy and 0.8452 Macro F1 on the full test set to 0.9796 
+Accuracy and 0.8992 Macro F1 within the high-confidence s ubset. T he l arger gain 
+in Macro F1 than in overall Accuracy indicates that uncertainty stratification prefer-
+entially removes ambiguous errors among rarer interaction types rather than merely 
+inflating p erformance t hrough t rivial c ase fi ltering. Th is sh ows th at th e Uncertainty 
+Estimator can flag predictions that warrant additional review.
+We further examined the predictive fidelity within the high-confidence regime using 
+a confusion matrix (Fig. 3A). The matrix displays a sharp diagonal with minimal 
+off-diagonal n oise, d emonstrating t hat t he m odel d istinguishes b etween fine-grained 
+interaction types with high precision when confidence is high. This is corroborated by
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+the heatmap of individual class metrics (Fig. 3B), which shows consistent high per-
+formance (yellow spectrum) across the vast majority of DDI types. Although isolated 
+drops occur for a small minority of interactions, the overall uniformity confirms that 
+the model’s reliability is driven by robust feature learning rather than bias towards 
+majority classes. To quantify this relationship, we computed the Spearman rank cor-
+relation between per-class training sample size (i.e., train and validation sets) and 
+per-class F1 score on the held-out test set across all 178 interaction types (Supple-
+mentary Figure 1). The analysis revealed a moderate positive correlation (ρ = 0.387, 
+p = 9.20 × 10−8, n = 178), confirming t hat r are D DI t ypes a re disproportionately 
+harder to predict. However, many rare classes still achieved high F1 scores, indicating 
+that the focal loss and uncertainty estimator partially mitigate the class imbalance 
+effect.
+In contrast, the medium-confidence s ubset ( 0.5 ≤  c onfidence < 0. 88) captures 
+predictions where the model detected ambiguity. On the held-out test set, this tier 
+accounted for 12.09% of samples and showed substantially lower performance (Accu-
+racy 0.6798, Macro F1 0.6145) than the high-confidence regime. The confusion matrix 
+for this tier (Fig. 3C) shows greater dispersion off the diagonal compared to the  high-
+confidence g roup. T his d istinction i s c learly v isible i n t he h eatmap ( Fig. 3 D), where 
+distinct bands of lower performance (dark blue) emerge. Importantly, rather than indi-
+cating model failure, this separation shows that the uncertainty estimator successfully 
+segregates overlapping or noisy instances into a lower tier. By isolating these difficult 
+cases, the system acts as a safety buffer, preventing uncertain predictions from being 
+over-interpreted in downstream decision support.
+Rare-class performance analysis
+To quantify rare-class performance explicitly, we aggregated held-out test predictions 
+for the 121 DDI types with fewer than 0.1% of total samples (≤868 pairs each; 4,176 
+test instances, 2.40% of the full test set). Within this rare subset, T-DDI achieved a 
+Macro F1 of 0.7943, a Median per-class F1 of 0.8750, and a Macro Recall of 0.7550. 
+A breakdown of rare, non-rare, and all-class held-out test metrics is provided in 
+Supplementary Table 7. The gap between Macro F1 and Median F1 indicates that 
+performance degradation is concentrated in the most extreme tail of the distribution, 
+while the majority of rare classes still achieve competitive F1 scores. Most rare-class 
+test instances were assigned to the high-confidence tier (3,353/4,176; 80.29%), whereas 
+the medium-confidence r are s ubset c aptured a  s maller s et o f m ore a mbiguous cases 
+for additional review.
+Evaluation on the DDI2018 benchmark
+We evaluated our framework on the dataset introduced by Ryu et al., referred to 
+here as DDI2018 [20]. We applied the same DrugBank preprocessing pipeline used 
+for DDI2025 to update both SMILES structures and interaction definitions. Conse-
+quently, this updated version comprises 149,902 drug pairs covering 77 interaction 
+types (reduced from 86 in the original work), partitioned into training, validation, and 
+test splits following the original 6:2:2 ratio [20].
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+For DDI2018, we repeated the OOF threshold-selection procedure on its own 
+development split. The resulting high-confidence cutoff was t h igh = 0.90, the smallest 
+threshold reaching at least 95% OOF accuracy (95.15%) while retaining 88.87% of 
+development-set predictions (106,658 of 120,013 samples).
+For a direct comparison, we reproduced the DeepDDI method [20] using their 
+official so urce co de (D eepDDI co de). We  re trained an d ev aluated De epDDI on  the 
+updated DDI2018 dataset under identical experimental conditions to T-DDI to ensure 
+a fair and rigorous evaluation. We additionally included two DDI-specific neural base-
+lines, DDI-GCN [24] and SSI-DDI [25], in the updated DDI2018 comparison. SSI-DDI 
+was evaluated by scoring all 77 candidate relation types for each held-out drug pair 
+with the trained ensemble and selecting the highest-scoring relation.
+As shown in Table 2, “Benchmark comparison (DDI2018 test set)”, DDI-GCN 
+achieved an Accuracy of 0.7118 and Macro F1 of 0.3600, SSI-DDI reached 0.7114 and 
+0.5617, and DeepDDI achieved 0.9228 and 0.7048, respectively. Both variants of T-DDI 
+outperformed these baselines on the updated DDI2018 split. T-DDI without UE scored 
+0.9296 (Accuracy) and 0.8990 (Macro F1), while T-DDI with UE (at high-confidence 
+threshold of 0.90) reached 0.9774 and 0.9398, respectively.
+t-SNE visualization of decision reliability
+To visualize the model’s decision boundaries, we projected the latent feature repre-
+sentations of drug pairs into two dimensions using t-SNE (Fig. 4). The operational 
+high-confidence subset forms a distinct, dense cluster predominantly populated by cor-
+rect predictions (green points), indicating a region of high reliability. In contrast, the 
+medium-confidence r egime e xhibits s ignificant overlap be tween co rrect an d incorrect 
+predictions. This visual separation confirms that the Uncertainty Estimator effectively 
+distinguishes clear pharmacological signals from ambiguous cases. We also observed a 
+minor fraction of misclassified instances remaining  within the high-confidence cluster, 
+reflecting r esidual e rrors c ommon i n h igh-dimensional d eep l earning t asks ( Fig. 3A, 
+B) [26, 27].
+Local and global feature-level explanations for T-DDI
+predictions
+To complement global metrics with feature-level analysis, we utilized LIME [22] to 
+quantify the directional influence o f i ndividual p hysicochemical f eatures w ithin the 
+3,780-dimensional descriptor space. As can be observed in Supplementary Figure 3, 
+the interaction of a representative drug pair (we randomly selected Fedratinib and 
+Bicalutamide) was predicted as Class 9 (serum concentration increase (see Supplemen-
+tary Table 4), confidence 100%) reveals the following local explanation: the dominant 
+positive driver was the cross-term between bulk accessible surface area and molar 
+refractivity (LabuteASA×MRVSA1, w = +0.032), which represents the combined contri-
+bution of molecular size and polarizability to the predicted pharmacokinetic interac-
+tion. Additional positive contributors included zero-valued indicator terms spanning 
+molar refractivity, i.e., EState (MRVSA1×EstateVSA9) and molar refractivity, i.e., elec-
+trotopological surface (MRVSA5×PEOEVSA12) cross-products, which suggest that the
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+absence of joint activation in these descriptor pairs is itself an informative signal. Con-
+versely, the primary negative contributor was the bulk surface area self-interaction 
+term (LabuteASA×LabuteASA > 25556.02, w = −0.014), penalizing predictions toward 
+Class 9 when both drugs simultaneously exhibit large accessible surface areas. The elec-
+trotopological, i.e., electrostatic cross-term (VSAEstate9×PEOEVSA12, w = −0.008) 
+further acted as a suppressive signal. Taken together, the LIME explanation reveals 
+that the model’s decision boundary for Class 9 is shaped primarily by the interplay 
+between molecular size, refractivity, and electrotopological state, rather than any single 
+physicochemical descriptor in isolation.
+To provide global feature importance evidence across all DDI types, we applied 
+LIME to a stratified r andom s ample o f 9 ,463 t est i nstances s panning a ll 1 78 inter-
+action classes (up to 100 per class) and aggregated the 30 highest-magnitude 
+contributions per instance by descriptor family (Supplementary Figures 4 and 5). 
+Cross-family interaction terms (pairwise products of descriptors from distinct fam-
+ilies, e.g., SlogP VSA×PEOE VSA) accounted for 77.6% of top-30 contributions and 
+achieved the highest mean absolute weight across all semantic groups (mean |wˆ| = 
+0.060; Supplementary Figure 5). The single highest-ranked cross-term globally was 
+slogPVSA10×PEOEVSA3 (mean |wˆ| = 0.276), a pairing that encodes the interplay 
+between partial atomic charges estimated by Gasteiger-Marsili orbital electronega-
+tivity equalization [28] and the lipophilicity-weighted solvent-accessible surface area 
+derived from the Wildman-Crippen atomic-contribution model [29]. The dominance of 
+cross-family terms indicates that T-DDI has learned synergistic relationships between 
+polarity and hydrophobicity at the drug-pair level rather than relying on either 
+property in isolation.
+The global feature importance heatmap across 30 semantic DDI groups (Sup-
+plementary Figure 5) reveals pharmacologically plausible patterns. PK metabolism 
+groups exhibit stronger reliance on SlogP VSA and MR VSA (molar refractivity) descrip-
+tors, consistent with the established role of lipophilicity and van der Waals volume 
+in determining cytochrome P450 substrate affinity an d me tabolic cl earance [2 9, 30]. 
+Seizure-related clinical events show the highest MTPSA contribution (raw mean |wˆ| = 
+0.089), reflecting t he l ow p olar s urface a rea r equirement f or c entral n ervous system 
+(CNS) penetration [31]. Diuretic and renal groups exhibit elevated PEOE VSA weights, 
+in line with the importance of ionization state and polarity in renal tubular secretion 
+[30].
+Kruskal-Wallis tests on the absolute LIME weight distributions across broad DDI 
+mechanism categories (pharmacokinetic, pharmacodynamic, and clinical-outcome) 
+confirmed s tatistically s ignificant di fferentiation for  thr ee des criptor fam ilies: Cross-
+term (H = 89, p < 0.001), MR VSA (H = 27, p < 0.001), and SlogP VSA (H = 10, 
+p = 0.019). The remaining families (EState VSA, PEOE VSA, VSA EState, MTPSA, 
+LabuteASA) did not reach significance at α = 0.05, indicating that their contributions 
+are more uniformly distributed across interaction types. Together, these results demon-
+strate that the model’s reliance on different d escriptor t ypes i s mechanism-specific, 
+providing quantitative statistical support for the descriptor-mechanism associations 
+described above.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+Analyses of mispredicted DDI pairs
+To facilitate a mechanistic interpretation of the model’s performance, we aggregated 
+178 specific D DI t ypes i nto 3 0 b roader s emantic g roups b ased o n s hared P K, PD, 
+and biophysiological attributes (Supplementary Table 4). This categorization reveals a 
+highly imbalanced distribution: while groups like “Cardiovascular hemodynamic” are 
+abundant, specialized endpoints such as “Ototoxicity” are sparse. Analyzing the error 
+landscape (N = 9, 830 mispredicted instances, Supplementary Table 6) reveals that 
+misclassifications are not random; rather, they cluster heavily within specific domains 
+(Fig. 5). Notably, 87.29% of errors involved predicting a label from a completely dif-
+ferent semantic group, whereas only 12.71% were “near-misses” within the correct 
+group.
+The most prominent error pattern is the bidirectional confusion between 
+“Metabolism” and “Serum concentration.” This highlights a challenge in distinguish-
+ing the biological mechanism from its outcome: a change in metabolism (e.g., enzyme 
+inhibition) is the physiological cause that leads to altered serum levels. The model fre-
+quently interprets evidence of metabolic change as a serum-level shift and vice versa. 
+This suggests that while the framework correctly captures the broad pharmacokinetic 
+signal, it struggles to disentangle the enzymatic process from its systemic result due 
+to the high semantic correlation between these concepts in clinical data [32, 33].
+A secondary but clinically significant p attern i nvolves “ cross-domain leakage,” 
+where PD events (e.g., cardiovascular or CNS depression) are misclassified a s PK 
+events. Since PK interactions often serve as precursors to PD toxicity, the model 
+appears to overweight upstream PK features, effectively r einterpreting downstream 
+clinical consequences as pharmacokinetic disruptions [34]. Conversely, rare semantic 
+categories exhibited low absolute error counts, likely reflecting t heir s parsity rather 
+than superior performance. The remaining intra-group errors represent less severe 
+discrepancies, where the model correctly identified t he b road b iological d omain but 
+missed the fine-grained distinction [35, 36].
+Illustrative prospective case-study evaluation on newly
+FDA-approved drugs
+We assessed whether T-DDI could generate mechanistically plausible DDI hypotheses 
+for five newly FDA-approved small-molecule drugs from late 2025, selected according 
+to the criteria described in the Methods section.
+The five compounds included I mlunestrant (Inluriyo), an oral selective estrogen 
+receptor degrader for ER+/HER2− breast cancer [37]; Remibrutinib (Rhapsido), a 
+Bruton tyrosine kinase inhibitor for chronic spontaneous urticaria [38]; Elinzanetant 
+(Lynkuet), a dual neurokinin-1 and neurokinin-3 receptor antagonist for menopausal 
+vasomotor symptoms [39]; Ziftomenib (Komzifti), a menin-KMT2A inhibitor for 
+NPM1-mutated acute myeloid leukemia [40]; and Sevabertinib (Hyrnuo), a HER2 
+tyrosine kinase inhibitor for non-small cell lung cancer [41].
+The case-study predictions showed several examples of concordance with estab-
+lished PK and PD mechanisms. For Imlunestrant, a CYP3A substrate, T-DDI
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+assigned a high score to the interaction with the strong CYP3A inhibitor Itracona-
+zole (P > 0.99). This is consistent with prescribing information indicating that strong 
+CYP3A inhibitors increase imlunestrant exposure and that concomitant use should 
+be avoided or managed by dose reduction [42]. For Elinzanetant, T-DDI assigned 
+a high score to the interaction with Alprazolam (P ≈ 1.0), which is pharmacody-
+namically plausible because Elinzanetant is associated with CNS depressant effects 
+and benzodiazepines can produce additive CNS depression when combined with other 
+CNS depressants [43].
+The model also flagged non-enzymatic and induction-related mechanisms, although 
+with lower scores. For Ziftomenib, a weak base with pH-dependent solubility, T-DDI 
+assigned a lower score to the interaction with the H2 receptor antagonist Famoti-
+dine (P = 0.39). Although below the medium-confidence t hreshold, t his prediction 
+is mechanistically plausible because Ziftomenib exposure is reduced by gastric acid-
+reducing agents and the prescribing information recommends avoiding or timing H2 
+receptor antagonists and antacids when coadministration cannot be avoided [44]. 
+For Remibrutinib, T-DDI flagged a n i nteraction w ith t he s trong C YP3A inducer 
+Rifampin (P = 0.41), but assigned the incorrect direction of effect ( i.e., pre-
+dicting increased rather than decreased exposure) [38]. This illustrates a remaining 
+limitation in distinguishing enzyme induction from inhibition in specific metabolic 
+pathways. For Sevabertinib, T-DDI assigned a medium-confidence score to the inter-
+action with Dabigatran (P = 0.56), consistent with the role of Sevabertinib as a 
+P-glycoprotein (P-gp) inhibitor and the reported increase in dabigatran etexilate expo-
+sure during concomitant use [41]. These case studies suggest that T-DDI can prioritize 
+mechanistically plausible DDI hypotheses for newly approved compounds, while lower-
+scoring and directionality-sensitive cases require cautious interpretation and external 
+pharmacological validation.
+Comprehensive predicted DDIs for these FDA-approved drugs are detailed in 
+Supplementary Note 1.
+Accessible user interface with feature-level explanations
+We deployed the T-DDI framework via a web user interface designed to make 
+model outputs easier to inspect in clinical workflows. T he i nterface accommodates 
+both individual drug-pair queries and multi-pair processing (Fig. 6), addressing 
+the specific w orkflow ne eds of  po lypharmacy ma nagement in  ge riatric populations. 
+To facilitate rapid decision-making, predictive outcomes are visualized through 
+confidence-stratified cu es, di splaying hi gh-risk in teractions in  re d/orange an d lower 
+risks in green/blue.
+The platform combines two complementary outputs for each prediction. It renders 
+interactive LIME plots that visualize the contribution of specific molecular descriptors, 
+alongside natural-language summaries generated by the Gemini API [23]. This pairing 
+allows clinicians to inspect descriptor-level feature attributions, model confidence, and 
+plain-language summaries without treating any single view as definitive mechanistic 
+proof. Furthermore, prioritizing inclusivity, we implemented adaptive color palettes 
+(orange-yellow-blue) specifically optimized for users with color vision deficiencies. This 
+design choice departs from standard red-green paradigms to ensure equitable access
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+to safety-critical information [45]. The web interface is publicly available via the link 
+provided in the Data availability section.
+Discussion
+Our investigation into feature representation challenges the prevailing assumption that 
+complex learned embeddings are essential for tabular deep learning in biomedicine. 
+We found that the exclusive use of numerical physicochemical descriptors significantly 
+outperforms architectures relying on categorical embeddings. While the standard Tab-
+Transformer utilizes categorical tokens to learn feature interactions, our experiments 
+demonstrate that the numerical-only configuration yields substantially higher accuracy 
+(0.9434) compared to the variant utilizing SMILES and categorical inputs (0.8758)
+(Table 2). This suggests that for physicochemical data, the continuous numerical 
+space preserves critical relational information that is often lost when data is quan-
+tized into categorical bins [18]. These results support the “data-centric AI” view that 
+high-quality engineered descriptors often provide a cleaner learning signal than raw 
+unstructured embeddings, unless massive pre-training is applied [46].
+Recent studies have further demonstrated the value of richer molecular represen-
+tations for biomedical prediction tasks. Zhang et al. [13] proposed a multi-perspective 
+framework integrating 3D spatial visual information with molecular fingerprints and 
+graph features, showing that fusing complementary structural views substantially 
+improves drug discovery performance. Along similar lines, Wu et al. [14] applied 
+multisource information and metapath enhancement matrices within a graph-based 
+architecture to predict miRNA–drug associations, leveraging heterogeneous biologi-
+cal networks to capture non-obvious relational signals. Zhu et al. [15] extended this 
+graph-based paradigm to drug repositioning by operating in the frequency domain 
+across multiple graph sources, demonstrating that spectral decomposition can expose 
+cross-source complementarity that spatial-domain aggregation may overlook. Taken 
+together, these works establish that multi-source and multi-perspective representa-
+tions substantially advance graph-based biomedical prediction, particularly when the 
+task involves sparse labels or heterogeneous input modalities. Our results do not argue 
+against these representation-learning approaches; rather, they highlight a complemen-
+tary regime: when the prediction task is well-scoped (multi-class DDI classification), 
+the training data is large-scale and structurally homogeneous, and interpretability 
+is a clinical requirement, carefully curated physicochemical descriptors paired with 
+uncertainty-aware evaluation can match or exceed the performance of more com-
+plex architectures while preserving a direct link between input features and predicted 
+interactions.
+Furthermore, the descriptor-based approach demonstrates favorable computational 
+characteristics once numerical features are derived. In our DDI2018 benchmarks (Sup-
+plementary Table 2; NVIDIA RTX 4090, 24 GB VRAM), T-DDI achieved an average 
+inference time of 0.0151 ms per drug pair, compared with 0.25 ms for TabTrans-
+former [47] (with SMILES and categorical embeddings), 0.27 ms for SSI-DDI, 3.231 
+ms for DeepDDI, and 6.35 ms for DDI-GCN. Regarding training time per epoch, 
+T-DDI required 71.01 s/epoch. While this is higher than the SSI-DDI framework
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+(54.44 s/epoch), it remains comparable to the full TabTransformer variant (84.55 
+s/epoch) and notably faster than the training times of DDI-GCN (728 s/epoch) and 
+DeepDDI (747.57 s/epoch). Consistent with this, the training process for the full 3,780-
+feature configuration utilized 2.4 GB of GPU memory on the RTX 4090. These results 
+suggest that the numerical-only T-DDI pipeline is suitable for large-scale screening 
+applications despite its larger parameter count.
+Benchmarking against SOTA general-purpose architectures further underscores 
+the necessity of domain-specific optimization.  While  models  like T abNet and  SAINT 
+perform well on standard tasks, they lag behind our specialized approach for DDI 
+prediction. TabNet achieved a Macro F1 of only 0.7048, indicating it struggles with 
+the high cardinality of 178 DDI types. Conversely, our model effectively minimizes the 
+gap between Weighted and Macro F1 scores better than most baselines. This robust-
+ness is crucial for clinical applications, where “rare” interactions in the long tail of 
+the distribution are often the most severe and unexpected. Furthermore, by achieving 
+high accuracy with uncertainty calibration, our framework maintains backward com-
+patibility with foundational benchmarks like DeepDDI [20] while scaling to modern, 
+complex datasets.
+However, in clinical decision support, predictive accuracy alone is insufficient; clin-
+icians also need to know how much confidence to place  in a prediction. It is helpful  to 
+distinguish between two complementary questions: prediction reliability (whether to 
+trust a given prediction) and feature-level explanation (why a prediction was made). 
+These are addressed by separate components in T-DDI. The UE provides reliabil-
+ity by quantifying model confidence a nd fl agging un certain ca ses fo r ex pert review. 
+LIME, in contrast, provides feature-level explanations by identifying which molecular 
+descriptors contribute most to each prediction. A confident p rediction i s n ot nec-
+essarily an explained one, and vice versa. The integration of the UE addresses the 
+critical issue of “alert fatigue” caused by false positives. By selectively deferring low-
+confidence predictions, the system achieves higher precision on the remaining subset. 
+The threshold-selection procedure, sweeping from 0.50 to 0.99 in steps of 0.01 on OOF 
+validation data and choosing the smallest cutoff meeting a pre-specified 0.95 accuracy 
+target, was designed to operationalize this trade-off: t he a ccuracy t arget e nsures the 
+high-confidence tier demonstrates a clear reliability gain over the unconstrained model, 
+while the smallest-threshold rule maximizes the proportion of predictions that reach 
+this tier rather than being deferred for expert review. This aligns with the broader 
+emphasis in healthcare AI on identifying when a model is unsure, rather than treating 
+every prediction as equally actionable [21].
+We acknowledge that the primary contribution of T-DDI is the integration of estab-
+lished components, including Quantitative Structure-Activity Relationship (QSAR) 
+descriptors from RDKit/PyBioMed, the TabTransformer-inspired architecture, LIME 
+for post hoc explanation, and standard calibration techniques, into a unified frame-
+work optimized for large-scale multi-class DDI prediction. The methodological novelty 
+lies not in any single component but in the systematic evidence that this combination 
+outperforms the compared baselines, including graph-based models (DDI-GCN [24], 
+SSI-DDI [25]) and general-purpose deep tabular architectures, on both our DDI2025 
+benchmark and the updated version of the previously established DDI2018 dataset.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+A direct comparison with contrastive learning-based DDI models was not conducted 
+and remains a direction for future work.
+Our illustrative prospective case-study assessment of five n ewly FDA-approved 
+drugs from late 2025 (Supplementary Note 1) provides a prospective assessment of 
+whether T-DDI can generate mechanistically plausible DDI hypotheses for compounds 
+not used during model development. In several cases, the predicted interactions were 
+consistent with established PK and PD principles beyond simple metabolic inhibi-
+tion. For example, the high-scoring prediction for Elinzanetant and Alprazolam 
+(P ≈ 1.0) is pharmacodynamically plausible because both agents may contribute to 
+central nervous system depressant effects, s upporting a  p otential a dditive P D inter-
+action rather than a purely pharmacokinetic mechanism. Similarly, T-DDI flagged 
+the interaction between Ziftomenib and Famotidine, which is consistent with the 
+known vulnerability of weakly basic oral drugs to reduced solubility and absorption 
+under elevated gastric pH conditions [44]. Although this interaction received a lower 
+model score (P = 0.39), below the medium-confidence t hreshold u sed i n t his study, 
+its mechanistic plausibility suggests that the descriptor-based representation may cap-
+ture physicochemical features relevant to oral bioavailability. These examples should 
+therefore be interpreted as hypothesis-generating case studies rather than quantitative 
+evidence of prospective generalization.
+Despite these successes, our error analysis reveals persistent challenges in distin-
+guishing between the mechanism and the outcome of an interaction. The bidirectional 
+confusion between “Metabolism” and “Serum concentration” classes suggests that 
+while the model captures the broad pharmacokinetic signal, it struggles to disentangle 
+the nuanced linguistic descriptors that separate an enzymatic process from its systemic 
+result [32, 33]. Additionally, we observed specific limitations in determining the  direc-
+tionality of metabolic regulation. In the case of Remibrutinib and Rifampin, the 
+model correctly flagged an interaction but incorrectly predicted increased rather than 
+decreased exposure. This highlights the difficulty st ructure-based mo dels fa ce in  dis-
+tinguishing strong induction from competitive inhibition, particularly when training 
+data is dominated by inhibition events.
+To make the model outputs easier to inspect, we deployed a web interface that 
+prioritizes explanation and inclusivity. Compared with recent platforms that provide 
+limited end-user rationale for individual predictions [2, 48–50], our framework cou-
+ples local QSAR-based feature attributions with LLM summaries, specifically Gemini 
+API [23]. This allows clinicians to inspect which molecular descriptors contributed 
+to a specific p rediction ( e.g., l ipophilicity-weighted s urface a rea t erms suggesting 
+CYP450-mediated interactions [30]) and cross-reference them with natural language 
+summaries [51]. We emphasize that these LIME-based attributions provide post hoc 
+feature-level explanations for individual predictions; they demonstrate plausibility 
+rather than confirmed causal mechanisms. However, these explanations currently tar-
+get physicians, scientists, or pharmacists with domain knowledge, which could be 
+overwhelming for users without such a background. To tackle this, our future work 
+includes developing a Retrieval-Augmented Generation (RAG) system that presents 
+this information in an easily understandable format for lay users.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+Moreover, we explicitly designed the interface with adaptive color palettes for users 
+with color vision deficiency. D espite t he p revalence o f t his c ondition, v isual accessi-
+bility is rarely prioritized in biomedical tools [45, 52]. By ensuring that safety-critical 
+warnings are distinguishable regardless of visual physiology, our platform contributes 
+to more equitable user-centric design in digital health.
+Several limitations remain to be addressed in future work. First, the reliance 
+on chemical structure alone limits the model’s ability to personalize risk based on 
+patient-specific v ariables l ike g enomics o r r enal f unction. H owever, t he continuous 
+feature pipeline of T-DDI is naturally extensible: patient-specific c ovariates s uch as 
+CYP450 genotype activity scores, estimated glomerular filtration r ate, s erum albu-
+min, and body mass index can be appended as additional numerical columns to the 
+existing descriptor matrix. T-DDI requires no structural modification t o accommo-
+date such additional continuous features, which enables future personalized DDI risk 
+stratification by combining chemical descriptors with electronic health record data.
+Second, performance on rare adverse events remains constrained by data sparsity. 
+We propose integrating biomedical knowledge graphs to leverage established biolog-
+ical relationships for few-shot inference on these minority classes [53]. Specifically, 
+encoding known enzyme-substrate and transporter relationships as auxiliary features, 
+or adopting a hierarchical prediction strategy (first identifying the  broad  mechanism 
+category, then the specific o utcome), c ould h elp r educe t he b idirectional confusion 
+between “Metabolism” and “Serum concentration” classes. Such hierarchical label 
+structures would allow the model to first distinguish upstream enzymatic mechanisms 
+from downstream systemic outcomes, then refine the prediction within each category.
+Third, the model exhibits a bias toward predicting exposure increase over expo-
+sure decrease, as illustrated by the Remibrutinib-Rifampin case in the prospective 
+case-study assessment. This likely reflects the dominance of enzyme inhibition events 
+relative to induction events in DrugBank annotations. Future mitigation strate-
+gies include incorporating explicit enzyme induction and inhibition descriptors from 
+pharmacogenomics databases, applying a directionality-aware training penalty that 
+upweights induction examples, and training an auxiliary binary classifier t o predict 
+induction versus inhibition before determining the full interaction type.
+Finally, while our prospective case-study assessment is promising, a retrospective 
+study using Electronic Health Records (EHR) is the necessary next step to assess 
+model performance in diverse patient populations. We also note that external valida-
+tion on an independent multi-class DDI benchmark was not performed in this study. 
+To our knowledge, no publicly available dataset is currently label-compatible with 
+the DrugBank 178-class interaction-type ontology used in this work; resources such as 
+TWOSIDES and Decagon adopt adverse-event schemas that differ s tructurally from 
+our interaction-type labels, which preclude a direct cross-dataset evaluation. This 
+remains an important direction for future work.
+Notwithstanding these limitations, this study presents T-DDI, a framework 
+designed to make DDI predictions more reliable. By integrating an uncertainty esti-
+mator, we provide a calibrated reliability signal that can defer low-confidence results 
+and help reduce alert fatigue, ensuring that clinicians receive warnings only when the 
+model is most confident.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+Our findings support a data-centric approach to biomedical  AI. Within the bench-
+mark and architectures studied here, explicit chemical descriptors performed better 
+than more complex unstructured representations such as SMILES. This suggests that, 
+for this pharmacological setting, scientifically g rounded f eatures c an y ield a  better 
+signal-to-noise ratio than relying solely on more complex model architectures.
+As a final p rospective c ase-study a ssessment, we a pplied t he l ocked T -DDI infer-
+ence pipeline to five n ewly F DA-approved s mall-molecule d rugs f rom l ate 2 025 that 
+were absent from the DDI2025 training, validation, and test partitions. The anal-
+ysis suggests that T-DDI can generate mechanistically plausible DDI hypotheses 
+for newly approved compounds, including the predicted interaction between Sev-
+abertinib and Dabigatran. Nevertheless, these findings s hould b e i nterpreted as 
+hypothesis-generating rather than quantitative evidence of prospective generalization, 
+and larger locked-cohort validation will be required before drawing conclusions about 
+real-world safety-monitoring performance.
+Finally, we addressed the workflow n eeds o f h ealthcare p rofessionals b y pairing 
+confidence-stratified pr edictions wi th fe ature-level LI ME at tributions an d optional 
+Gemini summaries, while prioritizing inclusivity in the user interface. By designing 
+the interface for users with color vision deficiencies, we aim to make this  digital health 
+tool more accessible and equitable for diverse users.
+Methods
+Data preparation
+This study is a computational secondary analysis of publicly available data from the 
+DrugBank database [54]; it does not involve any new human participants, human 
+tissue, or animal experiments, and therefore did not require ethical review or informed 
+consent. The dataset used in this study was extracted from DrugBank v5.1.12 (released 
+2024-04-13) [36], comprising 17,423 unique compounds, with 4,533 drugs annotated 
+as having at least one recorded DDI based on the Drug-Interactions-Description field. 
+Relevant fields l ike D rug-ID,  N ame,  C ategories,  D rug-Interactions-ID,  Drug-
+Interactions-Name, and Drug-Interactions-Description were systematically extracted 
+using Power Query Editor (Microsoft Excel) and stored for downstream analysis. Using 
+Python (pandas), drug names in the columns “Name” and “Drug-Interactions-Name” 
+referenced in the interaction descriptions were mapped to standardized placehold-
+ers “drug a” and “drug b”. This procedure was utilized for all recorded interactions. 
+Because certain interaction descriptions are semantically analogous but order-specific, 
+such as “The excretion of drug a can be decreased when combined with drug b” and its 
+reversed form, descriptions were harmonized such that each DDI type was consistently 
+encoded regardless of drug order. For normalization, the description encountered first 
+during the iteration was designated as the canonical phrase. Subsequent text matching 
+and drug name inversion were applied where necessary to ensure consistency, including 
+swapping the “Name” and “Drug-Interactions-Name” fields as appropriate.  Following 
+normalization, the dataset contains 3,888,299 DDIs spanning 218 distinct DDI types. 
+Next, we exclude 18 DDI types annotated with multiple adverse events within a 
+single phrase (e.g., “The risk or severity of hypotension, sedation, death, somnolence
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+and respiratory depression can be increased when drug a is combined with drug b”), 
+as well as any DDI type with three or fewer observed drug pairs (22 types), to facil-
+itate stratified r andom s plitting a nd r obust r epresentation i n s ubsequent training, 
+validation, and test sets. All remaining DDI types were label encoded for downstream 
+analyses.
+SMILES are widely used to encode molecular structures for cheminformatics and 
+predictive modeling in DDI research [20, 55]. For molecular representation, drugs 
+with canonical SMILES formulas [56] were retained; compounds without SMILES 
+were excluded. SMILES strings were sourced exclusively from DrugBank, and missing 
+entries were not supplemented from external resources to prevent annotation inconsis-
+tency. In total, 10,041 compounds (encompassing approved, experimental, withdrawn, 
+illicit, and nutraceutical drugs) possessed SMILES formulas. After intersecting this set 
+with the DDI-annotated compounds, we identified 2,957  drugs  with  b oth interaction 
+records and SMILES information, resulting in 868,069 drug pairs for further analysis.
+We calculated 3,780 QSAR descriptors per drug pair using the PyBioMed package 
+[57] with PyInteraction module and RDKit (version 2017.09.3) [58] in Python 2.7.18, 
+executed on a Windows 11 workstation with an Intel i7-11800H CPU (4.60 GHz) 
+and 64 GB RAM. These descriptors encode molecular properties relevant to DDI 
+mechanisms and span seven principal families: MR VSA (Molar Refractivity van der 
+Waals Surface Area), EState VSA (E-state van der Waals Surface Area), SlogP VSA 
+(Logarithm of the octanol/water partition coefficient-based va n de r Wa als Surface 
+Area), LabuteASA (Labute Atomic Surface Area), MTPSA (Molecular Topological 
+Polar Surface Area), PEOE VSA (Partial Equalization of Orbital Electronegativity 
+VSA), and VSA EState (van der Waals Surface Area-based E-state). These combined 
+features capture steric, electronic, polar, lipophilic, and spatial attributes, informing 
+DDI, permeability, pharmacokinetics, and binding predictions.
+Upon completion of curation (868,069 drug pairs, 3,780 QSAR descriptors, 178 
+label-encoded DDI types), the DDI2025 dataset was randomly stratified i nto three 
+partitions: 60% (520,841 pairs) for training, 20% (173,614 pairs) for validation, and 
+20% (173,614 pairs) for testing.
+To assess descriptor redundancy without contaminating the held-out test split, we 
+ran a separate feature-selection workflow using only the training  and validation parti-
+tions; the held-out test set was excluded from all selection and threshold-tuning steps. 
+Starting from all 3,780 descriptors, we first performed a descriptor audit on a random 
+stratified t raining s ample o f 8 0,000 d rug p airs, r emoving d escriptors w ith a ll miss-
+ing values, high missingness (missing ratio > 0.995), or near-zero variance (variance 
+threshold 1 × 10−10). This reduced the auditable candidate pool from 3,780 to 2,858 
+descriptors; missing values in retained descriptors were imputed using training-sample 
+medians before ranking. The 2,858 retained descriptors were ranked using ANOVA F-
+statistics and then passed through a Pearson-correlation-aware priority step using an 
+absolute correlation threshold of 0.995. Recursive feature elimination (RFE) was then 
+applied to the ranked feature pool to generate candidate subsets at predefined counts 
+K ∈ {2858, 2700, 2400, 2100, 1800, 1500}. To determine the final operating  dimension-
+ality without bias, the T-DDI architecture was trained and evaluated under the same 
+three-fold cross-validation protocol for the full 3,780-descriptor representation and
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+each reduced feature-count variant, with results summarized in Supplementary Table 3 
+and discussed in the Results section.
+Selection of newly FDA-approved drugs for illustrative
+prospective case-study assessment
+Newly approved drugs for the illustrative prospective case-study evaluation were iden-
+tified from the U.S. Food and Drug Administration (FDA) Center for Drug Evaluation 
+and Research (CDER) 2025 novel drug approval list, using the FDA annual report 
+Advancing Health Through Innovation: New Drug Therapy Approvals 2025 as the 
+cited source [59]. The FDA/CDER Novel Drug Approvals for 2025 webpage was 
+also used to cross-check the approval pool and approval dates (https://www.fda. 
+gov/drugs/novel-drug-approvals-fda/novel-drug-approvals-2025). This FDA/CDER 
+source defines n ovel d rugs  a s d rugs  n ever b efore  a pproved o r  m arketed i n  the 
+United States and provides the drug name, active ingredient, approval date, and 
+FDA-approved use at the time of approval.
+From this FDA/CDER approval pool, we selected five l ate-2025 n ovel small-
+molecule drugs: Imlunestrant (Inluriyo; approved 25 September 2025) [37], Remibru-
+tinib (Rhapsido; approved 30 September 2025) [38], Elinzanetant (Lynkuet; approved 
+24 October 2025) [39], Ziftomenib (Komzifti; approved 13 November 2025) [40], and 
+Sevabertinib (Hyrnuo; approved 19 November 2025) [41]. Selection required: (i) FDA 
+approval after the DDI2025 data freeze based on DrugBank v5.1.12; (ii) availability of 
+a molecular structure compatible with canonical SMILES-based descriptor generation;
+(iii) confirmed absence of both generic/active ingredient names and proprietary names 
+from the DDI2025 training, validation, and test partitions; and (iv) publicly available 
+prescribing information or peer-reviewed literature sufficient to  su pport mechanistic 
+interpretation of predicted DDIs. Canonical SMILES for the five selected compounds 
+were processed using the same PyBioMed/RDKit descriptor-generation workflow used 
+for the DDI2025 dataset. Predictions for these compounds were generated using the 
+final locked T -DDI inference  p ipeline, w ithout m odel r etraining, f eature-selection re-
+running, or threshold re-optimization. This analysis was designed as an illustrative 
+prospective case-study assessment, not as a statistically powered prospective validation 
+cohort.
+Approach overview
+Polypharmacy and combination therapy are now routine in many clinical settings, 
+especially for chronic and multifactorial diseases [1, 2]. As the number of approved 
+drugs and candidate compounds continues to expand, the interaction space grows 
+exponentially. Exhaustively testing all drug-drug pairs in clinical trials is neither feasi-
+ble nor economical, leaving many combinations clinically uncharacterized and posing 
+safety concerns for patients receiving multiple medications. Computational models 
+capable of anticipating possible interactions before clinical exposure are therefore 
+essential for both risk mitigation and drug development.
+To address this gap, we develop a predictive model for DDI classification t hat is 
+designed for scale and for practical use. The model serves three roles: expand coverage
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+by screening pairs that lack clinical evidence, generate testable hypotheses to prioritize
+experimental follow-up (in vitro, in vivo, or real-world data analyses), and support
+clinical decision-making at the level of risk alerts rather than definitive therapeutic
+guidance.
+We represent each drug using 3,780 QSAR descriptors computed from canoni-
+cal SMILES (via PyBioMed and RDKit). These features summarize physicochemical,
+steric/topological, and structural properties that link chemical structure to biological
+effect, allowing the model to learn structure-function relationships without relying on
+drug-specific labels or prior interaction annotations.
+We develop T-DDI, a deep neural architecture built for high-dimensional tabular
+molecular data. Inspired by TabTransformer [47], the model employs a numerical
+tabular pipeline specialized for continuous physicochemical features with:
+• Input conditioning: Layer normalization over the full continuous descriptor vector
+• Prediction head: Multi-layer perceptron (MLP) components applied directly to the
+normalized numerical features
+• Descriptor fusion: Unified prediction from the concatenated descriptor families
+This design leverages layer normalization and MLP-based feature integration while
+maintaining strong generalization in high-dimensional descriptor spaces. The archi-
+tecture is specifically t ailored t o t he Q SAR s etting, w here t housands o f correlated 
+continuous variables capture subtle molecular dependencies that are often non-linear 
+and hierarchical. Empirically, this configuration d emonstrates s uperior convergence 
+stability and predictive performance compared to conventional deep tabular models 
+(see Table 1).
+To ensure that model predictions are not only accurate but also well-calibrated and 
+reliable, we incorporate an uncertainty-aware ensemble loss that quantifies both epis-
+temic and aleatoric components of uncertainty. Each model streams in the ensemble 
+produces a probability distribution over all DDI classes; the collection of these dis-
+tributions is then aggregated to compute complementary uncertainty measures (e.g., 
+entropy, variance, and mutual information), which reflects, respectively, the concentra-
+tion of the ensemble’s mean prediction, the disagreement among ensemble members, 
+and the information gained from that disagreement. At inference, the aggregated 
+uncertainties are normalized to produce a single confidence s core b ounded i n [ 0, 1], 
+which serves as a calibrated indicator of prediction reliability. This uncertainty cal-
+ibration enables the system to recognize out-of-distribution drug pairs, to prioritize 
+uncertain cases for experimental follow-up, and to deliver quantitative confidence 
+estimates suitable for integration into decision-support pipelines.
+Our approach integrates QSAR-based molecular encoding, a numerical tabu-
+lar architecture, and uncertainty-aware ensembling to predict DDI types at scale 
+with both predictive performance and calibrated reliability. This combination allows 
+the model not only to capture complex structure-function relationships between 
+drugs but also to convey meaningful confidence e stimates, f acilitating s afer u se in 
+pharmacological research and decision support.
+All experiments were implemented in Python 3.12.0 and trained on a worksta-
+tion equipped with an AMD EPYC 7742 CPU, 128 GB RAM, and a single NVIDIA
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+RTX 4090 GPU (24 GB VRAM). The final T-DDI backbone operates on 3,780
+continuous QSAR descriptors, without categorical inputs, and predicts one of 178
+interaction classes. In this numerical-only configuration, the categorical embedding
+and self-attention branch of the TabTransformer implementation is bypassed; continu-
+ous descriptors are layer-normalized and passed directly to the MLP prediction head.
+Thus, T-DDI is best described as a TabTransformer-inspired numerical tabular model
+rather than a full TabTransformer with active attention.
+The final model was trained as a three-fold stratified ensemble using
+StratifiedKFoldwith shuffling enabled and random state 42. Each fold was trained
+for up to 200 epochs with early stopping patience of 50 epochs and optimized using
+AdamW with learning rate 9.4526×10 −5, weight decay 1.5446 × 10−4, and batch
+size 256. We used unweighted focal loss with γ = 1.0 and αt = 1 for all classes. The
+active numerical prediction path consisted of layer-normalized continuous descriptors
+followed by the MLP prediction head with hidden multipliers (2, 2), ReLU activation,
+and cosine-annealing scheduling with Tmax = 50.
+The final deployed predictor is a three-model ensemble with 260.055 million train-
+able parameters in total, or approximately 86.7 million parameters per fold model
+(Supplementary Table 2). Most parameters arise from the numerical MLP head
+applied to the 3,780-dimensional descriptor vector with MLP hidden multipliers (2,2),
+while the categorical self-attention branch is inactive in the final numerical-only
+configuration.
+Network architecture
+Let D = {(xi, yi)}N
+i=1 denote our training dataset, where each sample xi ∈ RNn
+represents a drug pair defined exclusively by continuous physicochemical descriptors
+extracted from the SMILES of two interacting drug compounds. The target yi ∈
+{0, 1, ..., C − 1} represents the DDI interaction class.
+Our network contains three components with layer normalization, fully connected
+layers, and a softmax readout. For all hidden fully connected layers, the hidden width is
+an integer multiple of the input dimension Nn, which keeps the architecture scale-free
+with respect to the descriptor dimensionality.
+Formally, given an input descriptor vector x ∈ RNn, our network predicts a class
+posterior p ∈ ∆C−1:
+p = S(F(N (x))) , (1)
+where N denotes the LayerNorm front end, F denotes the MLP trunk, and S denotes
+the softmax readout.
+Continuous descriptors span heterogeneous dynamic ranges, as different physic-
+ochemical quantities are measured in incommensurate units and scales. Instead of
+applying a dataset-level z-score transform, which couples preprocessing statistics to a
+particular train/test split and is sensitive to distributional shift across DDI sources,
+we apply a parametric LayerNorm directly to the raw descriptor vector:
+˜x = γ ⊙ x − µ(x)
+p
+σ2(x) +ε
++β ,(2)
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+where µ(x) and σ2(x) are the empirical mean and variance across the Nn descriptor
+coordinates, γ, β ∈ RNn are learnable affine parameters, and ε = 10−5.
+A stack of two fully connected layers then operates on the normalized descriptor
+to produce class logits. Formally, with h0 = ˜x:
+hℓ = ReLU(Wℓhℓ−1 + bℓ) , ℓ ∈ {1, 2} , (3)
+where Wℓ ∈ RNnmℓ×dℓ−1 and bℓ ∈ RNnmℓ are the learnable parameters of the ℓ-
+th fully connected layer, and (m 1, m2) are the hidden-width multipliers. The input
+dimension to the ℓ-th layer is dℓ−1, with d0 = Nn and dℓ = Nnmℓ.
+Finally, a fully connected layer projects the last hidden representation to C class
+logits, and a softmax produces the class posterior:
+p = softmax(Wouth2 + bout) , (4)
+where Wout ∈ RC×Nnm2 and bout ∈ RC.
+Uncertainty-aware ensemble training
+To address the critical need for uncertainty quantification i n c linical applications, 
+we develop a comprehensive ensemble-based framework that captures both aleatoric 
+and epistemic uncertainty. Our approach trains M independent T-DDI models 
+stream using stratified cross-validation to ensure  robust performance estimation while 
+maintaining data efficiency.
+We employ three-fold stratified cross-validation ( K = 3) on the development data 
+only, in which samples are partitioned into stratified folds to preserve the  class distri-
+bution across folds. For each fold k, we train a model fk on the union of the remaining 
+K −1 folds and use the held-out fold for validation. This procedure yields an ensemble 
+of M = K = 3 models trained on different b ut o verlapping s ubsets o f t he develop-
+ment data, while the held-out test set is used only for final evaluation. All parameter 
+counts reported for T-DDI refer to this full three-model ensemble.
+To address the inherent class imbalance in DDI datasets, where certain interaction 
+types are significantly u nderrepresented, w e e mploy f ocal l oss  [ 60] a s o ur primary 
+training objective:
+Lfocal(pt) = −(1 − pt)γ log(pt) (5) 
+where pt represents the model’s estimated probability for the true class t, and γ 
+controls the focusing parameter. We used the unweighted focal-loss setting in the final 
+experiments (equivalent to setting αt = 1 for all classes), so the imbalance-aware effect 
+comes from the focal modulating term that down-weights easy examples and focuses 
+learning on hard, misclassified cases. This is particularly  useful for rare but clinically 
+significant interaction types.
+Multi-faceted uncertainty quantification
+To provide robust confidence e stimates f or c linical d ecision-making, we i mplement a 
+comprehensive uncertainty quantification module that computes three complementary
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+uncertainty measures from ensemble predictions. Given an ensemble of M models
+trained, each model m produces a probability distribution pm(x) ∈ ∆C−1 over C
+interaction classes for input x, the ensemble generates M predictions: {pm(x)}M
+m=1,
+which we aggregate to compute multiple uncertainty metrics.
+Entropy uncertainty measures the concentration of the ensemble’s mean prediction,
+quantifying how uncertain the averaged model is about its prediction:
+Uentropy(x) = −
+CX
+c=1
+¯pc(x) log ¯pc(x) (6)
+where ¯p(x) = 1
+M
+PM
+m=1 pm(x) is the mean ensemble probability. High entropy
+indicates the mean prediction is spread across multiple classes, suggesting inherent
+ambiguity in the drug pair. We clip probabilities to [ϵ,1−ϵ] withϵ= 10 −8 to ensure
+numerical stability during log computation.
+Variance uncertainty captures the disagreement among ensemble members by
+measuring how much individual model predictions differ from each other:
+Uvariance(x) = 1
+C
+CX
+c=1
+Var({pm,c(x)}M
+m=1) (7)
+This metric quantifies epistemic uncertainty, i.e., uncertainty due to limited train-
+ing data or model capacity. High variance indicates that different models make
+substantially different predictions, revealing regions of the feature space where the
+ensemble lacks consensus.
+Mutual information uncertainty quantifies the information gain from knowing
+which specific ensemble member made the prediction, computed as the difference
+between the entropy of the mean prediction and the expected entropy of individual
+predictions by Eq (8).
+UMI(x) =H( ¯p(x))− 1
+M
+MX
+m=1
+H(p m(x)) (8)
+whereH(p) =− PC
+c=1 pc logp c is the entropy function. Mutual information specif-
+ically isolates epistemic uncertainty by measuring how much ensemble members
+disagree with each other beyond the inherent uncertainty in their averaged prediction.
+We compute two additional derived metrics for practical clinical use, where the
+total uncertainty is computed by Utotal(x) = Uentropy(x) + Uvariance(x), which com-
+bines both prediction uncertainty and model disagreement into a single scalar, and
+confidence score computations to provide an intuitive measure bounded in [0, 1], then
+we normalize entropy uncertainty by the maximum possible entropy, this can be
+formulated by Eq (9).
+Confidence(x) = 1 − Uentropy(x)
+log(C) (9)
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+where log(C ) represents the entropy of a uniform distribution over C classes. This
+confidence score provides a readily understandable metric where values near 1 indicate
+high certainty and values near 0 indicate high uncertainty.
+To convert continuous confidence scores into actionable tiers without using held-
+out test data, we applied a threshold-selection procedure based exclusively on OOF
+validation predictions from the three-fold stratified cross-validation performed on the
+development data (n = 694,455; training plus validation). Each development-set sam-
+ple is predicted by the fold model for which that sample belonged to the validation
+fold, producing leak-free OOF confidence scores for the entire development set.
+Candidate high-confidence thresholds were swept from 0.50 to 0.99 in steps of 0.01
+(implemented as np.round(np.arange(0.50, 0.991, 0.01), 2)
+, yielding 50 candi-
+date values). The lower bound of 0.50 is the midpoint of the normalized entropy-based
+confidence scale and is fixed a priori as tlow; using it as the sweep floor ensures the
+grid covers all operationally meaningful thresholds above the low-confidence boundary.
+The upper bound of 0.99 represents a practical ceiling above which coverage becomes
+negligibly small. Within this sweep, the high-confidence threshold thigh was set to
+the smallest value at which OOF accuracy reached or exceeded 0.95. This target was
+pre-specified as a design choice before any evaluation on the held-out test set, which
+prevents the threshold from being optimized toward test outcomes. The value of 0.95
+was chosen because it meaningfully exceeds the full development-set OOF accuracy,
+ensuring that the high-confidence tier shows a demonstrable reliability gain relative to
+the unconstrained model. By selecting the smallest qualifying threshold, the rule max-
+imizes the fraction of predictions retained in the high-confidence stratum, minimizing
+unnecessary deferral of cases the model can classify reliably at that level. We note
+that the 0.95 accuracy target reflects an internal operating criterion for this study;
+it does not correspond to an externally validated clinical performance standard. The
+resulting per-stratum accuracy, weighted F1, Macro F1, and coverage values on both
+the development and held-out test sets are reported in Supplementary Table 1, and
+the full threshold sweep is visualized in Supplementary Figure 2.
+Predictions are then assigned to three operational tiers:
+• High confidence: Confidence(x) ≥ thigh - suitable for automated flagging.
+• Medium confidence: tlow ≤ Confidence(
+x) < t high - recommended for expert review.
+• Low confidence: Confidence( x) < t low - warrants additional investigation or
+alternative methods.
+The specific values of thigh obtained for each dataset are reported in the Results
+section.
+These complementary uncertainty measures provide a comprehensive profile that 
+captures both the model’s inherent uncertainty about the prediction (aleatoric) 
+and the epistemic uncertainty arising from model disagreement. Together, they 
+enable downstream clinical systems to appropriately weight and interpret predictions, 
+supporting more explicit handling of uncertainty in drug safety applications.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+Rare-class performance analysis
+Rare DDI types were defined as interaction  classes accounting for fewer than 0.1% of 
+all samples across the training, validation, and held-out test partitions. In the DDI2025 
+dataset, this corresponds to classes with at most 868 drug pairs out of 868,069 total 
+pairs. Metrics were computed from locked T-DDI predictions on the held-out test 
+set. The aggregate rare-class, non-rare-class, and all-class held-out test metrics are 
+reported in Supplementary Table 7.
+Categorical-branch ablation design
+The categorical ablation compared two configurations of the TabTransformer architec-
+ture evaluated on the DDI2025 test set. The first configuration followed the original  
+TabTransformer design [47], incorporating a classification ( CLS) t oken, SMILES 
+embeddings, and categorical embeddings alongside numerical features, so that the 
+self-attention mechanism operates over the embedded categorical tokens. The second 
+configuration, T-DDI, removes all  categorical inputs and relies exclusively on numer-
+ical physicochemical descriptors; in this setting, the transformer branch is entirely 
+bypassed and the model reduces to a LayerNorm-normalised MLP over the contin-
+uous feature vector. Dropout and attention-specific hyperparameters ( depth, heads, 
+attn dropout, ff dropout) are consequently inactive in the T-DDI configuration. 
+The two variants were trained under identical conditions (three-fold cross-validation, 
+focal loss, early stopping, weight decay) to isolate the effect of the categorical branch.
+Data availability
+The raw DDI data supporting the findings o f t his s tudy w ere d erived f rom publicly 
+available sources: DrugBank (available at https://go.drugbank.com). The prepro-
+cessed DDI2025 dataset generated and analyzed during the current study is publicly 
+available in the Zenodo repository at https://doi.org/10.5281/zenodo.17923583. No 
+additional restrictions apply to the data availability.
+Code availability
+The source code for the T-DDI framework, including data preprocessing, model train-
+ing, and evaluation scripts, is publicly available under the Apache License 2.0 at 
+https://github.com/HienKha/tddi/tree/v1.0.0.
+The training and evaluation pipeline was implemented in Python 3.12.0 with 
+the following core dependencies: torch 2.3.1, tab-transformer-pytorch 0.4.2, 
+scikit-learn 1.3.2, pandas 2.1.4, numpy 1.26.4, polars 0.20.23, and 
+pyarrow ≥15.0.0; all experiments were run on an NVIDIA RTX 4090 GPU (24 GB 
+VRAM).
+Molecular descriptor extraction was performed separately with PyBioMed (PyIn-
+teraction module) and RDKit version 2017.09.3 in Python 2.7.18. The final deployed 
+model was trained with the AdamW optimizer (learning rate 9.4526 × 10−5, weight 
+decay 1.5446 × 10−4), batch size 256, unweighted focal loss (γ = 1.0, αt = 1), three-
+fold stratified ensembling with random seed 42, early stopping patience 50 over up to
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+200 epochs, cosine annealing (T max = 50), and the active numerical-only MLP predic-
+tion head with hidden multipliers (2,2) and ReLU activation. A live demonstration of
+the web interface is available at https://projectxddi-tddi-docker.hf.space/.
+Acknowledgements
+This work was supported by the National Science and Technology Council, Taiwan
+[grant number NSTC114-2221-E-038-015]. The funder had no role in study design,
+data collection and analysis, decision to publish, or preparation of the manuscript.
+Author contributions
+Q.H.K., D.Q.A.N., N.T.P., H.G.L., and N.Q.K.L. conceived the study and designed
+the methodology. Q.H.K. curated the data, and Q.H.K. and M.H.D. developed the
+software. Q.H.K., D.Q.A.N., P.P.V.H., U.K.M.H., K.D.P., T.P.H., H.B.D.L., N.P.V.,
+K.T.Q.L., K.P.N., P.N., T.H.N., and M.H.N.L. performed the investigation, validation,
+and formal analysis. Q.H.K., D.Q.A.N., P.P.V.H., K.D.P., M.T.P., T.P.H., H.B.D.L.,
+and K.T.Q.L. prepared the visualizations. Q.H.K., M.H.D., M.T.P., and N.Q.K.L.
+provided resources. Q.H.K., M.H.D., and N.Q.K.L. administered the project. Q.H.K.,
+D.Q.A.N., P.P.V.H., U.K.M.H., K.D.P., M.T.P., T.P.H., N.T.P., H.G.L., and N.Q.K.L.
+wrote the original draft. Q.H.K., D.Q.A.N., P.P.V.H., U.K.M.H., M.T.P., T.P.H.,
+N.T.P., H.G.L., and N.Q.K.L. reviewed and edited the manuscript. P.K.H., M.X., and
+N.Q.K.L. supervised the work. All authors read and approved the final manuscript.
+Competing interests
+The authors declare no competing interests.
+References
+[1] Panajotovikj, N., Fern´ andez-Torras, A. & Mestres, J. Drug safety in
+healthy aging. npj Aging 11, 28 (2025). URL https://doi.org/10.1038/
+s41514-025-00220-5.
+[2] Tian, Y. et al. Ddinter 2.0: an enhanced drug interaction resource with expanded
+data coverage, new interaction types, and improved user interface. Nucleic Acids
+Research 53, D1356–D1362 (2025). URL https://doi.org/10.1093/nar/gkae726.
+[3] Harris, E. Study: polypharmacy nearly doubled in 20 years among older adults in
+us. JAMA 332, 524–524 (2024). URL https://doi.org/10.1001/jama.2024.13387.
+[4] American College of Cardiology. Tackling the polypharmacy pandemic in
+cv care. https://www.acc.org/Latest-in-Cardiology/Articles/2025/02/01/42/
+From-the-Member-Sections-Tackling-the-Polypharmacy-Pandemic (2025). Car-
+diology Magazine, February 2025.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+[5] Hughes, J. E., Bennett, K. E. & Cahir, C. Drug–drug interactions and their asso-
+ciation with adverse health outcomes in the older community-dwelling population:
+a prospective cohort study.Clinical Drug Investigation44, 439–453 (2024). URL
+https://doi.org/10.1007/s40261-024-01369-9.
+[6] Holbrook, A. M.et al.Systematic overview of warfarin and its drug and food
+interactions.Archives of Internal Medicine165, 1095–1106 (2005). URL https:
+//doi.org/10.1001/archinte.165.10.1095.
+[7] Wang, M. et al. Drug–drug interactions with warfarin: A systematic review and
+meta-analysis. British Journal of Clinical Pharmacology 87, 4051–4100 (2021).
+URL https://doi.org/10.1111/bcp.14833.
+[8] Gallo, K., Goede, A., Eckert, O.-A., Gohlke, B.-O. & Preissner, R. Withdrawn
+2.0—update on withdrawn drugs with pharmacovigilance data. Nucleic Acids
+Research 52, D1503–D1507 (2024). URL https://doi.org/10.1093/nar/gkad1017.
+[9] Li, L. et al. Drug–drug interactions and actual harm to hospitalized patients: A
+multicentre study examining the prevalence pre- and post-electronic medication
+system implementation. Drug Safety 47, 557–569 (2024). URL https://link.
+springer.com/article/10.1007/s40264-024-01412-w .
+[10] Cao, Y., Liu, Z., Li, C., Li, J. & Chua, T.-S. Multi-channel graph neural network
+for entity alignment. In Proceedings of the 57th annual meeting of the associa-
+tion for computational linguistics, pp. 1452–1461 (Association for Computational
+Linguistics) (2019). URL https://doi.org/10.18653/v1/P19-1140.
+[11] Wang, Y., Min, Y., Chen, X. & Wu, J. Multi-view graph contrastive represen-
+tation learning for drug-drug interaction prediction. In Proceedings of the Web
+Conference 2021, pp. 2921–2933 (ACM) (2021). URL https://doi.org/10.1145/
+3442381.3449786.
+[12] Huang, K., Xiao, C., Glass, L. M. & Sun, J. Moltrans: molecular interaction
+transformer for drug–target interaction prediction. Bioinformatics 37, 830–836
+(2021). URL https://doi.org/10.1093/bioinformatics/btaa880.
+[13] Zhang, Z. et al. Leveraging 3d molecular spatial visual information and multi-
+perspective representations for drug discovery. Advanced Science 13, e12453
+(2026).
+[14] Wu, M.-Y. et al. Graph-based prediction of mirna-drug associations with mul-
+tisource information and metapath enhancement matrices. IEEE Journal of
+Biomedical and Health Informatics (2025). URL https://doi.org/10.1109/JBHI.
+2025.3558303.
+[15] Zhu, X. et al. Fd-msgl: Drug repositioning via frequency-domain multi-source
+synergistic graph learning. IEEE Journal of Biomedical and Health Informatics
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+(2026).
+[16] Wei, J.et al.Drugrealign: a multisource prompt framework for drug repurposing
+based on large language models.BMC biology22, 226 (2024). URL https:
+//doi.org/10.1186/s12915-024-02028-3.
+[17] Zhou, Z.et al.Revisiting drug–protein interaction prediction: a novel global–
+local perspective. Bioinformatics 40, btae271 (2024). URL https://doi.org/10.
+1093/bioinformatics/btae271.
+[18] Borisov, V. et al. Deep neural networks and tabular data: A survey. IEEE
+Transactions on Neural Networks and Learning Systems 35, 7499–7519 (2024).
+URL https://doi.org/10.1109/TNNLS.2022.3229161.
+[19] Guidotti, R. et al. A survey of methods for explaining black box models. ACM
+computing surveys (CSUR) 51, 1–42 (2018). URL https://doi.org/10.1145/
+3236009.
+[20] Ryu, J. Y., Kim, H. U. & Lee, S. Y. Deep learning improves prediction of drug–
+drug and drug–food interactions. Proceedings of the national academy of sciences
+115, E4304–E4311 (2018). URL https://doi.org/10.1073/pnas.1803294115.
+[21] Begoli, E., Bhattacharya, T. & Kusnezov, D. The need for uncertainty quantifi-
+cation in machine-assisted medical decision making. Nature Machine Intelligence
+1, 20–23 (2019). URL https://doi.org/10.1038/s42256-018-0004-1.
+[22] Ribeiro, M. T., Singh, S. & Guestrin, C. ” why should i trust you?” explaining
+the predictions of any classifier. In Proceedings of the 22nd ACM SIGKDD
+international conference on knowledge discovery and data mining, pp. 1135–1144
+(ACM) (2016). URL https://doi.org/10.1145/2939672.2939778.
+[23] Team, G. et al. Gemini: a family of highly capable multimodal models. arXiv
+preprint arXiv:2312.11805 (2023). URL https://arxiv.org/abs/2312.11805.
+[24] Zhong, Y. et al. Ddi-gcn: Drug-drug interaction prediction via explainable graph
+convolutional networks. Artificial Intelligence in Medicine 144, 102640 (2023).
+URL https://doi.org/10.1016/j.artmed.2023.102640.
+[25] Nyamabo, A. K., Yu, H. & Shi, J.-Y. Ssi–ddi: substructure–substructure inter-
+actions for drug–drug interaction prediction. Briefings in Bioinformatics 22,
+bbab133 (2021). URL https://doi.org/10.1093/bib/bbab133.
+[26] Yu, J., Wang, D. & Zheng, M. Uncertainty quantification: Can we trust artificial
+intelligence in drug discovery? iScience 25, 104814 (2022). URL https://doi.org/
+10.1016/j.isci.2022.104814.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+[27] Mehrtash, A., Wells, W. M., Tempany, C. M., Abolmaesumi, P. & Kapur, T. Con-
+fidence calibration and predictive uncertainty estimation for deep medical image
+segmentation.IEEE Transactions on Medical Imaging39, 3868–3878 (2020).
+URL https://doi.org/10.1109/TMI.2020.3006437.
+[28] Gasteiger, J. & Marsili, M. Iterative partial equalization of orbital
+electronegativity—a rapid access to atomic charges.Tetrahedron36, 3219–3228
+(1980). URL https://doi.org/10.1016/0040-4020(80)80168-2.
+[29] Wildman, S. A. & Crippen, G. M. Prediction of physicochemical parameters by
+atomic contributions.Journal of Chemical Information and Computer Sciences
+39, 868–873 (1999). URL https://doi.org/10.1021/ci990307l.
+[30] Wienkers, L. C. & Heath, T. G. Predicting in vivo drug interactions from in vitro
+drug discovery data. Nature Reviews Drug Discovery 4, 825–833 (2005). URL
+https://doi.org/10.1038/nrd1851.
+[31] Veber, D. F. et al. Molecular properties that influence the oral bioavailability of
+drug candidates. Journal of Medicinal Chemistry 45, 2615–2623 (2002). URL
+https://doi.org/10.1021/jm020017n.
+[32] Percha, B. & Altman, R. B. A global network of biomedical relationships derived
+from text. Bioinformatics 34, 2614–2624 (2018). URL https://doi.org/10.1093/
+bioinformatics/bty114.
+[33] Segura-Bedmar, I., Mart´ ınez, P. & Herrero-Zazo, M. Semeval-2013 task 9:
+Extraction of drug-drug interactions from biomedical texts (ddiextraction 2013).
+In Second Joint Conference on Lexical and Computational Semantics (*SEM),
+Volume 2: Proceedings of the Seventh International Workshop on Semantic Eval-
+uation (SemEval 2013), pp. 341–350 (Association for Computational Linguistics)
+(2013). URL https://aclanthology.org/S13-2056/.
+[34] Tatonetti, N. P., Ye, P. P., Daneshjou, R. & Altman, R. B. Data-driven
+prediction of drug effects and interactions. Science translational medicine 4,
+125ra31–125ra31 (2012). URL https://doi.org/10.1126/scitranslmed.3003377.
+[35] Zhang, Y., Kang, B., Hooi, B., Yan, S. & Feng, J. Deep long-tailed learning:
+A survey. IEEE transactions on pattern analysis and machine intelligence 45,
+10795–10816 (2023). URL https://doi.org/10.1109/TPAMI.2023.3268118.
+[36] Knox, C. et al. Drugbank 6.0: the drugbank knowledgebase for 2024. Nucleic
+Acids Research 52, D1265–D1275 (2023). URL https://doi.org/10.1093/nar/
+gkad976.
+[37] Keam, S. J. Imlunestrant: First approval. Drugs 1–7 (2025). URL https://doi.
+org/10.1007/s40265-025-02266-x.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+[38] Fung, S. Remibrutinib: First approval: S. fung. Drugs 1–8 (2026). URL https:
+//doi.org/10.1007/s40265-025-02281-y .
+[39] Lee, A. Elinzanetant: First approval. Drugs 1–5 (2025). URL https://doi.org/
+10.1007/s40265-025-02244-3.
+[40] McGuigan, A. Ziftomenib: First approval: A. mcguigan. Drugs 1–8 (2026). URL
+https://doi.org/10.1007/s40265-026-02291-4.
+[41] Siegel, F. et al. Sevabertinib, a reversible her2 inhibitor with activity in lung
+cancer. Cancer Discovery OF1–OF14 (2026). URL https://doi.org/10.1158/
+2159-8290.CD-25-0605.
+[42] Pal, D. & Mitra, A. K. Mdr-and cyp3a4-mediated drug–drug interactions.Journal
+of Neuroimmune Pharmacology 1, 323–339 (2006). URLhttps://doi.org/10.1007/
+s11481-006-9034-2.
+[43] Haddjeri, N. & Blier, P. Neurokinin-1 receptor antagonists modulate brain nora-
+drenaline and serotonin interactions. European journal of pharmacology 600,
+64–70 (2008). URL https://doi.org/10.1016/j.ejphar.2008.10.001.
+[44] Budha, N. et al. Drug absorption interactions between oral targeted anticancer
+agents and ppis: is ph-dependent solubility the achilles heel of targeted therapy?
+Clinical Pharmacology & Therapeutics 92, 203–213 (2012). URL https://doi.org/
+10.1038/clpt.2012.73.
+[45] Al-Razgan, M. et al. A systematic literature review on the usability of mobile
+applications for visually impaired users. PeerJ Computer Science 7, e771 (2021).
+URL http://doi.org/10.7717/peerj-cs.771.
+[46] Chithrananda, S., Grand, G. & Ramsundar, B. Chemberta: large-scale self-
+supervised pretraining for molecular property prediction. arXiv preprint
+arXiv:2010.09885 (2020). URL https://arxiv.org/abs/2010.09885.
+[47] Huang, X., Khetan, A., Cvitkovic, M. & Karnin, Z. Tabtransformer: Tabular data
+modeling using contextual embeddings. arXiv preprint arXiv:2012.06678 (2020).
+URL https://arxiv.org/abs/2012.06678.
+[48] Sadeghi, S. & Ngom, A. Ddipred: Graph convolutional network-based drug-
+drug interactions prediction using drug chemical structure embedding. In 2022
+IEEE Conference on Computational Intelligence in Bioinformatics and Computa-
+tional Biology (CIBCB), pp. 1–6 (IEEE) (2022). URL https://doi.org/10.1109/
+CIBCB55180.2022.9863018.
+[49] Xu, C., Bulusu, K. C., Pan, H. & Elemento, O. Ddi-gpt: Explainable prediction
+of drug-drug interactions using large language models enhanced with knowledge
+graphs. bioRxiv (2024). URL https://doi.org/10.1101/2024.12.06.627266.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+[50] Wang, Y., Yang, Z. & Yao, Q. Accurate and interpretable drug-drug interaction
+prediction enabled by knowledge subgraph learning.Communications Medicine
+4, 59 (2024). URL https://www.nature.com/articles/s43856-024-00486-y. Article
+number: 59.
+[51] Akyon, S. H., Akyon, F. C. & Yılmaz, T. E. Artificial intelligence-supported
+web application design and development for reducing polypharmacy side effects
+and supporting rational drug use in geriatric patients. Frontiers in Medicine 10,
+1029198 (2023). URL https://www.frontiersin.org/journals/medicine/articles/
+10.3389/fmed.2023.1029198/full.
+[52] Loy, J. S., Ali, E. E. & Yap, K. Y.-L. Quality assessment of medical apps that tar-
+get medication-related problems. Journal of Managed Care & Specialty Pharmacy
+22, 1124–1140 (2016). URL https://doi.org/10.18553/jmcp.2016.22.10.1124.
+[53] Zitnik, M., Agrawal, M. & Leskovec, J. Modeling polypharmacy side effects
+with graph convolutional networks. Bioinformatics 34, i457–i466 (2018). URL
+https://doi.org/10.1093/bioinformatics/bty294.
+[54] Wishart, D. S. et al. Drugbank: a comprehensive resource for in silico drug
+discovery and exploration. Nucleic acids research 34, D668–D672 (2006). URL
+https://doi.org/10.1093/nar/gkj067.
+[55] Kha, Q.-H., Nguyen, N. T. K., Le, N. Q. K. & Kang, J.-H. Development and
+validation of a machine learning model for predicting drug-drug interactions with
+oral diabetes medications. Methods 232, 81–88 (2024). URL https://doi.org/10.
+1016/j.ymeth.2024.10.012.
+[56] Schwartz, J., Awale, M. & Reymond, J.-L. SMIfp (SMILES fingerprint) chem-
+ical space for virtual screening and visualization of large databases of organic
+molecules. Journal of Chemical Information and Modeling 53, 1979–1989 (2013).
+URL https://doi.org/10.1021/ci400206h. Epub 2013-07-30.
+[57] Dong, J. et al. Pybiomed: a python library for various molecular representations of
+chemicals, proteins and dnas and their interactions. Journal of cheminformatics
+10, 16 (2018). URL https://doi.org/10.1186/s13321-018-0270-2.
+[58] Landrum, G. et al. RDKit: open-source cheminformatics (2016). URL https:
+//www.rdkit.org.
+[59] U.S. Food and Drug Administration. Advancing health through innovation:
+New drug therapy approvals 2025. Tech. Rep., Center for Drug Evaluation and
+Research, Silver Spring, MD (2026). URL https://www.fda.gov/media/190705/
+download?attachment=.
+[60] Lin, T.-Y., Goyal, P., Girshick, R., He, K. & Doll´ ar, P. Focal loss for dense object
+detection. In Proceedings of the IEEE International Conference on Computer
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+Vision, pp. 2980–2988 (IEEE) (2017). URL https://doi.org/10.1109/ICCV.2017.
+324.
+[61] Rigatti, S. J. Random forest. Journal of Insurance Medicine 47, 31–39 (2017).
+URL https://doi.org/10.17849/insm-47-01-31-39.1.
+[62] Chen, T. & Guestrin, C. Xgboost: A scalable tree boosting system. Cornell
+University (2016). URL https://doi.org/10.48550/arXiv.1603.02754.
+[63] Steinbach, M. & Tan, P.-N. in knn: k-nearest neighbors (eds Wu, X. & Kumar,
+V.) The Top Ten Algorithms in Data Mining 165–176 (Chapman and Hall/CRC,
+Boca Raton, FL, 2009).
+[64] Gorishniy, Y., Kotelnikov, A. & Babenko, A. Tabm: Advancing tabular deep
+learning with parameter-efficient ensembling. arXiv preprint arXiv:2410.24210
+(2024). URL https://doi.org/10.48550/arXiv.2410.24210.
+[65] Arik, S. ¨O. & Pfister, T. Tabnet: Attentive interpretable tabular learning. In
+Proceedings of the AAAI Conference on Artificial Intelligence, pp. 6679–6687
+(AAAI Press) (2021). URL https://doi.org/10.1609/aaai.v35i8.16826.
+[66] Dai, H. et al. Ft-transformer: Resilient and reliable transformer with end-to-
+end fault tolerant attention. In Proceedings of the International Conference for
+High Performance Computing, Networking, Storage and Analysis, pp. 1085–1098
+(ACM) (2025). URL https://doi.org/10.1145/3712285.3759853.
+[67] Somepalli, G., Goldblum, M., Schwarzschild, A., Bruss, C. B. & Goldstein, T.
+Saint: Improved neural networks for tabular data via row attention and con-
+trastive pre-training. arXiv preprint arXiv:2106.01342 (2021). URL https:
+//doi.org/10.48550/arXiv.2106.01342.
+[68] Xu, C. et al. Bishop: Bi-directional cellular learning for tabular data with gen-
+eralized sparse modern hopfield model. arXiv preprint arXiv:2404.03830 (2024).
+URL https://doi.org/10.48550/arXiv.2404.03830.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+T-DDI
+1
+0.8
+0.6
+0.4
+0
+DDI Types
+UNCERTAINTY-AWARE
+ESTIMATOR
+Confidence
+0 ... 177
+DDI Type 90.87
+0.10
+0.02
+0.009
+0.001 DDI Type N
+DDI Type 1
+DDI Type 175
+DDI Type 176
+DDI TYPE
+RANKINGS
+DDI TYPE OUTPUT
+Metformin Cimetidine
+SMILES STRINGS
+CC1=C(N=CN1)CSCCNC(=NC)NC#NCN(C)C(=N)N=C(N)N
+3,780 descriptors
+QSAR
+MOLECULAR
+DESCRIPTORS
+The serum concentration of Metformin can be
+increased when it is combined with Cimetidine.
+0.2
+Normalization Layer
+Multilayer Perceptron
+Numerical Features Ground Truth
+Predicted 
+DDI Type
+Focal
+Loss
+868,069 drug pairs
+2,957 drugs
+1 9 176175...
+Fig. 1 Overview of the proposed T-DDI pipeline for drug-drug interaction predic-
+tion.The process begins with data collection from the DrugBank benchmark dataset, from which
+3,780 quantitative structure-activity relationship descriptors are extracted for each drug pair. These
+descriptors are then input into the T-DDI model to learn feature representations; the model out-
+puts uncertainty estimates and confidence scores for the candidate DDI types, which are ranked
+accordingly. The final output is a DDI type prediction that can be accompanied by a downstream
+feature-level explanation.
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+Fig. 2 Dataset imbalance and uncertainty-based confidence stratification in theDDI2025
+benchmark dataset. The five panels collectively characterize the class-frequency distribution and
+sample-size stratification of the DDI2025 dataset, and demonstrate how the uncertainty-aware esti-
+mator partitions held-out test predictions into high- and medium-confidence tiers. a) Class frequency
+distribution of DDI types in the DDI2025 dataset with more than 1,000 samples, with stacked
+bars indicating the train, validation, and test splits. b) Percentage distribution of DDI types in the
+DDI2025 dataset stratified by sample-size ranges: >50,000, 10,001-50,000, 1,001-10,000, and ≤1,000
+samples per class. c) Confidence score distribution on the DDI2025 test set, with dashed lines mark-
+ing the medium (0.50) and high (0.88) confidence thresholds used to stratify predictions. d) Number
+of DDI2025 test samples assigned to each confidence level using the medium (0.50) and high (0.88)
+confidence thresholds. e) Number of unique DDI types represented among the DDI2025 test samples
+in each confidence level using the medium (0.50) and high (0.88) confidence thresholds.
+Table 1 Three-fold cross-validation performance of the T-DDI framework and baseline models
+on the DDI2025 dataset. Values are mean ± standard deviation across folds. The TabTransformer row
+uses a classification (CLS) token, SMILES embeddings, categorical embeddings, and numerical features as
+inputs, whereas T-DDI uses numerical features only.
+Models Accuracy W eighted Macro
+Precision Recall F1 Precision Recall F1
+Machine Learning Algorithms
+RandomF orest
+[61]
+0.8000±0.0014 0.8100 ± 0.0000 0.8000 ± 0.0000 0.7961 ± 0.0014 0.7933 ± 0.0153 0.6033 ± 0.0058 0.6633 ± 0.0058
+XGBoost [62] 0.7854 ± 0.0007 0.8033 ± 0.0058 0.7867 ± 0.0058 0.7831 ± 0.0006 0 .6167 ± 0.0058 0.7700 ± 0.0000 0.6700 ± 0.0000
+KNN [63] 0.6945 ± 0.0009 0.6900 ± 0.0000 0.6933 ± 0.0058 0.6896 ± 0.0011 0.5900 ± 0.0100 0.4667 ± 0.0058 0 .5007 ± 0.0093
+Deep Learning Algorithms
+CNN 0.6171± 0.0209 0.6533 ± 0.0058 0.6167 ± 0.0231 0.6133 ± 0.0208 0.5200 ± 0.0173 0.2300 ± 0.0173 0.2867 ± 0.0231
+T abM [64] 0.9131 ± 0.0011 0 .9137 ± 0.0014 0.9131 ± 0.0011 0.9120 ± 0.0012 0.8685 ± 0.0075 0.8248 ± 0.0045 0.8344 ± 0.0036
+T abNet [65] 0.8827 ± 0.0121 0.8835 ± 0.0123 0.8827 ± 0.0121 0.8814 ± 0.0129 0.7736 ± 0.0345 0.6861 ± 0.0361 0.7048 ± 0.0369
+FT-
+T ransformer [66]
+0.9184 ± 0.0032 0.9186 ± 0.0030 0.9184 ± 0.0032 0.9181 ± 0.0032 0.8195 ± 0.0152 0.7575 ± 0.0167 0.7733 ± 0.0150
+SAINT [67] 0.9064 ± 0.0025 0.9058 ± 0.0021 0.9064 ± 0.0025 0.9054 ± 0.0019 0.7691 ± 0.0162 0.7002 ± 0.0325 0.7193 ± 0.0013
+BiSHop [68] 0.9275 ± 0.0015 0.9275 ± 0.0017 0.9275 ± 0.0015 0.9272 ± 0.0016 0.8594 ± 0.0068 0.8083 ± 0.0101 0.8215 ± 0.0036
+T ab-T ransformer
+[47]
+0.8329±0.0024 0.8304 ± 0.0027 0.8329 ± 0.0024 0.8274 ± 0.0024 0.6951 ± 0.0129 0.5981 ± 0.0073 0.6168 ± 0.0093
+T-DDI 0.9374 ± 0.0004 0.9370 ± 0.0004 0.9374 ± 0.0004 0.9370 ± 0.0004 0.8828 ± 0.0031 0.8043 ± 0.0031 0 .8321 ± 0.0032
+ARTICLE IN PRESS
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+Fig. 3 Confidence-stratified prediction results on the DDI2025 test set. The four panels
+compare classification quality between high- and medium-confidence prediction strata, illustrating
+that the uncertainty-aware estimator successfully separates reliable from ambiguous predictions a)
+Normalized confusion matrix for high-confidence predictions selected using the out-of-fold-tuned
+threshold of 0.88. b) Per-class performance heatmap for the high-confidence subset. c) Normalized
+confusion matrix for medium-confidence predictions with confidence scores between 0.50 and 0.88. d)
+Per-class performance heatmap for the medium-confidence subset.
+ARTICLE IN PRESS
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+Fig. 4 t-SNE visualization of confidence-stratified predictions on the DDI2025 test set.
+The four panels reveal that high-confidence predictions form a dense, well-separated cluster dominated
+by correct classifications, while medium-confidence predictions exhibit substantial overlap between
+correct and incorrect outcomes. a) t-SNE embedding of up to 10,000 stratified random samples
+from the high-confidence subset (≥0.88), colored by prediction confidence score. b) The same high-
+confidence t-SNE embedding colored by prediction correctness, with correct and incorrect predictions
+shown separately. c) t-SNE embedding of up to 10,000 stratified random samples from the medium-
+confidence subset (0.50-0.88), colored by prediction confidence score. d) The same medium-confidence
+t-SNE embedding colored by prediction correctness.
+ARTICLE IN PRESS
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+Fig. 5 Sankey diagram of misclassified DDI samples. Links show how mispredicted examples
+flow from their true fine-grained classes grouped by semantic category (left) to the predicted semantic
+categories (right). Only misclassified samples are displayed; link width is proportional to the number
+of errors.
+ARTICLE IN PRESS
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+Fig. 6 Web user interface of T-DDI. The interface provides two primary analysis modes: Sin-
+gle Pair for evaluating interactions between a selected drug pair, and Multiple Pair for simultaneous 
+screening of multiple drug combinations to support diverse user needs. Predicted interaction risk 
+and probability scores are displayed alongside model-derived feature attributions using LIME. An 
+optional AI-assisted explanation module (Gemini API) provides natural-language summaries of pre-
+dicted interactions. The average processing time is approximately 7-8 seconds per pair for model 
+prediction with LIME explanation, and approximately 24 seconds per pair when the AI-generated 
+interpretation module is enabled. A color-blind accessibility mode is incorporated to support users 
+with color vision deficiencies without compromising accessibility or readability.
+ARTICLE IN PRESS
+
+===== PAGE BREAK =====
+
+ARTICLE IN PRESS
+ARTICLE IN PRESS
+Table 2DDI2018benchmark comparison, uncertainty-aware estimator ablation, and
+categorical-input ablation.The table reports weighted and macro metrics across four evaluations: (1) a
+benchmark comparison on theDDI2018test set, where T-DDI without UE is compared with DDI-GCN, SSI-DDI,
+and DeepDDI; (2) a UE ablation on theDDI2018test set, comparing T-DDI without UE against the high-confidence
+T-DDI subset selected using the out-of-fold (OOF)-tuned threshold of 0.90; (3) a UE ablation on theDDI2025test
+set, comparing T-DDI without UE against the high-confidence T-DDI subset selected using the OOF-tuned
+threshold of 0.88; and (4) a Categorical-branch ablation on theDDI2025test set, in which we compared T-DDI
+with a TabTransformer variant that incorporates the CLS token, SMILES embeddings, categorical embeddings, and
+numerical features. For the UE analyses, the “Difference vs full test” row reports the absolute metric difference
+between the high-confidence subset and the full test set, reflecting the effect of confidence-based filtering rather than
+a direct improvement on the same set of samples. For the “Categorical-branch ablation”, the difference row reports
+the absolute metric difference between T-DDI and the TabTransformer variant on the same test set. “UE” denotes
+the uncertainty-aware estimator. T-DDI uses numerical features only, whereas the TabTransformer variant uses the
+classification (CLS) token, SMILES embeddings, categorical embeddings, and numerical features.
+Settings/Architecture Accuracy Weighted Macro
+Precision Recall F1 Precision Recall F1
+(1) Benchmark comparison (DDI2018test set)
+DDI-GCN [24] 0.7118 0.7094 0.7118 0.6939 0.5027 0.3458 0.3600
+SSI-DDI [25] 0.7114 0.7806 0.7114 0.7299 0.4874 0.8205 0.5617
+DeepDDI [20] 0.9228 0.9123 0.9228 0.9168 0.6834 0.7856 0.7048
+T-DDI without UE 0.9296 0.9295 0.9296 0.9292 0.9174 0.8923 0.8990
+(2) UE ablation (DDI2018test set)
+T-DDI without UE 0.9296 0.9295 0.9296 0.9292 0.9174 0.8923 0.8990
+T-DDI with UE - high con-
+fidence (threshold=0.90)
+0.9774 0.9773 0.9774 0.9772 0.9504 0.9352 0.9398
+Difference vs full test +0.0478 +0.0479 +0.0478 +0.0480 +0.0329 +0.0429 +0.0409
+(3) UE ablation (DDI2025test set)
+T-DDI without UE 0.9434 0.9432 0.9434 0.9430 0.9023 0.8185 0.8452
+T-DDI with UE - high con-
+fidence (threshold=0.88)
+0.9796 0.9795 0.9796 0.9794 0.9249 0.8869 0.8992
+Difference vs full test +0.0362 +0.0363 +0.0362 +0.0364 +0.0226 +0.0684 +0.0539
+(4) Categorical-branch ablation (DDI2025test set)
+TabTransformer [47] 0.8758 0.8754 0.8758 0.8715 0.7904 0.6776 0.7022
+T-DDI 0.9434 0.9432 0.9434 0.9430 0.9023 0.8185 0.8452
+Difference vs TabTrans-
+former
++0.0676 +0.0678 +0.0676 +0.0715 +0.1119 +0.1409 +0.1430

@@ -158,12 +158,8 @@ class FixedReplaySamplerTest(unittest.TestCase):
 
 
 class S04ProtocolTest(unittest.TestCase):
-    def test_new_protocol_does_not_change_legacy_protocol_names(self) -> None:
+    def test_fixed_budget_and_standard_replay_protocol_names(self) -> None:
         self.assertEqual(method_protocol_name("replay", 50), "replay_balanced_per_class_cap50")
-        self.assertEqual(
-            method_protocol_name("replay_distill", 50),
-            "replay_distill_balanced_per_class_cap50",
-        )
         self.assertEqual(method_protocol_name(FIXED_BUDGET_METHOD, 50), FIXED_BUDGET_METHOD)
         self.assertEqual(
             sampler_policy_name(FIXED_BUDGET_METHOD),
