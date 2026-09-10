@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from src.data.ddi_dataset import load_class_counts
-from src.eval.classwise_metrics import (
+from src.eval.metrics import (
     CLASS_METRIC_COLUMNS,
     FORGETTING_COLUMNS,
     TRAJECTORY_COLUMNS,

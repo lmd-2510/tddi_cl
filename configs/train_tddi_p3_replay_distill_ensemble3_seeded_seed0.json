@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
-  "study_name": "tddi_ensemble3_replay_distill_p3_seed0_full8_v1",
+  "study_name": "tddi_ensemble3_replay_distill_p3_seed0_full8_seeded_v2",
   "experiment_seed": 0,
   "member_ids": [0, 1, 2],
+  "ensemble": {"mode": "seeded"},
   "protocol": {
     "id": "P3",
     "name": "tail_to_head",
@@ -54,7 +55,7 @@
   },
   "prediction_splits": ["validation", "test"],
   "outputs": {
-    "root": "outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_v1",
+    "root": "outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_seeded_v2",
     "member_namespace": "member_{member_id}",
     "ensemble_namespace": "offline_ensemble",
     "manifest": "study_manifest.json"

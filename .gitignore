@@ -4,7 +4,6 @@
 data/*.zip
 outputs/runs*
 outputs/advanced_protocols/
-outputs/graph_cache/
 outputs/full/
 outputs/pilot/
 outputs/smoke/

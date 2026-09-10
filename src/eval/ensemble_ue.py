@@ -17,14 +17,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.eval.member_predictions import (  # noqa: E402
+from src.eval.predictions import (  # noqa: E402
     MemberPredictionArtifact,
     load_member_prediction_artifact,
 )
 
 
-OFFLINE_ENSEMBLE_SCHEMA_VERSION = 2
+OFFLINE_ENSEMBLE_SCHEMA_VERSION = 3
 LEGACY_OFFLINE_ENSEMBLE_SCHEMA_VERSION = 1
+LEGACY_OFFLINE_ENSEMBLE_SCHEMA_VERSION_2 = 2
 OFFLINE_ENSEMBLE_KIND = "ddi_cil_offline_probability_ensemble"
 EXPECTED_MEMBER_COUNT = 3
 
@@ -40,6 +41,7 @@ class OfflineEnsembleContext:
     member_seeds: tuple[int, int, int]
     source_run_ids: tuple[str, str, str]
     member_count: int = EXPECTED_MEMBER_COUNT
+    ensemble_mode: str = "seeded"
 
 
 @dataclass(frozen=True)
@@ -123,8 +125,9 @@ def aggregate_member_predictions(
     artifacts: Sequence[MemberPredictionArtifact],
     *,
     source_artifact_paths: Sequence[str | Path] | None = None,
+    ensemble_mode: str | None = None,
 ) -> OfflineEnsembleArtifact:
-    """Validate alignment and aggregate exactly three members by mean probability."""
+    """Average seeded members or merge three leak-free held-out fold predictions."""
 
     if len(artifacts) != EXPECTED_MEMBER_COUNT:
         raise ValueError(
@@ -139,34 +142,67 @@ def aggregate_member_predictions(
     if len(set(member_ids)) != EXPECTED_MEMBER_COUNT:
         raise ValueError(f"Member IDs must be distinct, got {member_ids}.")
 
-    sample_ids = _require_equal_array(artifacts, "sample_ids")
-    labels = _require_equal_array(artifacts, "labels")
+    artifact_modes = {artifact.context.ensemble_mode for artifact in artifacts}
+    if len(artifact_modes) != 1:
+        raise ValueError(f"Member ensemble modes do not match: {sorted(artifact_modes)}")
+    resolved_mode = ensemble_mode or next(iter(artifact_modes))
+    if resolved_mode not in {"seeded", "stratified_3fold"}:
+        raise ValueError(f"Unsupported ensemble mode: {resolved_mode!r}.")
+    if artifact_modes != {resolved_mode}:
+        raise ValueError("Requested ensemble mode does not match member provenance.")
+
     raw_class_ids = _require_equal_array(artifacts, "raw_class_ids")
-    member_probabilities = np.stack(
-        [np.asarray(artifact.probabilities, dtype=np.float64) for artifact in artifacts],
-        axis=0,
-    )
-    expected_shape = (EXPECTED_MEMBER_COUNT, sample_ids.shape[0], raw_class_ids.shape[0])
-    if member_probabilities.shape != expected_shape:
-        raise ValueError(
-            "Member probability row/class shape mismatch: "
-            f"{member_probabilities.shape} != {expected_shape}."
+    is_oof = resolved_mode == "stratified_3fold" and split.casefold() == "validation"
+    if is_oof:
+        fold_ids = tuple(artifact.context.fold_id for artifact in artifacts)
+        fold_counts = {artifact.context.fold_count for artifact in artifacts}
+        fold_seeds = {artifact.context.fold_seed for artifact in artifacts}
+        if set(fold_ids) != set(range(EXPECTED_MEMBER_COUNT)):
+            raise ValueError(f"OOF member artifacts must cover folds 0, 1, 2; got {fold_ids}.")
+        if fold_counts != {EXPECTED_MEMBER_COUNT} or len(fold_seeds) != 1:
+            raise ValueError("OOF member artifacts disagree on fold count or fold seed.")
+        sample_ids = np.concatenate([artifact.sample_ids for artifact in artifacts])
+        labels = np.concatenate([artifact.labels for artifact in artifacts])
+        mean_probabilities64 = np.concatenate(
+            [np.asarray(artifact.probabilities, dtype=np.float64) for artifact in artifacts],
+            axis=0,
         )
-    if not np.isfinite(member_probabilities).all():
+        if np.unique(sample_ids).shape[0] != sample_ids.shape[0]:
+            raise ValueError("OOF member validation folds overlap in sample IDs.")
+        order = np.argsort(sample_ids, kind="stable")
+        sample_ids = sample_ids[order]
+        labels = labels[order]
+        mean_probabilities64 = mean_probabilities64[order]
+        member_probabilities = None
+        output_split = "oof"
+    else:
+        sample_ids = _require_equal_array(artifacts, "sample_ids")
+        labels = _require_equal_array(artifacts, "labels")
+        member_probabilities = np.stack(
+            [np.asarray(artifact.probabilities, dtype=np.float64) for artifact in artifacts],
+            axis=0,
+        )
+        expected_shape = (EXPECTED_MEMBER_COUNT, sample_ids.shape[0], raw_class_ids.shape[0])
+        if member_probabilities.shape != expected_shape:
+            raise ValueError(
+                "Member probability row/class shape mismatch: "
+                f"{member_probabilities.shape} != {expected_shape}."
+            )
+        mean_probabilities64 = member_probabilities.mean(axis=0)
+        output_split = split
+    if not np.isfinite(mean_probabilities64).all():
         raise ValueError("Member probabilities contain non-finite values.")
-    if not np.allclose(member_probabilities.sum(axis=2), 1.0, rtol=1e-6, atol=1e-8):
+    if not np.allclose(mean_probabilities64.sum(axis=1), 1.0, rtol=1e-6, atol=1e-8):
         raise ValueError("Member probability rows must sum to one before aggregation.")
 
-    # The ensemble definition is the arithmetic mean of member posteriors. Raw
-    # logits are deliberately not read or averaged here.
-    mean_probabilities64 = member_probabilities.mean(axis=0)
     predictive_entropy = _entropy(mean_probabilities64)
-    member_entropy = _entropy(member_probabilities)
-    expected_member_entropy = member_entropy.mean(axis=0)
-    mutual_information = np.maximum(
-        predictive_entropy - expected_member_entropy,
-        0.0,
-    )
+    if member_probabilities is None:
+        expected_member_entropy = predictive_entropy.copy()
+        mutual_information = np.zeros_like(predictive_entropy)
+    else:
+        member_entropy = _entropy(member_probabilities)
+        expected_member_entropy = member_entropy.mean(axis=0)
+        mutual_information = np.maximum(predictive_entropy - expected_member_entropy, 0.0)
     class_count = raw_class_ids.shape[0]
     if class_count <= 1:
         normalized_entropy = np.zeros_like(predictive_entropy)
@@ -180,7 +216,11 @@ def aggregate_member_predictions(
     # maximum softmax/ensemble probability.
     confidence = entropy_confidence.copy()
     max_probability = mean_probabilities64.max(axis=1)
-    probability_variance = member_probabilities.var(axis=0)
+    probability_variance = (
+        np.zeros_like(mean_probabilities64)
+        if member_probabilities is None
+        else member_probabilities.var(axis=0)
+    )
     mean_probability_variance = probability_variance.mean(axis=1)
     total_probability_variance = probability_variance.sum(axis=1)
     member_count = len(artifacts)
@@ -188,12 +228,15 @@ def aggregate_member_predictions(
         mutual_information,
         member_count,
     )
-    member_predictions = member_probabilities.argmax(axis=2)
-    disagreements = []
-    for left in range(EXPECTED_MEMBER_COUNT):
-        for right in range(left + 1, EXPECTED_MEMBER_COUNT):
-            disagreements.append(member_predictions[left] != member_predictions[right])
-    pairwise_disagreement = np.mean(np.stack(disagreements, axis=0), axis=0)
+    if member_probabilities is None:
+        pairwise_disagreement = np.zeros(sample_ids.shape[0], dtype=np.float64)
+    else:
+        member_predictions = member_probabilities.argmax(axis=2)
+        disagreements = []
+        for left in range(EXPECTED_MEMBER_COUNT):
+            for right in range(left + 1, EXPECTED_MEMBER_COUNT):
+                disagreements.append(member_predictions[left] != member_predictions[right])
+        pairwise_disagreement = np.mean(np.stack(disagreements, axis=0), axis=0)
     predictions = raw_class_ids[mean_probabilities64.argmax(axis=1)]
 
     if source_artifact_paths is None:
@@ -208,7 +251,7 @@ def aggregate_member_predictions(
             method=method,
             method_protocol=method_protocol,
             task_id=task_id,
-            split=split,
+            split=output_split,
             experiment_seed=experiment_seed,
             member_ids=member_ids,  # type: ignore[arg-type]
             member_seeds=tuple(  # type: ignore[arg-type]
@@ -218,6 +261,7 @@ def aggregate_member_predictions(
                 member.context.run_id for member in artifacts
             ),
             member_count=member_count,
+            ensemble_mode=resolved_mode,
         ),
         sample_ids=sample_ids,
         labels=labels,
@@ -254,6 +298,10 @@ def _validate_ensemble_artifact(artifact: OfflineEnsembleArtifact) -> None:
         raise ValueError("Offline ensemble must record three member seeds.")
     if context.member_count != len(context.member_ids):
         raise ValueError("Offline ensemble member_count does not match member_ids.")
+    if context.ensemble_mode not in {"seeded", "stratified_3fold"}:
+        raise ValueError("Offline ensemble has an unsupported ensemble_mode.")
+    if context.split == "oof" and context.ensemble_mode != "stratified_3fold":
+        raise ValueError("Only stratified_3fold may produce an OOF artifact.")
     rows = artifact.sample_ids.shape[0]
     classes = artifact.raw_class_ids.shape[0]
     if rows == 0 or classes == 0:
@@ -408,6 +456,7 @@ def export_offline_ensemble_artifact(
                 member_ids=np.asarray(context.member_ids, dtype=np.int32),
                 member_seeds=np.asarray(context.member_seeds, dtype=np.int64),
                 member_count=np.asarray(context.member_count, dtype=np.int32),
+                ensemble_mode=np.asarray(context.ensemble_mode),
                 source_run_ids=np.asarray(context.source_run_ids),
                 source_artifact_paths=np.asarray(artifact.source_artifact_paths),
                 sample_ids=artifact.sample_ids,
@@ -445,7 +494,7 @@ def _read_scalar(payload: Mapping[str, np.ndarray], key: str) -> object:
 
 
 def load_offline_ensemble_artifact(path: str | Path) -> OfflineEnsembleArtifact:
-    """Load schema 1/2 artifacts and derive schema-2 UE fields when needed."""
+    """Load current or legacy ensemble artifacts with strict provenance checks."""
 
     path = Path(path)
     if not path.is_file():
@@ -483,18 +532,22 @@ def load_offline_ensemble_artifact(path: str | Path) -> OfflineEnsembleArtifact:
         "entropy_confidence",
         "max_probability",
     }
+    schema_three_required = {"ensemble_mode"}
     with np.load(path, allow_pickle=False) as payload:
         if "schema_version" not in payload.files:
             raise ValueError("Offline ensemble artifact is missing keys: ['schema_version']")
         schema_version = int(_read_scalar(payload, "schema_version"))
         if schema_version not in {
             LEGACY_OFFLINE_ENSEMBLE_SCHEMA_VERSION,
+            LEGACY_OFFLINE_ENSEMBLE_SCHEMA_VERSION_2,
             OFFLINE_ENSEMBLE_SCHEMA_VERSION,
         }:
             raise ValueError(f"Unsupported offline ensemble schema version: {schema_version}.")
         required = set(legacy_required)
-        if schema_version == OFFLINE_ENSEMBLE_SCHEMA_VERSION:
+        if schema_version >= LEGACY_OFFLINE_ENSEMBLE_SCHEMA_VERSION_2:
             required.update(schema_two_required)
+        if schema_version >= OFFLINE_ENSEMBLE_SCHEMA_VERSION:
+            required.update(schema_three_required)
         missing = sorted(required - set(payload.files))
         if missing:
             raise ValueError(f"Offline ensemble artifact is missing keys: {missing}")
@@ -550,6 +603,11 @@ def load_offline_ensemble_artifact(path: str | Path) -> OfflineEnsembleArtifact:
                 member_seeds=member_seeds,  # type: ignore[arg-type]
                 source_run_ids=source_run_ids,  # type: ignore[arg-type]
                 member_count=member_count,
+                ensemble_mode=(
+                    str(_read_scalar(payload, "ensemble_mode"))
+                    if schema_version >= OFFLINE_ENSEMBLE_SCHEMA_VERSION
+                    else "seeded"
+                ),
             ),
             sample_ids=np.asarray(payload["sample_ids"]),
             labels=np.asarray(payload["labels"]),
@@ -586,6 +644,12 @@ def parse_args() -> argparse.Namespace:
         metavar=("MEMBER_0", "MEMBER_1", "MEMBER_2"),
     )
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument(
+        "--mode",
+        choices=["seeded", "stratified_3fold"],
+        default=None,
+        help="Defaults to the mode recorded in member artifacts.",
+    )
     return parser.parse_args()
 
 
@@ -595,12 +659,14 @@ def main() -> None:
     artifact = aggregate_member_predictions(
         members,
         source_artifact_paths=args.member_artifacts,
+        ensemble_mode=args.mode,
     )
     output_path = export_offline_ensemble_artifact(artifact, args.out)
     print(
         f"exported={output_path} rows={artifact.row_count} "
         f"classes={artifact.class_count} task={artifact.context.task_id} "
-        f"split={artifact.context.split} members={artifact.context.member_ids}",
+        f"split={artifact.context.split} mode={artifact.context.ensemble_mode} "
+        f"members={artifact.context.member_ids}",
         flush=True,
     )
 

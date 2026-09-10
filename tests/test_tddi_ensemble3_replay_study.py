@@ -9,17 +9,17 @@ import pytest
 import torch
 
 from src.data.fixed_budget_replay import FixedBudgetReplayBuffer
-from src.eval.cil_evaluation import PredictionOutputs
-from src.eval.member_predictions import (
+from src.data.sample_identity import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
+from src.eval.evaluation import PredictionOutputs
+from src.eval.predictions import (
     MemberPredictionContext,
     export_member_prediction_artifact,
     load_member_prediction_artifact,
 )
-from src.eval.offline_ensemble import (
+from src.eval.ensemble_ue import (
     aggregate_member_predictions,
     export_offline_ensemble_artifact,
 )
-from src.eval.s02_artifacts import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
 from src.training.replay_checkpoint import save_replay_checkpoint
 from src.training.tddi_ensemble3_study import (
     REPLAY_CHECKPOINT_POLICY,
@@ -300,7 +300,7 @@ def test_replay_cli_dry_run_is_side_effect_free(
 
 def test_full8_p3_config_is_locked_to_requested_contract() -> None:
     config = load_study_config(
-        Path("configs/tddi_ensemble3_replay_distill_p3_seed0.json")
+        Path("configs/train_tddi_p3_replay_distill_ensemble3_stratified_3fold_seed0.json")
     )
 
     assert config.task_file.as_posix().endswith(
@@ -340,9 +340,12 @@ def test_full8_p3_config_is_locked_to_requested_contract() -> None:
     assert config.replay_draws_per_epoch == 6800
     assert config.prediction_splits == ("validation", "test")
     assert config.member_ids == (0, 1, 2)
+    assert config.ensemble_mode == "stratified_3fold"
+    assert config.fold_count == 3
+    assert config.fold_seed == 42
     assert len({derive_member_seed(0, member_id) for member_id in config.member_ids}) == 3
     assert "outputs/full/" in config.output_root.as_posix()
-    assert config.output_root.name.endswith("_v1")
+    assert config.output_root.name.endswith("_3fold_v2")
     assert "smoke" not in config.output_root.as_posix().casefold()
 
 
@@ -437,7 +440,7 @@ def test_replay_execution_is_0_1_2_then_aligned_ensemble_and_manifest(
             active_member = None
             return
 
-        assert "offline_ensemble.py" in command[1]
+        assert "ensemble_ue.py" in command[1]
         assert active_member is None
         assert [call[1] for call in calls if call[0] == "train"] == [0, 1, 2]
         source_start = command.index("--member-artifacts") + 1

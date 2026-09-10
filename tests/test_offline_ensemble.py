@@ -6,11 +6,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.eval.member_predictions import (
+from src.eval.predictions import (
     MemberPredictionArtifact,
     MemberPredictionContext,
 )
-from src.eval.offline_ensemble import (
+from src.eval.ensemble_ue import (
     _normalize_mi_by_member_count,
     aggregate_member_predictions,
     export_offline_ensemble_artifact,

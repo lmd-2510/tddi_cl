@@ -46,9 +46,6 @@ sang head mới theo raw class ID.
 Backbone này là paper-size numerical CIL member. Repository không tuyên bố toàn bộ
 training recipe là bản tái tạo chính xác paper T-DDI.
 
-Các preset `small`, `base`, `large` còn lại chỉ là MLP baseline generic và không được
-gọi là T-DDI.
-
 ## Replay và distillation
 
 Method chính là `replay_distill_fixed_budget_uniform`:
@@ -144,7 +141,7 @@ cần checkpoint, resume, member predictions hoặc báo cáo đã tạo.
 ## Config chính
 
 ```text
-configs/tddi_ensemble3_replay_distill_p3_seed0.json
+configs/train_tddi_p3_replay_distill_ensemble3_stratified_3fold_seed0.json
 ```
 
 Thông số chính:
@@ -187,7 +184,7 @@ model và không train:
 
 ```bash
 python src/training/tddi_ensemble3_study.py \
-  --config configs/tddi_ensemble3_replay_distill_p3_seed0.json \
+  --config configs/train_tddi_p3_replay_distill_ensemble3_stratified_3fold_seed0.json \
   --member-id 0
 ```
 
@@ -204,14 +201,14 @@ eval_task_id=seen_all
 split=test_seen_all
 ```
 
-Các metric chính gồm Accuracy, Balanced Accuracy, Macro-F1, Weighted F1 và forgetting.
+Các metric chính gồm Accuracy, Macro-F1, Weighted F1 và forgetting.
 Mean metric qua tám training stage chỉ mô tả trajectory, không được gọi là final model
 performance.
 
-Confidence threshold phải được chọn duy nhất trên validation, lưu thành frozen
-artifact rồi mới áp dụng lên test. Metric threshold luôn phải báo cáo cùng coverage.
-Chất lượng UE cần được đánh giá bằng error-detection AUROC/AUPRC, AURC và risk–coverage;
-diversity cao một mình chưa chứng minh uncertainty hữu ích.
+Config chính dùng stratified 3-fold: threshold được chọn từ prediction OOF; chế độ
+`seeded` vẫn có thể chọn từ validation. Cả hai đều dùng normalized-entropy confidence,
+đóng băng threshold trước khi áp dụng lên test và luôn báo cáo coverage. Xem
+`docs/EVAL_PIPELINE.md` để biết contract hiện hành.
 
 Ba ensemble member không được dùng thay cho nhiều experiment seed. Muốn báo cáo
 `mean ± sample standard deviation` qua năm seed, cần chạy đầy đủ experiment seed 0–4,
@@ -221,15 +218,14 @@ mỗi seed gồm ba member riêng.
 
 1. `docs/TDDI_PAPER_REPLAY_DISTILL_P3_8TASK_GPU_RUNBOOK.md` — setup và lệnh chạy trên
    máy GPU.
-2. `docs/TDDI_REPLAY_DISTILL_ENSEMBLE3_FILES_GUIDE.md` — vai trò của các file đã triển
-   khai.
+2. `docs/EVAL_PIPELINE.md` — hai chế độ ensemble, OOF, normalized entropy và threshold.
 3. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — kết quả P3 và giải thích metric.
 
 Final report mở rộng được dựng lại từ artifact đã có bằng:
 
 ```bash
-python src/eval/build_final_report.py \
-  --full-root outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_v1 \
+python src/eval/report.py \
+  --full-root outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_3fold_v2 \
   --task-file study_assets/task_protocols/tail_to_head_tasks.json \
   --overwrite
 ```

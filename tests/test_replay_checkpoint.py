@@ -21,7 +21,8 @@ from src.training.replay_checkpoint import (
     restore_replay_model,
     save_replay_checkpoint,
 )
-from src.training.train_cil import expand_model_for_seen_classes, main
+from src.training.train_cil import main
+from tests.tiny_tddi import expand_tiny_tddi, tiny_tddi_model
 
 
 SEED_METADATA = {
@@ -33,7 +34,7 @@ SEED_METADATA = {
 }
 CHECKPOINT_CONFIG = {
     "method": "replay_distill_fixed_budget_uniform",
-    "variant": "small",
+    "variant": "tddi_paper_member",
     "task_file_sha256": "task-hash",
     "total_memory_budget": 4,
     "replay_draws_per_epoch": 4,
@@ -41,16 +42,7 @@ CHECKPOINT_CONFIG = {
 
 
 def _model(class_map: dict[int, int]) -> torch.nn.Module:
-    return expand_model_for_seen_classes(
-        previous_model=None,
-        previous_seen_map=None,
-        current_seen_map=class_map,
-        variant="small",
-        input_dim=2,
-        dropout=0.0,
-        activation="relu",
-        norm="none",
-    )
+    return tiny_tddi_model(class_map, input_dim=2, hidden_dim=4)
 
 
 def _buffer() -> FixedBudgetReplayBuffer:
@@ -283,14 +275,14 @@ def _argv(inputs: tuple[Path, ...], outdir: Path) -> list[str]:
         "--task-file", str(tasks),
         "--outdir", str(outdir),
         "--method", "replay_distill_fixed_budget_uniform",
-        "--variant", "small",
+        "--variant", "tddi_paper_member",
         "--batch-size", "4",
         "--effective-batch-size", "4",
         "--epochs", "1",
         "--patience", "1",
         "--device", "cpu",
         "--dropout", "0",
-        "--norm", "none",
+        "--norm", "layernorm",
         "--focal-gamma", "0",
         "--total-memory-budget", "6",
         "--replay-draws-per-epoch", "4",
@@ -306,6 +298,17 @@ def _normalized_frame(path: Path) -> pd.DataFrame:
     return frame
 
 
+def _run_tiny_main(argv: list[str]) -> None:
+    from src.training import train_cil
+
+    with (
+        patch.object(sys, "argv", argv),
+        patch.object(train_cil, "TDDI_PAPER_INPUT_DIM", 2),
+        patch.object(train_cil, "expand_model_for_seen_classes", expand_tiny_tddi),
+    ):
+        main()
+
+
 def test_continuous_and_task_boundary_resume_match_for_two_task_training(
     tmp_path: Path,
 ) -> None:
@@ -313,8 +316,7 @@ def test_continuous_and_task_boundary_resume_match_for_two_task_training(
     continuous_out = tmp_path / "continuous"
     resumed_out = tmp_path / "resumed"
 
-    with patch.object(sys, "argv", _argv(inputs, continuous_out)):
-        main()
+    _run_tiny_main(_argv(inputs, continuous_out))
 
     from src.training import train_cil
 
@@ -330,9 +332,8 @@ def test_continuous_and_task_boundary_resume_match_for_two_task_training(
         return result
 
     with patch.object(train_cil, "save_replay_checkpoint", stop_after_first_boundary):
-        with patch.object(sys, "argv", _argv(inputs, resumed_out)):
-            with pytest.raises(BoundaryReached):
-                main()
+        with pytest.raises(BoundaryReached):
+            _run_tiny_main(_argv(inputs, resumed_out))
 
     resume_path = resumed_out / "checkpoints" / "latest_replay_distill_state.pt"
     completed_task_model = resumed_out / "checkpoints" / "task_0_model.pt"
@@ -342,8 +343,7 @@ def test_continuous_and_task_boundary_resume_match_for_two_task_training(
         "--resume-replay-checkpoint",
         str(resume_path),
     ]
-    with patch.object(sys, "argv", resume_argv):
-        main()
+    _run_tiny_main(resume_argv)
 
     assert completed_task_model.read_bytes() == completed_task_model_bytes
 

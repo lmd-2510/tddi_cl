@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validation-only confidence-threshold selection for offline ensembles."""
+"""Paper-style entropy threshold selection from OOF or seeded validation."""
 
 from __future__ import annotations
 
@@ -20,14 +20,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.eval.calibration_metrics import (  # noqa: E402
-    expected_calibration_error,
-    map_raw_labels_to_indices,
-    multiclass_brier_score,
-    negative_log_likelihood,
-)
-from src.eval.classification_metrics import compute_classification_metrics  # noqa: E402
-from src.eval.offline_ensemble import (  # noqa: E402
+from src.eval.metrics import compute_aurc, compute_classification_metrics  # noqa: E402
+from src.eval.ensemble_ue import (  # noqa: E402
     OfflineEnsembleArtifact,
     load_offline_ensemble_artifact,
 )
@@ -39,7 +33,9 @@ LEGACY_FROZEN_THRESHOLD_SCHEMA_VERSIONS = (1, 2)
 FROZEN_THRESHOLD_KIND = "ddi_cil_frozen_confidence_threshold"
 THRESHOLD_REPORT_SCHEMA_VERSION = 2
 THRESHOLD_REPORT_KIND = "ddi_cil_confidence_threshold_report"
-SUPPORTED_SELECTION_RULE = "max_macro_f1_subject_to_min_coverage"
+PAPER_SELECTION_RULE = "smallest_threshold_meeting_target_accuracy"
+LEGACY_SELECTION_RULE = "max_macro_f1_subject_to_min_coverage"
+SUPPORTED_SELECTION_RULES = (PAPER_SELECTION_RULE, LEGACY_SELECTION_RULE)
 SUPPORTED_TIE_BREAKERS = ("accuracy", "coverage", "lower_threshold")
 SUPPORTED_CONFIDENCE_SCORES = ("entropy_confidence", "max_probability")
 LEGACY_CONFIDENCE_SCORE = "entropy_confidence"
@@ -56,6 +52,8 @@ class ThresholdSelectionConfig:
     calibration_bins: int
     confidence_score: str
     probability_source: str
+    target_accuracy: float | None
+    low_threshold: float
     sha256: str
     source_path: Path = field(compare=False, repr=False)
 
@@ -85,6 +83,8 @@ class FrozenThresholdArtifact:
     confidence_score: str
     probability_source: str
     candidate_results: tuple[Mapping[str, Any], ...]
+    target_accuracy: float | None = None
+    low_threshold: float = 0.5
     loaded_from_path: Path | None = field(default=None, compare=False, repr=False)
 
 
@@ -129,21 +129,38 @@ def load_threshold_selection_config(path: str | Path) -> ThresholdSelectionConfi
 
     rule_payload = _require_object(payload.get("selection_rule"), "selection_rule")
     rule_name = str(rule_payload.get("name", ""))
-    if rule_name != SUPPORTED_SELECTION_RULE:
+    if rule_name not in SUPPORTED_SELECTION_RULES:
         raise ValueError(f"Unsupported threshold selection rule: {rule_name!r}.")
-    minimum_coverage = float(rule_payload.get("minimum_coverage", -1.0))
+    minimum_coverage = float(rule_payload.get("minimum_coverage", 0.0))
     if not np.isfinite(minimum_coverage) or not 0.0 <= minimum_coverage <= 1.0:
         raise ValueError("selection_rule.minimum_coverage must lie in [0, 1].")
     raw_tie_breakers = rule_payload.get("tie_breakers")
     if not isinstance(raw_tie_breakers, list):
         raise ValueError("selection_rule.tie_breakers must be a JSON list.")
     tie_breakers = tuple(str(value) for value in raw_tie_breakers)
-    if tie_breakers != SUPPORTED_TIE_BREAKERS:
+    if rule_name == LEGACY_SELECTION_RULE and tie_breakers != SUPPORTED_TIE_BREAKERS:
         raise ValueError(
             "selection_rule.tie_breakers must be exactly "
             f"{list(SUPPORTED_TIE_BREAKERS)}."
         )
-    calibration_bins = int(payload.get("calibration_bins", 0))
+    if rule_name == PAPER_SELECTION_RULE and tie_breakers not in {(), ("lower_threshold",)}:
+        raise ValueError("Paper threshold rule only permits the lower_threshold tie breaker.")
+    target_accuracy_raw = rule_payload.get("target_accuracy")
+    target_accuracy = (
+        float(target_accuracy_raw) if target_accuracy_raw is not None else None
+    )
+    if rule_name == PAPER_SELECTION_RULE:
+        if target_accuracy is None or not 0.0 < target_accuracy <= 1.0:
+            raise ValueError("Paper threshold rule requires target_accuracy in (0, 1].")
+        if confidence_score := payload.get("confidence_score"):
+            if str(confidence_score) != "entropy_confidence":
+                raise ValueError("Paper threshold rule only supports entropy_confidence.")
+    low_threshold = float(payload.get("low_threshold", 0.5))
+    if not 0.0 <= low_threshold <= 1.0:
+        raise ValueError("low_threshold must lie in [0, 1].")
+    # Retained only to load legacy frozen artifacts; current reports do not
+    # calculate calibration metrics.
+    calibration_bins = int(payload.get("calibration_bins", 15))
     if calibration_bins <= 0:
         raise ValueError("calibration_bins must be positive.")
     # Schema-1 configs predate the explicit field. Their historical behavior
@@ -171,6 +188,8 @@ def load_threshold_selection_config(path: str | Path) -> ThresholdSelectionConfi
         calibration_bins=calibration_bins,
         confidence_score=confidence_score,
         probability_source=probability_source,
+        target_accuracy=target_accuracy,
+        low_threshold=low_threshold,
         sha256=_sha256_file(path),
         source_path=path.resolve(),
     )
@@ -230,12 +249,18 @@ def select_confidence_threshold(
     *,
     source_ensemble_path: str | Path,
 ) -> FrozenThresholdArtifact:
-    """Select on validation only; the returned object is not yet frozen on disk."""
+    """Select from the mode-appropriate OOF/validation source."""
 
-    if validation_ensemble.context.split.casefold() != "validation":
+    expected_source = (
+        "oof"
+        if validation_ensemble.context.ensemble_mode == "stratified_3fold"
+        else "validation"
+    )
+    if validation_ensemble.context.split.casefold() != expected_source:
         raise ValueError(
-            "Confidence threshold selection is validation-only; refusing source split "
-            f"{validation_ensemble.context.split!r}."
+            "Threshold selection is validation-only/OOF-only; "
+            f"{validation_ensemble.context.ensemble_mode} mode requires "
+            f"{expected_source!r}; got {validation_ensemble.context.split!r}."
         )
     if config.probability_source != "raw":
         raise ValueError(
@@ -255,25 +280,35 @@ def select_confidence_threshold(
         )
         for threshold in config.candidate_grid
     )
-    eligible = [
-        candidate
-        for candidate in candidates
-        if candidate["selected_count"] > 0
-        and candidate["coverage"] >= config.minimum_coverage
-    ]
+    eligible = [candidate for candidate in candidates if candidate["selected_count"] > 0]
+    if config.selection_rule == PAPER_SELECTION_RULE:
+        eligible = [
+            candidate
+            for candidate in eligible
+            if float(candidate["accuracy"]) >= float(config.target_accuracy)
+        ]
+    else:
+        eligible = [
+            candidate
+            for candidate in eligible
+            if candidate["coverage"] >= config.minimum_coverage
+        ]
     if not eligible:
         raise ValueError(
-            "No candidate threshold satisfies minimum coverage with at least one sample."
+            "No candidate threshold satisfies the configured selection target."
         )
-    selected = max(
-        eligible,
-        key=lambda candidate: (
-            float(candidate["macro_f1"]),
-            float(candidate["accuracy"]),
-            float(candidate["coverage"]),
-            -float(candidate["threshold"]),
-        ),
-    )
+    if config.selection_rule == PAPER_SELECTION_RULE:
+        selected = min(eligible, key=lambda candidate: float(candidate["threshold"]))
+    else:
+        selected = max(
+            eligible,
+            key=lambda candidate: (
+                float(candidate["macro_f1"]),
+                float(candidate["accuracy"]),
+                float(candidate["coverage"]),
+                -float(candidate["threshold"]),
+            ),
+        )
     return FrozenThresholdArtifact(
         candidate_grid=config.candidate_grid,
         selection_rule=config.selection_rule,
@@ -287,7 +322,7 @@ def select_confidence_threshold(
         validation_total_count=int(selected["total_count"]),
         timestamp_utc=_utc_timestamp(),
         config_sha256=config.sha256,
-        source_split="validation",
+        source_split=expected_source,
         source_ensemble_sha256=_sha256_file(source_path),
         method=validation_ensemble.context.method,
         method_protocol=validation_ensemble.context.method_protocol,
@@ -298,6 +333,8 @@ def select_confidence_threshold(
         confidence_score=config.confidence_score,
         probability_source=config.probability_source,
         candidate_results=candidates,
+        target_accuracy=config.target_accuracy,
+        low_threshold=config.low_threshold,
     )
 
 
@@ -315,7 +352,9 @@ def _frozen_threshold_to_dict(artifact: FrozenThresholdArtifact) -> dict[str, An
             "name": artifact.selection_rule,
             "minimum_coverage": artifact.minimum_coverage,
             "tie_breakers": list(artifact.tie_breakers),
+            "target_accuracy": artifact.target_accuracy,
         },
+        "low_threshold": artifact.low_threshold,
         "selected_threshold": artifact.selected_threshold,
         "validation_metrics": {
             "accuracy": artifact.validation_accuracy,
@@ -360,10 +399,10 @@ def export_frozen_threshold_artifact(
     artifact: FrozenThresholdArtifact,
     path: str | Path,
 ) -> Path:
-    """Persist the selected validation threshold as an immutable JSON artifact."""
+    """Persist the selected OOF/validation threshold as an immutable JSON artifact."""
 
-    if artifact.source_split != "validation":
-        raise ValueError("A frozen threshold must originate from validation.")
+    if artifact.source_split not in {"validation", "oof"}:
+        raise ValueError("A frozen threshold must originate from validation or OOF.")
     return _atomic_write_json(_frozen_threshold_to_dict(artifact), path)
 
 
@@ -395,8 +434,8 @@ def load_frozen_threshold_artifact(
     if payload.get("artifact_kind") != FROZEN_THRESHOLD_KIND or payload.get("frozen") is not True:
         raise ValueError("File is not a frozen DDI-CIL confidence threshold artifact.")
     source = _require_object(payload.get("source"), "source")
-    if source.get("split") != "validation":
-        raise ValueError("Frozen threshold source split must be validation, never test.")
+    if source.get("split") not in {"validation", "oof"}:
+        raise ValueError("Frozen threshold source split must be validation or OOF, never test.")
     rule = _require_object(payload.get("selection_rule"), "selection_rule")
     metrics = _require_object(payload.get("validation_metrics"), "validation_metrics")
     candidates = payload.get("candidate_results")
@@ -431,6 +470,12 @@ def load_frozen_threshold_artifact(
             payload.get("probability_source", LEGACY_PROBABILITY_SOURCE)
         ),
         candidate_results=tuple(_require_object(value, "candidate result") for value in candidates),
+        target_accuracy=(
+            None
+            if rule.get("target_accuracy") is None
+            else float(rule.get("target_accuracy"))
+        ),
+        low_threshold=float(payload.get("low_threshold", 0.5)),
         loaded_from_path=path.resolve(),
     )
     _validate_frozen_threshold(artifact)
@@ -446,6 +491,8 @@ def load_frozen_threshold_artifact(
             or artifact.calibration_bins != config.calibration_bins
             or artifact.confidence_score != config.confidence_score
             or artifact.probability_source != config.probability_source
+            or artifact.target_accuracy != config.target_accuracy
+            or artifact.low_threshold != config.low_threshold
         ):
             raise ValueError("Frozen threshold metadata does not match the supplied config.")
     return artifact
@@ -456,10 +503,18 @@ def _validate_frozen_threshold(artifact: FrozenThresholdArtifact) -> None:
         raise ValueError("Frozen threshold grid must be strictly increasing and non-empty.")
     if any(value < 0.0 or value > 1.0 for value in artifact.candidate_grid):
         raise ValueError("Frozen threshold grid values must lie in [0, 1].")
-    if artifact.selection_rule != SUPPORTED_SELECTION_RULE:
+    if artifact.selection_rule not in SUPPORTED_SELECTION_RULES:
         raise ValueError("Unsupported frozen threshold selection rule.")
-    if artifact.tie_breakers != SUPPORTED_TIE_BREAKERS:
+    if (
+        artifact.selection_rule == LEGACY_SELECTION_RULE
+        and artifact.tie_breakers != SUPPORTED_TIE_BREAKERS
+    ):
         raise ValueError("Unsupported frozen threshold tie breakers.")
+    if (
+        artifact.selection_rule == PAPER_SELECTION_RULE
+        and artifact.tie_breakers not in {(), ("lower_threshold",)}
+    ):
+        raise ValueError("Unsupported paper-rule tie breakers.")
     if artifact.confidence_score not in SUPPORTED_CONFIDENCE_SCORES:
         raise ValueError("Unsupported frozen threshold confidence_score.")
     if artifact.probability_source not in SUPPORTED_PROBABILITY_SOURCES:
@@ -483,8 +538,17 @@ def _validate_frozen_threshold(artifact: FrozenThresholdArtifact) -> None:
         raise ValueError("Frozen validation counts are invalid.")
     if not artifact.timestamp_utc or len(artifact.config_sha256) != 64:
         raise ValueError("Frozen threshold timestamp/config hash is invalid.")
-    if artifact.source_split != "validation":
-        raise ValueError("Frozen threshold source split must be validation.")
+    if artifact.source_split not in {"validation", "oof"}:
+        raise ValueError("Frozen threshold source split must be validation or OOF.")
+    if not 0.0 <= artifact.low_threshold <= 1.0:
+        raise ValueError("Frozen low_threshold must lie in [0, 1].")
+    if artifact.low_threshold > artifact.selected_threshold:
+        raise ValueError("Frozen low_threshold cannot exceed selected_threshold.")
+    if artifact.selection_rule == PAPER_SELECTION_RULE:
+        if artifact.target_accuracy is None or not 0.0 < artifact.target_accuracy <= 1.0:
+            raise ValueError("Frozen paper threshold requires target_accuracy in (0, 1].")
+        if artifact.confidence_score != "entropy_confidence":
+            raise ValueError("Frozen paper threshold requires entropy_confidence.")
     if not artifact.source_ensemble_sha256 or len(artifact.source_ensemble_sha256) != 64:
         raise ValueError("Frozen source ensemble hash is invalid.")
     if not artifact.method or not artifact.method_protocol:
@@ -545,8 +609,14 @@ def evaluate_with_frozen_threshold(
         raise ValueError(
             "Test evaluation requires a frozen threshold loaded from its artifact file."
         )
-    if threshold.source_split != "validation":
-        raise ValueError("Evaluation threshold must have been selected from validation.")
+    expected_source = (
+        "oof" if ensemble.context.ensemble_mode == "stratified_3fold" else "validation"
+    )
+    if threshold.source_split != expected_source:
+        raise ValueError(
+            f"{ensemble.context.ensemble_mode} evaluation requires a threshold from "
+            f"{expected_source}, got {threshold.source_split}."
+        )
     if threshold.probability_source != "raw":
         raise ValueError(
             "Frozen threshold expects calibrated probabilities; refusing to apply it "
@@ -560,8 +630,6 @@ def evaluate_with_frozen_threshold(
         ensemble.predictions,
         labels=class_ids,
     )
-    dense_labels = map_raw_labels_to_indices(ensemble.labels, ensemble.raw_class_ids)
-    probabilities = np.asarray(ensemble.probabilities, dtype=np.float64)
     selected = _selected_metrics(
         ensemble,
         threshold.selected_threshold,
@@ -572,11 +640,29 @@ def evaluate_with_frozen_threshold(
         threshold.selected_threshold,
         confidence_score="entropy_confidence",
     )
-    max_probability_ece = expected_calibration_error(
-        probabilities,
-        dense_labels,
-        num_bins=threshold.calibration_bins,
-    )
+    confidence = np.asarray(ensemble.entropy_confidence, dtype=np.float64)
+
+    def tier_metrics(mask: np.ndarray) -> dict[str, Any]:
+        count = int(mask.sum())
+        payload: dict[str, Any] = {
+            "sample_count": count,
+            "coverage": float(count / ensemble.row_count),
+        }
+        if count == 0:
+            payload.update({"accuracy": None, "macro_f1": None, "weighted_f1": None})
+        else:
+            payload.update(
+                compute_classification_metrics(
+                    ensemble.labels[mask],
+                    ensemble.predictions[mask],
+                    labels=class_ids,
+                )
+            )
+        return payload
+
+    high_mask = confidence >= threshold.selected_threshold
+    medium_mask = (confidence >= threshold.low_threshold) & ~high_mask
+    low_mask = confidence < threshold.low_threshold
     selected_metrics = {
         "selected_count": selected["selected_count"],
         "total_count": selected["total_count"],
@@ -624,15 +710,12 @@ def evaluate_with_frozen_threshold(
         },
         "full_set": {
             "sample_count": ensemble.row_count,
-            "accuracy": full_classification["accuracy"],
-            "macro_f1": full_classification["macro_f1"],
-            "ece_score_name": "max_probability",
-            "max_probability_ece": max_probability_ece,
-            # Compatibility alias: ECE has always been computed from maximum
-            # ensemble probability, never entropy confidence.
-            "ece": max_probability_ece,
-            "negative_log_likelihood": negative_log_likelihood(probabilities, dense_labels),
-            "brier_score": multiclass_brier_score(probabilities, dense_labels),
+            **full_classification,
+            "aurc": compute_aurc(
+                ensemble.labels,
+                ensemble.predictions,
+                ensemble.entropy_confidence,
+            ),
         },
         "threshold_score_selective_metrics": {
             "threshold_score_name": threshold.confidence_score,
@@ -641,6 +724,13 @@ def evaluate_with_frozen_threshold(
             **selected_metrics,
         },
         "entropy_confidence_selective_metrics": entropy_selective_metrics,
+        "confidence_tiers": {
+            "low_threshold": threshold.low_threshold,
+            "high_threshold": threshold.selected_threshold,
+            "high": tier_metrics(high_mask),
+            "medium": tier_metrics(medium_mask),
+            "low": tier_metrics(low_mask),
+        },
         # Compatibility alias. Its score semantics are stated explicitly by
         # threshold_score_name above and must not be described as probability.
         "high_confidence": selected_metrics,
@@ -655,10 +745,10 @@ def export_threshold_report(report: Mapping[str, Any], path: str | Path) -> Path
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Select/freeze a validation confidence threshold or evaluate with it."
+        description="Select/freeze an OOF or validation entropy threshold and evaluate it."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    select = subparsers.add_parser("select", help="Select using validation only and freeze.")
+    select = subparsers.add_parser("select", help="Select using OOF/validation and freeze.")
     select.add_argument("--ensemble", required=True, type=Path)
     select.add_argument("--config", required=True, type=Path)
     select.add_argument("--threshold-out", required=True, type=Path)

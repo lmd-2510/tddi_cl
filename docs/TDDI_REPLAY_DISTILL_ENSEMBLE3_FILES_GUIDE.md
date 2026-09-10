@@ -1,10 +1,12 @@
 # Bản đồ code đầy đủ — T-DDI Ensemble3 Replay-Distill P3
 
+> Lưu ý: đây là tài liệu lịch sử của pipeline seeded `_v1`. Contract đang dùng nằm ở `docs/EVAL_PIPELINE.md`.
+
 Tài liệu này trả lời bốn câu hỏi:
 
 1. Study hiện tại thực sự dùng những file nào?
 2. Mỗi file giữ trách nhiệm gì và gọi file nào khác?
-3. Những file có tên EWC, GEM, TabM, S02… có tham gia study này không?
+3. Những file có tên EWC, GEM… có tham gia study này không?
 4. Dữ liệu đi qua pipeline như thế nào và từng metric có ý nghĩa gì?
 
 ## 1. Study đang được khóa như thế nào?
@@ -32,7 +34,7 @@ Tên đầy đủ của thí nghiệm có thể đọc là:
 
 `tddi_paper_member` trong repo là **paper-size numerical CIL member** đã được thiết kế
 cho study này. Nó không tuyên bố tái tạo toàn bộ training recipe nguyên bản của paper
-T-DDI. Các baseline MLP `small/base/large` không phải backbone của study này.
+T-DDI.
 
 ## 2. Chú giải mức độ liên quan
 
@@ -83,7 +85,7 @@ config study + frozen assets + parquet data
 
 ### 4.1 Config điều khiển study
 
-#### `configs/tddi_ensemble3_replay_distill_p3_seed0.json` — **CORE**
+#### `configs/train_tddi_p3_replay_distill_ensemble3_stratified_3fold_seed0.json` — **CORE TRAIN (STRATIFIED 3-FOLD)**
 
 Đây là contract chính của cả thí nghiệm. Nó khóa:
 
@@ -107,7 +109,7 @@ Orchestrator đọc file này và chuyển các trường thành CLI cho `train_
 hyperparameter ở đây mới là cách đúng để thay đổi toàn bộ study; không nên sửa default
 rải rác trong mã nguồn.
 
-#### `configs/tddi_ensemble_confidence_threshold_full_p3_primary.json` — **OFFLINE**
+#### `configs/eval_tddi_p3_ensemble_entropy_threshold.json` — **OFFLINE EVALUATION**
 
 Config threshold chính:
 
@@ -240,6 +242,13 @@ Các interface:
 
 Numerical member chỉ sử dụng 3.780 feature. Drug name, SMILES và ID là metadata, không
 được ghép vào tensor đầu vào.
+
+### 6.2a `src/data/sample_identity.py` — **CORE/SHARED**
+
+Định nghĩa tên hai cột drug ID và tạo stable sample ID `drugA|drugB`. Member prediction
+dùng ID này để chứng minh các hàng của member 0/1/2 nói về cùng một mẫu trước khi
+offline ensemble. Module nằm ở `src/data` vì đây là quy tắc định danh riêng của dữ
+liệu DDI, đồng thời có thể tái sử dụng cho pipeline chia development folds.
 
 ### 6.3 `src/data/class_mapping.py` — **CORE**
 
@@ -439,12 +448,6 @@ Mỗi member/task/split xuất `.npz` chứa schema, provenance, task/split/memb
 stable sample IDs, labels, logits, probabilities và raw class-column order. Loader
 chặn duplicate ID, shape/width sai, non-finite, probability không tổng bằng 1 hoặc
 không khớp `softmax(logits)`. Ghi atomic và không ghi đè.
-
-### 9.6 `src/eval/s02_artifacts.py` — **SHARED một phần**
-
-Current member export chỉ tái sử dụng tên cột drug ID và
-`build_stable_sample_ids()` tạo ID `drugA|drugB`. Phần S02 export cũ chỉ chạy nếu bật
-`--export-s02`; config P3 hiện không bật.
 
 ## 10. Offline ensemble và UE
 
@@ -754,25 +757,17 @@ method chính `replay_distill_fixed_budget_uniform`.
 
 | File | Vai trò khác | Có tham gia P3 numerical study? |
 |---|---|---|
-| `src/models/mlp.py` | Baseline `small/base/large` | Không. |
-| `src/models/tabm_classifier.py` | TabM | Không. |
-| `src/models/ddi_gcn.py` | Graph backbone | Không. |
-| `src/data/backbone_inputs.py` | Graph/pair-index input | Không. |
-| `src/data/molecular_graphs.py` | Graph bank/cache | Không. |
-| `src/data/replay_buffer.py` | Replay buffer per-class cũ | Không. |
-| `src/training/train_static.py` | Static baseline training | Không. |
 
 Import không đồng nghĩa thực thi; `--method` và `--variant` quyết định nhánh runtime.
 
-### 18.3 Evaluation khác
+### 18.3 Evaluation dùng chung
 
 | File | Vai trò | Quan hệ current study |
 |---|---|---|
-| `src/eval/run_s03_calibration.py` | Calibration pipeline S02 cũ | Không dùng; current dùng offline temperature module. |
-| `src/eval/run_s04_aggregation.py` | Aggregate run/seed study cũ | Không tạo Ensemble3 P3 report. |
-| `src/eval/rare_class_metrics.py` | Rare-class helper generic | Không dùng; UE audit có grouping riêng. |
-| `src/eval/s02_artifacts.py` | S02 export cũ | Chỉ dùng stable-ID helper. |
 | `src/eval/calibration_metrics.py` | Công thức calibration dùng chung | Có dùng. |
+
+Pipeline S02/S03/S04 legacy và rare-class helper trùng chức năng đã được gỡ. Stable
+sample identity cần cho current ensemble đã được chuyển sang `src/data/sample_identity.py`.
 
 Các `src/**/__init__.py` đánh dấu Python package; chúng không tự chạy model/metric.
 
@@ -799,18 +794,16 @@ Các `src/**/__init__.py` đánh dấu Python package; chúng không tự chạy
 
 Chúng dùng synthetic data nhỏ; pytest chạy nhanh không phải full training.
 
-### Tests nhánh khác — **OTHER TEST**
+### Shared regression tests
 
-| Test | Nhánh |
+| Test | Bảo vệ cho current study |
 |---|---|
-| `tests/test_ewc_checkpoint.py`, `tests/test_tddi_paper_member_ewc.py` | EWC. |
-| `tests/test_gem_agem.py` | GEM/A-GEM. |
-| `tests/test_backbone_adapters.py` | TabM/DDI-GCN. |
-| `tests/test_s02_prediction_export.py` | S02 export. |
-| `tests/test_s03_calibration.py` | Calibration cũ. |
-| `tests/test_s04_aggregation.py` | Aggregation cũ. |
-| `tests/test_s01_hardening.py` | Shared/legacy invariants. |
-| `tests/test_tddi_ensemble3_study.py` | EWC orchestrator compatibility. |
+| `tests/test_backbone_adapters.py` | Exemplar ranking và gradient accumulation. |
+| `tests/test_s01_hardening.py` | Class alignment và run-directory integrity. |
+
+Các test chỉ dành cho EWC, GEM/A-GEM và EWC orchestrator compatibility đã được gỡ để
+test suite tập trung vào `replay_distill_fixed_budget_uniform × tddi_paper_member ×
+Ensemble3 P3`.
 
 ## 20. Muốn thay đổi gì thì sửa ở đâu?
 

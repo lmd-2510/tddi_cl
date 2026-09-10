@@ -128,7 +128,6 @@ def test_paper_member_manifest_records_derived_architecture(tmp_path: Path) -> N
     task_file.write_text(json.dumps(task_spec), encoding="utf-8")
     args = Namespace(
         method="ewc",
-        memory_per_class=50,
         variant="tddi_paper_member",
         task_file=task_file,
         experiment_seed=0,
@@ -138,7 +137,6 @@ def test_paper_member_manifest_records_derived_architecture(tmp_path: Path) -> N
         seed_mode="member",
         dropout=0.15,
         activation="relu",
-        graph_cache=None,
     )
     output_path = tmp_path / "run_config.json"
 

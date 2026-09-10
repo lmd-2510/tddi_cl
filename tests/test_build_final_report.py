@@ -7,10 +7,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.eval.build_final_report import build_final_report
-from src.eval.classification_metrics import compute_classification_metrics
-from src.eval.member_predictions import MemberPredictionArtifact, MemberPredictionContext
-from src.eval.offline_ensemble import (
+from src.eval.report import build_final_report
+from src.eval.metrics import compute_classification_metrics
+from src.eval.predictions import MemberPredictionArtifact, MemberPredictionContext
+from src.eval.ensemble_ue import (
     aggregate_member_predictions,
     export_offline_ensemble_artifact,
 )

@@ -10,11 +10,15 @@ from typing import Mapping
 
 import numpy as np
 
-from src.eval.cil_evaluation import PredictionOutputs
-from src.eval.s02_artifacts import SUPPORTED_SPLITS, build_stable_sample_ids
+from src.data.sample_identity import (
+    SUPPORTED_PREDICTION_SPLITS,
+    build_stable_sample_ids,
+)
+from src.eval.evaluation import PredictionOutputs
 
 
-MEMBER_PREDICTION_SCHEMA_VERSION = 1
+MEMBER_PREDICTION_SCHEMA_VERSION = 2
+LEGACY_MEMBER_PREDICTION_SCHEMA_VERSION = 1
 MEMBER_PREDICTION_KIND = "ddi_cil_member_predictions"
 
 
@@ -28,6 +32,10 @@ class MemberPredictionContext:
     member_id: int
     experiment_seed: int
     member_seed: int
+    ensemble_mode: str = "seeded"
+    fold_id: int | None = None
+    fold_count: int | None = None
+    fold_seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -55,12 +63,23 @@ def _validate_context(context: MemberPredictionContext) -> None:
         raise ValueError("Member prediction method provenance must be non-empty.")
     if context.task_id < 0:
         raise ValueError("Member prediction task_id must be non-negative.")
-    if context.split not in SUPPORTED_SPLITS:
+    if context.split not in SUPPORTED_PREDICTION_SPLITS:
         raise ValueError(f"Unsupported member prediction split: {context.split}")
     if context.member_id < 0:
         raise ValueError("Member prediction member_id must be non-negative.")
     if context.experiment_seed < 0 or context.member_seed < 0:
         raise ValueError("Member prediction seeds must be non-negative.")
+    if context.ensemble_mode not in {"seeded", "stratified_3fold"}:
+        raise ValueError(f"Unsupported ensemble mode: {context.ensemble_mode!r}.")
+    if context.ensemble_mode == "stratified_3fold":
+        if context.fold_count != 3:
+            raise ValueError("stratified_3fold member artifacts require fold_count=3.")
+        if context.fold_id is None or not 0 <= context.fold_id < context.fold_count:
+            raise ValueError("stratified_3fold member artifacts require fold_id in [0, 2].")
+        if context.fold_seed is None or context.fold_seed < 0:
+            raise ValueError("stratified_3fold member artifacts require a non-negative fold_seed.")
+    elif any(value is not None for value in (context.fold_id, context.fold_count, context.fold_seed)):
+        raise ValueError("seeded member artifacts must not contain fold metadata.")
 
 
 def _validate_arrays(
@@ -184,6 +203,10 @@ def export_member_prediction_artifact(
                 member_id=np.asarray(context.member_id, dtype=np.int32),
                 experiment_seed=np.asarray(context.experiment_seed, dtype=np.int64),
                 member_seed=np.asarray(context.member_seed, dtype=np.int64),
+                ensemble_mode=np.asarray(context.ensemble_mode),
+                fold_id=np.asarray(-1 if context.fold_id is None else context.fold_id, dtype=np.int32),
+                fold_count=np.asarray(-1 if context.fold_count is None else context.fold_count, dtype=np.int32),
+                fold_seed=np.asarray(-1 if context.fold_seed is None else context.fold_seed, dtype=np.int64),
                 sample_ids=sample_ids,
                 labels=labels,
                 raw_class_ids=raw_class_ids,
@@ -234,15 +257,33 @@ def load_member_prediction_artifact(
             "logits",
             "probabilities",
         }
+        declared_schema = (
+            int(np.asarray(payload["schema_version"]).item())
+            if "schema_version" in payload.files
+            else -1
+        )
+        if declared_schema >= 2:
+            required.update({"ensemble_mode", "fold_id", "fold_count", "fold_seed"})
         missing = sorted(required - set(payload.files))
         if missing:
             raise ValueError(f"Member prediction artifact is missing keys: {missing}")
         schema_version = int(_read_scalar(payload, "schema_version"))
         artifact_kind = str(_read_scalar(payload, "artifact_kind"))
-        if schema_version != MEMBER_PREDICTION_SCHEMA_VERSION:
+        if schema_version not in {
+            LEGACY_MEMBER_PREDICTION_SCHEMA_VERSION,
+            MEMBER_PREDICTION_SCHEMA_VERSION,
+        }:
             raise ValueError(f"Unsupported member prediction schema version: {schema_version}.")
         if artifact_kind != MEMBER_PREDICTION_KIND:
             raise ValueError(f"Unexpected member prediction artifact kind: {artifact_kind!r}.")
+        ensemble_mode = (
+            str(_read_scalar(payload, "ensemble_mode"))
+            if schema_version >= MEMBER_PREDICTION_SCHEMA_VERSION
+            else "seeded"
+        )
+        raw_fold_id = int(_read_scalar(payload, "fold_id")) if schema_version >= 2 else -1
+        raw_fold_count = int(_read_scalar(payload, "fold_count")) if schema_version >= 2 else -1
+        raw_fold_seed = int(_read_scalar(payload, "fold_seed")) if schema_version >= 2 else -1
         context = MemberPredictionContext(
             run_id=str(_read_scalar(payload, "run_id")),
             method=str(_read_scalar(payload, "method")),
@@ -252,6 +293,10 @@ def load_member_prediction_artifact(
             member_id=int(_read_scalar(payload, "member_id")),
             experiment_seed=int(_read_scalar(payload, "experiment_seed")),
             member_seed=int(_read_scalar(payload, "member_seed")),
+            ensemble_mode=ensemble_mode,
+            fold_id=None if raw_fold_id < 0 else raw_fold_id,
+            fold_count=None if raw_fold_count < 0 else raw_fold_count,
+            fold_seed=None if raw_fold_seed < 0 else raw_fold_seed,
         )
         artifact = _artifact_from_arrays(
             context,

@@ -25,14 +25,13 @@ try:
     import torch
     import torch.nn.functional as F
     from torch import nn
-    from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
+    from torch.utils.data import DataLoader, TensorDataset
 except ImportError:  # pragma: no cover - environment may not have torch yet
     torch = None
     F = None
     nn = None
     DataLoader = None
     TensorDataset = None
-    WeightedRandomSampler = None
 
 from src.data.class_mapping import build_seen_class_map, invert_class_map, remap_labels, save_class_map
 from src.data.ddi_dataset import (
@@ -46,19 +45,21 @@ from src.data.fixed_budget_replay import (
     FixedReplaySampler,
     ReplayEpochAudit,
 )
-from src.data.backbone_inputs import load_ddi_gcn_split_arrays
-from src.data.molecular_graphs import MolecularGraphBank, load_graph_bank
-from src.data.replay_buffer import ReplayBuffer
-from src.eval.cil_evaluation import EvaluationResult, evaluate_model
-from src.eval.classwise_metrics import ClasswiseTracker
-from src.eval.continual_metrics import compute_forgetting, init_result_matrix, result_matrix_to_frame
-from src.eval.s02_artifacts import (
-    DRUG_ID_A_COLUMN,
-    DRUG_ID_B_COLUMN,
-    S02ExportContext,
-    export_s02_artifacts,
+from src.data.sample_identity import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
+from src.data.stratified_folds import (
+    StratifiedFoldAssignments,
+    build_stratified_fold_assignments,
+    select_development_fold,
 )
-from src.eval.member_predictions import (
+from src.eval.evaluation import EvaluationResult, evaluate_model
+from src.eval.metrics import (
+    ClasswiseTracker,
+    compute_average_incremental_macro_f1,
+    compute_forgetting,
+    init_result_matrix,
+    result_matrix_to_frame,
+)
+from src.eval.predictions import (
     MemberPredictionContext,
     export_member_prediction_artifact,
 )
@@ -72,9 +73,6 @@ from src.methods.gem import (
     trainable_parameters,
 )
 from src.methods.replay import build_training_arrays as build_replay_training_arrays
-from src.models.mlp import MLP, preset_config
-from src.models.ddi_gcn import DDIGCNClassifier
-from src.models.tabm_classifier import TabMClassifier
 from src.models.tddi_paper_member import (
     TDDI_PAPER_INPUT_DIM,
     TDDIPaperMember,
@@ -100,9 +98,7 @@ from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 
 
 FIXED_BUDGET_METHOD = "replay_distill_fixed_budget_uniform"
-STANDARD_REPLAY_METHODS = {"replay"}
 DISTILL_METHODS = {FIXED_BUDGET_METHOD}
-ALL_REPLAY_METHODS = STANDARD_REPLAY_METHODS | {FIXED_BUDGET_METHOD}
 GRADIENT_EPISODIC_METHODS = {"gem", "agem"}
 
 
@@ -125,7 +121,7 @@ class FocalLoss(nn.Module if nn is not None else object):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train the locked T-DDI protocol study or generic baseline models."
+        description="Train the numerical T-DDI paper-member continual-learning study."
     )
     parser.add_argument("--train", required=True, type=Path)
     parser.add_argument("--validation", required=True, type=Path)
@@ -137,7 +133,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--method",
         choices=[
-            "replay",
             FIXED_BUDGET_METHOD,
             "ewc",
             "gem",
@@ -147,14 +142,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--variant",
-        choices=[
-            "small",
-            "base",
-            "large",
-            "tddi_paper_member",
-            "tabm",
-            "ddi_gcn",
-        ],
+        choices=["tddi_paper_member"],
         default="tddi_paper_member",
     )
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -189,8 +177,19 @@ def parse_args() -> argparse.Namespace:
             "uses a deterministic member seed derived from --seed."
         ),
     )
+    parser.add_argument(
+        "--ensemble-mode",
+        choices=["seeded", "stratified_3fold"],
+        default="seeded",
+        help=(
+            "seeded trains every member on the original train/validation split; "
+            "stratified_3fold trains on two development folds and validates on the third."
+        ),
+    )
+    parser.add_argument("--fold-id", type=int, default=None)
+    parser.add_argument("--fold-count", type=int, default=3)
+    parser.add_argument("--fold-seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--memory-per-class", type=int, default=50)
     parser.add_argument("--total-memory-budget", type=int, default=6800)
     parser.add_argument("--replay-draws-per-epoch", type=int, default=6800)
     parser.add_argument(
@@ -228,25 +227,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--focal-gamma", type=float, default=1.0)
-    parser.add_argument("--graph-cache", type=Path, default=None)
-    parser.add_argument("--graph-mapping", type=Path, default=None)
-    parser.add_argument("--tabm-k", type=int, default=32)
-    parser.add_argument("--tabm-blocks", type=int, default=3)
-    parser.add_argument("--tabm-d-block", type=int, default=512)
-    parser.add_argument("--tabm-dropout", type=float, default=0.1)
-    parser.add_argument("--ddi-gcn-depth", type=int, default=8)
-    parser.add_argument("--ddi-gcn-width", type=int, default=128)
-    parser.add_argument("--ddi-gcn-attention-dim", type=int, default=65)
     parser.add_argument("--max-train-rows-per-task", type=int, default=None)
     parser.add_argument("--max-validation-rows-per-task", type=int, default=None)
     parser.add_argument("--max-test-rows-per-task", type=int, default=None)
-    parser.add_argument("--export-s02", action="store_true")
-    parser.add_argument(
-        "--s02-splits",
-        nargs="+",
-        choices=["validation", "test"],
-        default=["validation", "test"],
-    )
     parser.add_argument(
         "--export-member-predictions",
         action="store_true",
@@ -299,21 +282,6 @@ def build_tensor_dataset(features: np.ndarray, labels: np.ndarray) -> TensorData
     return TensorDataset(x, y)
 
 
-def build_balanced_sampler(labels: np.ndarray) -> "WeightedRandomSampler":
-    """Inverse class-frequency sampler so replay-buffer classes (few samples)
-    get resampled roughly as often as current-task classes (many samples)."""
-    require_torch()
-    labels = np.asarray(labels)
-    class_counts = np.bincount(labels)
-    class_weights = 1.0 / np.maximum(class_counts, 1)
-    sample_weights = class_weights[labels]
-    return WeightedRandomSampler(
-        weights=torch.as_tensor(sample_weights, dtype=torch.double),
-        num_samples=len(sample_weights),
-        replacement=True,
-    )
-
-
 def ordered_raw_classes(class_map: dict[int, int]) -> list[int]:
     """Return raw class IDs in the exact order used by model output columns."""
 
@@ -341,9 +309,7 @@ def build_student_old_indices(
     return [current_seen_map[raw_class] for raw_class in teacher_raw_classes]
 
 
-def method_protocol_name(method: str, memory_per_class: int) -> str:
-    if method == "replay":
-        return f"replay_balanced_per_class_cap{memory_per_class}"
+def method_protocol_name(method: str) -> str:
     if method == FIXED_BUDGET_METHOD:
         return FIXED_BUDGET_METHOD
     if method == "gem":
@@ -354,8 +320,6 @@ def method_protocol_name(method: str, memory_per_class: int) -> str:
 
 
 def sampler_policy_name(method: str) -> str:
-    if method in STANDARD_REPLAY_METHODS:
-        return "inverse_class_frequency_with_replacement"
     if method == FIXED_BUDGET_METHOD:
         return "current_once_plus_fixed_class_uniform_replay"
     if method in GRADIENT_EPISODIC_METHODS:
@@ -391,6 +355,15 @@ def fixed_replay_seed_provenance(
     }
 
 
+def fold_provenance(args: argparse.Namespace) -> dict[str, int | str | None]:
+    return {
+        "ensemble_mode": args.ensemble_mode,
+        "fold_id": args.fold_id,
+        "fold_count": args.fold_count if args.ensemble_mode == "stratified_3fold" else None,
+        "fold_seed": args.fold_seed if args.ensemble_mode == "stratified_3fold" else None,
+    }
+
+
 def build_ewc_checkpoint_config(
     args: argparse.Namespace,
     task_spec: dict[str, Any],
@@ -422,19 +395,15 @@ def build_ewc_checkpoint_config(
         "max_train_rows_per_task": args.max_train_rows_per_task,
         "max_validation_rows_per_task": args.max_validation_rows_per_task,
         "max_test_rows_per_task": args.max_test_rows_per_task,
-        "export_s02": args.export_s02,
-        "s02_splits": list(args.s02_splits),
-        "tabm_k": args.tabm_k,
-        "tabm_blocks": args.tabm_blocks,
-        "tabm_d_block": args.tabm_d_block,
-        "tabm_dropout": args.tabm_dropout,
-        "ddi_gcn_depth": args.ddi_gcn_depth,
-        "ddi_gcn_width": args.ddi_gcn_width,
-        "ddi_gcn_attention_dim": args.ddi_gcn_attention_dim,
+        # Retained in the schema-v1 checkpoint contract so runs created with the
+        # former, disabled-by-default S02 exporter can still resume.
+        "export_s02": False,
+        "s02_splits": ["validation", "test"],
     }
     if args.export_member_predictions:
         config["export_member_predictions"] = True
         config["member_prediction_splits"] = list(args.member_prediction_splits)
+    config["ensemble"] = fold_provenance(args)
     if args.variant == "tddi_paper_member":
         config["model_architecture"] = paper_member_manifest(
             dropout=args.dropout,
@@ -480,19 +449,15 @@ def build_replay_checkpoint_config(
         "max_train_rows_per_task": args.max_train_rows_per_task,
         "max_validation_rows_per_task": args.max_validation_rows_per_task,
         "max_test_rows_per_task": args.max_test_rows_per_task,
-        "export_s02": args.export_s02,
-        "s02_splits": list(args.s02_splits),
-        "tabm_k": args.tabm_k,
-        "tabm_blocks": args.tabm_blocks,
-        "tabm_d_block": args.tabm_d_block,
-        "tabm_dropout": args.tabm_dropout,
-        "ddi_gcn_depth": args.ddi_gcn_depth,
-        "ddi_gcn_width": args.ddi_gcn_width,
-        "ddi_gcn_attention_dim": args.ddi_gcn_attention_dim,
+        # Retained in the schema-v1 checkpoint contract so existing default
+        # replay checkpoints remain resumable after removing the S02 pipeline.
+        "export_s02": False,
+        "s02_splits": ["validation", "test"],
     }
     if args.export_member_predictions:
         config["export_member_predictions"] = True
         config["member_prediction_splits"] = list(args.member_prediction_splits)
+    config["ensemble"] = fold_provenance(args)
     if args.variant == "tddi_paper_member":
         config["model_architecture"] = paper_member_manifest(
             dropout=args.dropout,
@@ -762,7 +727,7 @@ def write_run_config(
     }
     resolved: dict[str, Any] = {
         "device": device,
-        "method_protocol": method_protocol_name(args.method, args.memory_per_class),
+        "method_protocol": method_protocol_name(args.method),
         "sampler_policy": sampler_policy_name(args.method),
         "validation_policy": "all_seen_classes_for_early_stopping",
         "order_seed": task_spec.get("seed"),
@@ -780,9 +745,7 @@ def write_run_config(
                 "replay_draws_per_epoch": args.replay_draws_per_epoch,
                 "memory_allocation_policy": "capacity_constrained_max_min_raw_class_id",
                 "exemplar_ranking_policy": (
-                    "standardized_descriptor_distance_to_class_mean_stable_index_tiebreak"
-                    if args.variant in {"tabm", "ddi_gcn"}
-                    else "distance_to_class_mean_stable_index_tiebreak"
+                    "distance_to_class_mean_stable_index_tiebreak"
                 ),
                 "replay_replacement_policy": "per_class_without_replacement_cycles",
                 "buffer_source_policy": "current_task_train_split_only",
@@ -832,17 +795,9 @@ def write_run_config(
             dropout=args.dropout,
             activation=args.activation,
         )
-    model_implementation = PROJECT_ROOT / "src/models" / f"{args.variant}.py"
-    if args.variant in {"small", "base", "large"}:
-        model_implementation = PROJECT_ROOT / "src/models/mlp.py"
-    elif args.variant == "tabm":
-        model_implementation = PROJECT_ROOT / "src/models/tabm_classifier.py"
-    elif args.variant == "ddi_gcn":
-        model_implementation = PROJECT_ROOT / "src/models/ddi_gcn.py"
+    model_implementation = PROJECT_ROOT / "src/models/tddi_paper_member.py"
     if model_implementation.exists():
         resolved["model_implementation_sha256"] = _sha256_file(model_implementation)
-    if args.graph_cache is not None:
-        resolved["graph_cache_sha256"] = _sha256_file(args.graph_cache)
     payload = {
         "run_id": run_id,
         "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -858,7 +813,6 @@ def load_backbone_split(
     parquet_path: Path,
     feature_columns: list[str],
     scaler_payload: dict[str, Any],
-    graph_bank: MolecularGraphBank | None,
     *,
     class_ids: list[int],
     max_rows: int | None,
@@ -866,19 +820,6 @@ def load_backbone_split(
     include_ranking_features: bool = False,
 ) -> tuple[Any, np.ndarray | None]:
     """Load identical rows in the input representation required by a backbone."""
-
-    if args.variant == "ddi_gcn":
-        if graph_bank is None:
-            raise RuntimeError("DDI-GCN graph bank was not initialized.")
-        arrays, ranking = load_ddi_gcn_split_arrays(
-            parquet_path,
-            graph_bank,
-            class_ids=class_ids,
-            max_rows=max_rows,
-            ranking_feature_columns=feature_columns if include_ranking_features else None,
-            scaler_payload=scaler_payload if include_ranking_features else None,
-        )
-        return arrays, ranking
     arrays = load_split_arrays(
         parquet_path,
         feature_columns,
@@ -891,53 +832,39 @@ def load_backbone_split(
     return arrays, arrays.features if include_ranking_features else None
 
 
-def export_s02_evaluation(
-    result: EvaluationResult,
-    metadata: dict[str, np.ndarray] | None,
-    *,
-    run_paths: dict[str, Path],
-    run_id: str,
+def load_development_fold_split(
     args: argparse.Namespace,
-    task_id: int,
-    split: str,
-    checkpoint_path: Path,
-    logger: RunLogger,
-) -> None:
-    """Publish one already-collected evaluation result and log its completion."""
+    feature_columns: list[str],
+    scaler_payload: dict[str, Any],
+    assignments: StratifiedFoldAssignments,
+    *,
+    class_ids: list[int],
+    held_out: bool,
+    max_rows: int | None,
+    include_ranking_features: bool = False,
+) -> tuple[Any, np.ndarray | None]:
+    """Load train+validation and select one frozen fold or its complement."""
 
-    if result.outputs is None or metadata is None:
-        raise RuntimeError(f"S02 {split} export requires outputs and drug-pair metadata.")
-    paths = export_s02_artifacts(
-        result.outputs,
-        metadata,
-        S02ExportContext(
-            run_id=run_id,
-            seed=args.experiment_seed,
-            method=args.method,
-            method_protocol=method_protocol_name(args.method, args.memory_per_class),
-            train_task=task_id,
-            split=split,
-            checkpoint_path=checkpoint_path,
-            run_config_path=run_paths["run_config_json"],
-        ),
-        run_paths["outdir"] / "s02",
+    parts = [
+        load_backbone_split(
+            args,
+            path,
+            feature_columns,
+            scaler_payload,
+            class_ids=class_ids,
+            max_rows=None,
+            include_metadata=True,
+        )[0]
+        for path in (args.train, args.validation)
+    ]
+    arrays = select_development_fold(
+        parts,
+        assignments,
+        fold_id=args.fold_id,
+        held_out=held_out,
+        max_rows=max_rows,
     )
-    logger.log_event(
-        "s02_exported",
-        f"task={task_id} split={split} rows={result.outputs.labels.shape[0]}",
-        payload_json=json.dumps(
-            {
-                "task": task_id,
-                "split": split,
-                "rows": int(result.outputs.labels.shape[0]),
-                "latent_dim": int(result.outputs.latent_features.shape[1]),
-                "predictions": str(paths.predictions_path),
-                "latent_features": str(paths.latent_features_path),
-                "manifest": str(paths.manifest_path),
-            },
-            sort_keys=True,
-        ),
-    )
+    return arrays, arrays.features if include_ranking_features else None
 
 
 def export_member_evaluation(
@@ -962,12 +889,24 @@ def export_member_evaluation(
     context = MemberPredictionContext(
         run_id=run_id,
         method=args.method,
-        method_protocol=method_protocol_name(args.method, args.memory_per_class),
+        method_protocol=method_protocol_name(args.method),
         task_id=task_id,
         split=split,
         member_id=args.member_id,
         experiment_seed=args.experiment_seed,
         member_seed=args.member_seed,
+        ensemble_mode=getattr(args, "ensemble_mode", "seeded"),
+        fold_id=getattr(args, "fold_id", None),
+        fold_count=(
+            getattr(args, "fold_count", 3)
+            if getattr(args, "ensemble_mode", "seeded") == "stratified_3fold"
+            else None
+        ),
+        fold_seed=(
+            getattr(args, "fold_seed", 42)
+            if getattr(args, "ensemble_mode", "seeded") == "stratified_3fold"
+            else None
+        ),
     )
     artifact_path = export_member_prediction_artifact(
         result.outputs,
@@ -1006,63 +945,27 @@ def expand_model_for_seen_classes(
     dropout: float,
     activation: str,
     norm: str,
-    graph_bank: MolecularGraphBank | None = None,
-    tabm_k: int = 32,
-    tabm_blocks: int = 3,
-    tabm_d_block: int = 512,
-    tabm_dropout: float = 0.1,
-    ddi_gcn_depth: int = 8,
-    ddi_gcn_width: int = 128,
-    ddi_gcn_attention_dim: int = 65,
 ) -> nn.Module:
     require_torch()
-    if variant == "tddi_paper_member":
-        if input_dim != TDDI_PAPER_INPUT_DIM:
-            raise ValueError(
-                "tddi_paper_member requires input_dim="
-                f"{TDDI_PAPER_INPUT_DIM}, got {input_dim}."
-            )
-        if norm != "layernorm":
-            raise ValueError(
-                "tddi_paper_member has fixed input LayerNorm; use --norm layernorm."
-            )
-        model = TDDIPaperMember(
-            TDDIPaperMemberConfig(
-                input_dim=input_dim,
-                num_classes=len(current_seen_map),
-                dropout=dropout,
-                activation=activation,  # type: ignore[arg-type]
-            )
+    if variant != "tddi_paper_member":
+        raise ValueError(f"Unsupported model variant: {variant}")
+    if input_dim != TDDI_PAPER_INPUT_DIM:
+        raise ValueError(
+            "tddi_paper_member requires input_dim="
+            f"{TDDI_PAPER_INPUT_DIM}, got {input_dim}."
         )
-    elif variant == "tabm":
-        model = TabMClassifier(
-            input_dim=input_dim,
-            num_classes=len(current_seen_map),
-            k=tabm_k,
-            n_blocks=tabm_blocks,
-            d_block=tabm_d_block,
-            dropout=tabm_dropout,
+    if norm != "layernorm":
+        raise ValueError(
+            "tddi_paper_member has fixed input LayerNorm; use --norm layernorm."
         )
-    elif variant == "ddi_gcn":
-        if graph_bank is None:
-            raise ValueError("DDI-GCN requires a molecular graph bank.")
-        model = DDIGCNClassifier(
-            graph_bank=graph_bank,
-            num_classes=len(current_seen_map),
-            depth=ddi_gcn_depth,
-            width=ddi_gcn_width,
-            attention_dim=ddi_gcn_attention_dim,
-        )
-    else:
-        config = preset_config(
-            variant,  # type: ignore[arg-type]
+    model = TDDIPaperMember(
+        TDDIPaperMemberConfig(
             input_dim=input_dim,
             num_classes=len(current_seen_map),
             dropout=dropout,
             activation=activation,  # type: ignore[arg-type]
-            norm=norm,  # type: ignore[arg-type]
         )
-        model = MLP(config)
+    )
     if previous_model is None or previous_seen_map is None:
         return model
     return copy_previous_state_to_expanded_model(
@@ -1094,20 +997,12 @@ def copy_previous_state_to_expanded_model(
     previous_head_bias = previous_state["head.bias"]
     for raw_class_id, previous_index in previous_seen_map.items():
         current_index = current_seen_map[raw_class_id]
-        if variant == "tabm":
-            current_state["head.weight"][:, :, current_index] = previous_head_weight[
-                :, :, previous_index
-            ].clone()
-            current_state["head.bias"][:, current_index] = previous_head_bias[
-                :, previous_index
-            ].clone()
-        else:
-            current_state["head.weight"][current_index] = previous_head_weight[
-                previous_index
-            ].clone()
-            current_state["head.bias"][current_index] = previous_head_bias[
-                previous_index
-            ].clone()
+        current_state["head.weight"][current_index] = previous_head_weight[
+            previous_index
+        ].clone()
+        current_state["head.bias"][current_index] = previous_head_bias[
+            previous_index
+        ].clone()
 
     expanded_model.load_state_dict(current_state)
     return expanded_model
@@ -1141,19 +1036,7 @@ def classification_forward(
     *,
     include_latent: bool = False,
 ) -> tuple["torch.Tensor", "torch.Tensor | None", "torch.Tensor"]:
-    """Run the classification path shared by current and memory gradients.
-
-    TabM must train every ensemble member independently, whereas evaluation
-    aggregates member probabilities. Keeping this policy in one helper prevents
-    GEM/A-GEM reference gradients from silently using a different objective.
-    """
-
-    if isinstance(model, TabMClassifier):
-        member_logits, latent = model.forward_members_with_latent(features)
-        logits = model.aggregate_member_logits(member_logits)
-        member_labels = labels.unsqueeze(1).expand(-1, member_logits.shape[1]).reshape(-1)
-        loss = criterion(member_logits.reshape(-1, member_logits.shape[-1]), member_labels)
-        return logits, latent if include_latent else None, loss
+    """Run the T-DDI classification path shared by current and memory gradients."""
     if include_latent:
         logits, latent = model.forward_with_latent(features)
         return logits, latent, criterion(logits, labels)
@@ -1538,6 +1421,7 @@ def write_run_summary(
     task_file: Path,
     best_task_metrics: list[dict[str, Any]],
     final_test_metrics: dict[str, float],
+    average_incremental_macro_f1: float,
 ) -> None:
     lines = [
         "# CIL Run Summary",
@@ -1566,6 +1450,7 @@ def write_run_summary(
             f"- macro_f1: `{final_test_metrics['macro_f1']:.6f}`",
             f"- weighted_f1: `{final_test_metrics['weighted_f1']:.6f}`",
             f"- balanced_accuracy: `{final_test_metrics['balanced_accuracy']:.6f}`",
+            f"- average_incremental_macro_f1: `{average_incremental_macro_f1:.6f}`",
         ]
     )
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -1596,10 +1481,6 @@ def main() -> None:
             raise ValueError("--episodic-memory-budget must be positive.")
         if args.agem_reference_batch_size <= 0:
             raise ValueError("--agem-reference-batch-size must be positive.")
-    if args.variant == "ddi_gcn" and (args.graph_cache is None or args.graph_mapping is None):
-        raise ValueError("DDI-GCN requires --graph-cache and --graph-mapping.")
-    if args.variant == "ddi_gcn" and args.export_s02:
-        raise ValueError("S02 descriptor export is not supported for DDI-GCN runs.")
     if args.resume_ewc_checkpoint is not None and args.method != "ewc":
         raise ValueError("--resume-ewc-checkpoint is only valid with --method ewc.")
     if (
@@ -1617,6 +1498,15 @@ def main() -> None:
         raise ValueError("Only one resume checkpoint option may be used.")
     if args.export_member_predictions and args.member_id is None:
         raise ValueError("--export-member-predictions requires --member-id.")
+    if args.ensemble_mode == "stratified_3fold":
+        if args.member_id is None:
+            raise ValueError("stratified_3fold requires --member-id.")
+        if args.fold_count != 3:
+            raise ValueError("stratified_3fold requires --fold-count 3.")
+        if args.fold_id is None or not 0 <= args.fold_id < args.fold_count:
+            raise ValueError("stratified_3fold requires --fold-id in [0, 2].")
+    elif args.fold_id is not None:
+        raise ValueError("--fold-id is only valid with stratified_3fold.")
 
     is_ewc_resume = args.resume_ewc_checkpoint is not None
     is_replay_resume = args.resume_replay_checkpoint is not None
@@ -1636,14 +1526,18 @@ def main() -> None:
             f"{TDDI_PAPER_INPUT_DIM} numerical features, got {len(feature_columns)}."
         )
     scaler_payload = load_scaler_payload(args.scaler)
-    graph_bank = (
-        load_graph_bank(args.graph_cache, args.graph_mapping)
-        if args.variant == "ddi_gcn"
-        else None
-    )
     task_spec = load_task_spec(args.task_file)
     tasks = task_spec["tasks"]
     num_tasks = len(tasks)
+    fold_assignments = (
+        build_stratified_fold_assignments(
+            (args.train, args.validation),
+            fold_count=args.fold_count,
+            seed=args.fold_seed,
+        )
+        if args.ensemble_mode == "stratified_3fold"
+        else None
+    )
     ewc_checkpoint_config = (
         build_ewc_checkpoint_config(args, task_spec)
         if args.method == "ewc"
@@ -1741,12 +1635,12 @@ def main() -> None:
         logger.log_event(
             "run_started",
             f"CIL training started run_id={run_id} method={args.method} "
-            f"protocol={method_protocol_name(args.method, args.memory_per_class)} "
+            f"protocol={method_protocol_name(args.method)} "
             f"tasks={num_tasks} device={device}",
             payload_json=json.dumps(
                 {
                     "run_id": run_id,
-                    "method_protocol": method_protocol_name(args.method, args.memory_per_class),
+                    "method_protocol": method_protocol_name(args.method),
                     "sampler_policy": sampler_policy_name(args.method),
                     "validation_policy": "all_seen_classes_for_early_stopping",
                     **seed_provenance(args),
@@ -1787,7 +1681,7 @@ def main() -> None:
             ),
         )
 
-    replay_buffer: ReplayBuffer | FixedBudgetReplayBuffer
+    replay_buffer: FixedBudgetReplayBuffer | None = None
     if args.method == FIXED_BUDGET_METHOD:
         if replay_resume_checkpoint is not None:
             replay_buffer = restore_fixed_replay_buffer(
@@ -1801,11 +1695,6 @@ def main() -> None:
                 total_memory_budget=args.total_memory_budget,
                 random_seed=args.experiment_seed,
             )
-    else:
-        replay_buffer = ReplayBuffer(
-            memory_per_class=args.memory_per_class,
-            random_seed=args.experiment_seed,
-        )
     episodic_memory = (
         TaskEpisodicMemory(
             total_budget=args.episodic_memory_budget,
@@ -1843,14 +1732,6 @@ def main() -> None:
             dropout=args.dropout,
             activation=args.activation,
             norm=args.norm,
-            graph_bank=graph_bank,
-            tabm_k=args.tabm_k,
-            tabm_blocks=args.tabm_blocks,
-            tabm_d_block=args.tabm_d_block,
-            tabm_dropout=args.tabm_dropout,
-            ddi_gcn_depth=args.ddi_gcn_depth,
-            ddi_gcn_width=args.ddi_gcn_width,
-            ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
         )
         theta_star = restore_model_and_theta_star(previous_model, resume_checkpoint)
         fisher_total = {
@@ -1884,14 +1765,6 @@ def main() -> None:
             dropout=args.dropout,
             activation=args.activation,
             norm=args.norm,
-            graph_bank=graph_bank,
-            tabm_k=args.tabm_k,
-            tabm_blocks=args.tabm_blocks,
-            tabm_d_block=args.tabm_d_block,
-            tabm_dropout=args.tabm_dropout,
-            ddi_gcn_depth=args.ddi_gcn_depth,
-            ddi_gcn_width=args.ddi_gcn_width,
-            ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
         )
         restore_replay_model(previous_model, replay_resume_checkpoint)
         previous_model.eval()
@@ -1917,11 +1790,11 @@ def main() -> None:
         memory_before = (
             episodic_memory.total_size
             if episodic_memory is not None
-            else replay_buffer.total_size
+            else replay_buffer.total_size if replay_buffer is not None else 0
         )
         memory_before_by_class = (
             dict(replay_buffer.memory_counts)
-            if isinstance(replay_buffer, FixedBudgetReplayBuffer)
+            if replay_buffer is not None
             else {}
         )
         if task_id == 0 and memory_before != 0:
@@ -1932,38 +1805,60 @@ def main() -> None:
             f"task_id={task_id} current_classes={len(current_raw_classes)} seen_classes={len(seen_raw_classes)}",
         )
 
-        current_train, current_ranking_features = load_backbone_split(
-            args,
-            args.train,
-            feature_columns,
-            scaler_payload,
-            graph_bank,
-            class_ids=current_raw_classes,
-            max_rows=args.max_train_rows_per_task,
-            include_ranking_features=args.method == FIXED_BUDGET_METHOD,
-        )
-        export_validation_s02 = args.export_s02 and "validation" in args.s02_splits
+        if fold_assignments is None:
+            current_train, current_ranking_features = load_backbone_split(
+                args,
+                args.train,
+                feature_columns,
+                scaler_payload,
+                class_ids=current_raw_classes,
+                max_rows=args.max_train_rows_per_task,
+                include_ranking_features=args.method == FIXED_BUDGET_METHOD,
+            )
+        else:
+            current_train, current_ranking_features = load_development_fold_split(
+                args,
+                feature_columns,
+                scaler_payload,
+                fold_assignments,
+                class_ids=current_raw_classes,
+                held_out=False,
+                max_rows=args.max_train_rows_per_task,
+                include_ranking_features=args.method == FIXED_BUDGET_METHOD,
+            )
         export_validation_member = (
             args.export_member_predictions
             and "validation" in args.member_prediction_splits
         )
-        validation_seen, _ = load_backbone_split(
-            args,
-            args.validation,
-            feature_columns,
-            scaler_payload,
-            graph_bank,
-            class_ids=seen_raw_classes,
-            include_metadata=export_validation_s02 or export_validation_member,
-            max_rows=args.max_validation_rows_per_task,
-        )
+        if fold_assignments is None:
+            validation_seen, _ = load_backbone_split(
+                args,
+                args.validation,
+                feature_columns,
+                scaler_payload,
+                class_ids=seen_raw_classes,
+                include_metadata=export_validation_member,
+                max_rows=args.max_validation_rows_per_task,
+            )
+        else:
+            validation_seen, _ = load_development_fold_split(
+                args,
+                feature_columns,
+                scaler_payload,
+                fold_assignments,
+                class_ids=seen_raw_classes,
+                held_out=True,
+                max_rows=args.max_validation_rows_per_task,
+            )
 
         replay_examples_available = 0
         replay_raw_labels = np.empty((0,), dtype=np.int64)
-        if args.method == "ewc" or args.method in GRADIENT_EPISODIC_METHODS:
+        if args.method != FIXED_BUDGET_METHOD:
             train_features = current_train.features
             train_raw_labels = current_train.labels
         else:
+            if replay_buffer is None:
+                raise RuntimeError("Fixed-budget replay buffer was not initialized.")
             replay_features, replay_raw_labels = replay_buffer.get_all()
             replay_examples_available = int(replay_raw_labels.shape[0])
             if task_id == 0 and replay_examples_available != 0:
@@ -1981,10 +1876,7 @@ def main() -> None:
         train_dataset = build_tensor_dataset(train_features, train_local_labels)
         validation_dataset = build_tensor_dataset(validation_seen.features, validation_local_labels)
         fixed_sampler: FixedReplaySampler | None = None
-        if args.method in STANDARD_REPLAY_METHODS:
-            sampler = build_balanced_sampler(train_local_labels)
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler)
-        elif args.method == FIXED_BUDGET_METHOD:
+        if args.method == FIXED_BUDGET_METHOD:
             fixed_sampler = FixedReplaySampler(
                 current_count=int(len(current_train.labels)),
                 replay_raw_labels=replay_raw_labels,
@@ -2010,11 +1902,7 @@ def main() -> None:
             episodic_memory.total_size if episodic_memory is not None else 0
         )
         expected_replay_draws = 0.0
-        if args.method in STANDARD_REPLAY_METHODS and seen_raw_classes:
-            expected_replay_draws = (
-                samples_drawn_per_epoch * old_class_count / len(seen_raw_classes)
-            )
-        elif args.method == FIXED_BUDGET_METHOD and task_id > 0:
+        if args.method == FIXED_BUDGET_METHOD and task_id > 0:
             expected_replay_draws = float(args.replay_draws_per_epoch)
         logger.log_event(
             "training_protocol",
@@ -2048,14 +1936,6 @@ def main() -> None:
             dropout=args.dropout,
             activation=args.activation,
             norm=args.norm,
-            graph_bank=graph_bank,
-            tabm_k=args.tabm_k,
-            tabm_blocks=args.tabm_blocks,
-            tabm_d_block=args.tabm_d_block,
-            tabm_dropout=args.tabm_dropout,
-            ddi_gcn_depth=args.ddi_gcn_depth,
-            ddi_gcn_width=args.ddi_gcn_width,
-            ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
         ).to(device)
 
         if args.method == "ewc" and fisher_total is not None and previous_seen_map is not None:
@@ -2270,7 +2150,7 @@ def main() -> None:
 
         model.load_state_dict(best_state)
         checkpoint_path = checkpoint_dir / f"task_{task_id}_model.pt"
-        if export_validation_s02 or export_validation_member:
+        if export_validation_member:
             validation_export_result = evaluate_model(
                 model,
                 validation_loader,
@@ -2280,29 +2160,16 @@ def main() -> None:
                 evaluation_class_indices=sorted(inverse_seen_map),
                 collect_outputs=True,
             )
-            if export_validation_s02:
-                export_s02_evaluation(
-                    validation_export_result,
-                    validation_seen.metadata,
-                    run_paths=run_paths,
-                    run_id=run_id,
-                    args=args,
-                    task_id=task_id,
-                    split="validation",
-                    checkpoint_path=checkpoint_path,
-                    logger=logger,
-                )
-            if export_validation_member:
-                export_member_evaluation(
-                    validation_export_result,
-                    validation_seen.metadata,
-                    run_paths=run_paths,
-                    run_id=run_id,
-                    args=args,
-                    task_id=task_id,
-                    split="validation",
-                    logger=logger,
-                )
+            export_member_evaluation(
+                validation_export_result,
+                validation_seen.metadata,
+                run_paths=run_paths,
+                run_id=run_id,
+                args=args,
+                task_id=task_id,
+                split="validation",
+                logger=logger,
+            )
             del validation_export_result
         best_task_rows.append(
             {
@@ -2323,25 +2190,22 @@ def main() -> None:
             episodic_memory.save_snapshot(
                 memory_dir / f"memory_after_task_{task_id}.parquet"
             )
-        elif args.method in ALL_REPLAY_METHODS:
-            if isinstance(replay_buffer, FixedBudgetReplayBuffer):
-                replay_buffer.update(
-                    current_train.features,
-                    current_train.labels,
-                    ranking_features=current_ranking_features,
-                )
-            else:
-                replay_buffer.update(current_train.features, current_train.labels)
+        elif replay_buffer is not None:
+            replay_buffer.update(
+                current_train.features,
+                current_train.labels,
+                ranking_features=current_ranking_features,
+            )
             replay_buffer.save_summary(memory_dir / "memory_summary.csv")
             replay_buffer.save_snapshot(memory_dir / f"memory_after_task_{task_id}.parquet")
         memory_after = (
             episodic_memory.total_size
             if episodic_memory is not None
-            else replay_buffer.total_size
+            else replay_buffer.total_size if replay_buffer is not None else 0
         )
 
         if args.method == FIXED_BUDGET_METHOD:
-            if not isinstance(replay_buffer, FixedBudgetReplayBuffer) or fixed_sampler is None:
+            if replay_buffer is None or fixed_sampler is None:
                 raise RuntimeError("Fixed-budget method is missing its buffer or sampler.")
             memory_after_by_class = dict(replay_buffer.memory_counts)
             feasible_memory = min(
@@ -2382,7 +2246,7 @@ def main() -> None:
                 "seed": args.experiment_seed,
                 **seed_provenance(args),
                 "method": args.method,
-                "method_protocol": method_protocol_name(args.method, args.memory_per_class),
+                "method_protocol": method_protocol_name(args.method),
                 "task": task_id,
                 "current_class_count": len(current_raw_classes),
                 "old_class_count": old_class_count,
@@ -2471,14 +2335,6 @@ def main() -> None:
             dropout=args.dropout,
             activation=args.activation,
             norm=args.norm,
-            graph_bank=graph_bank,
-            tabm_k=args.tabm_k,
-            tabm_blocks=args.tabm_blocks,
-            tabm_d_block=args.tabm_d_block,
-            tabm_dropout=args.tabm_dropout,
-            ddi_gcn_depth=args.ddi_gcn_depth,
-            ddi_gcn_width=args.ddi_gcn_width,
-            ddi_gcn_attention_dim=args.ddi_gcn_attention_dim,
         )
         previous_model.load_state_dict(best_state)
         if args.method == FIXED_BUDGET_METHOD:
@@ -2498,7 +2354,6 @@ def main() -> None:
                 args.test,
                 feature_columns,
                 scaler_payload,
-                graph_bank,
                 class_ids=eval_classes,
                 max_rows=args.max_test_rows_per_task,
             )
@@ -2525,7 +2380,6 @@ def main() -> None:
                     **metrics,
                 }
             )
-        export_test_s02 = args.export_s02 and "test" in args.s02_splits
         export_test_member = (
             args.export_member_predictions
             and "test" in args.member_prediction_splits
@@ -2535,9 +2389,8 @@ def main() -> None:
             args.test,
             feature_columns,
             scaler_payload,
-            graph_bank,
             class_ids=seen_raw_classes,
-            include_metadata=export_test_s02 or export_test_member,
+            include_metadata=export_test_member,
             max_rows=args.max_test_rows_per_task,
         )
         seen_test_labels = remap_labels(seen_test_arrays.labels, current_seen_map)
@@ -2551,24 +2404,12 @@ def main() -> None:
             inverse_seen_map,
             evaluation_class_indices=sorted(inverse_seen_map),
             include_classwise=True,
-            collect_outputs=export_test_s02 or export_test_member,
+            collect_outputs=export_test_member,
         )
         final_seen_metrics = final_seen_result.metrics
         classwise_metrics = final_seen_result.classwise_metrics
         if classwise_metrics is None:
             raise RuntimeError("Seen-class evaluation did not return class-wise metrics.")
-        if export_test_s02:
-            export_s02_evaluation(
-                final_seen_result,
-                seen_test_arrays.metadata,
-                run_paths=run_paths,
-                run_id=run_id,
-                args=args,
-                task_id=task_id,
-                split="test",
-                checkpoint_path=checkpoint_path,
-                logger=logger,
-            )
         if export_test_member:
             export_member_evaluation(
                 final_seen_result,
@@ -2633,7 +2474,7 @@ def main() -> None:
                 ),
             )
         elif args.method == FIXED_BUDGET_METHOD:
-            if not isinstance(replay_buffer, FixedBudgetReplayBuffer):
+            if replay_buffer is None:
                 raise RuntimeError("Fixed-budget replay buffer is missing at task boundary.")
             if replay_checkpoint_config is None:
                 raise RuntimeError("Replay checkpoint config was not initialized.")
@@ -2682,7 +2523,7 @@ def main() -> None:
         run_paths["run_summary_md"],
         run_id=run_id,
         method=args.method,
-        method_protocol=method_protocol_name(args.method, args.memory_per_class),
+        method_protocol=method_protocol_name(args.method),
         task_file=args.task_file,
         best_task_metrics=best_task_rows,
         final_test_metrics={
@@ -2691,6 +2532,7 @@ def main() -> None:
             "weighted_f1": float(final_seen_metrics["weighted_f1"]),
             "balanced_accuracy": float(final_seen_metrics["balanced_accuracy"]),
         },
+        average_incremental_macro_f1=compute_average_incremental_macro_f1(result_matrix),
     )
     logger.event("run_completed", "CIL training completed successfully")
 

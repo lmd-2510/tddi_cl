@@ -11,17 +11,17 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.eval.cil_evaluation import EvaluationResult, PredictionOutputs, evaluate_model
-from src.eval.member_predictions import (
+from src.eval.evaluation import EvaluationResult, PredictionOutputs, evaluate_model
+from src.eval.predictions import (
     MEMBER_PREDICTION_SCHEMA_VERSION,
     MemberPredictionContext,
     export_member_prediction_artifact,
     load_member_prediction_artifact,
 )
-from src.eval.s02_artifacts import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
-from src.models.mlp import MLP, MLPConfig
+from src.data.sample_identity import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
 from src.training.train_cil import export_member_evaluation
 from src.utils.logging import RunLogger
+from tests.tiny_tddi import tiny_tddi_model
 
 
 def _outputs() -> PredictionOutputs:
@@ -104,7 +104,6 @@ def test_training_export_helper_writes_namespaced_artifact_and_event(tmp_path: P
         experiment_seed=0,
         member_seed=9876,
         method="ewc",
-        memory_per_class=50,
     )
     export_member_evaluation(
         EvaluationResult(metrics={}, outputs=_outputs()),
@@ -196,15 +195,7 @@ def test_member_prediction_loader_rejects_missing_class_order_and_bad_rows(
 
 def test_evaluation_and_export_preserve_deterministic_sample_order(tmp_path: Path) -> None:
     torch.manual_seed(19)
-    model = MLP(
-        MLPConfig(
-            input_dim=3,
-            hidden_dims=(5,),
-            num_classes=2,
-            dropout=0.0,
-            norm="none",
-        )
-    ).eval()
+    model = tiny_tddi_model({10: 0, 30: 1}, input_dim=3, hidden_dim=5).eval()
     features = torch.randn(5, 3)
     labels = torch.tensor([0, 1, 0, 1, 0])
     dataset = TensorDataset(features, labels)

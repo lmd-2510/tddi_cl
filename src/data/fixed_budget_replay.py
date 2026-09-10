@@ -112,9 +112,8 @@ class FixedBudgetReplayBuffer:
     ) -> None:
         """Add unseen classes and rebalance retained model inputs.
 
-        ``ranking_features`` may differ from ``features``. This lets a graph
-        backbone retain pair-index inputs while selecting the same exemplars as
-        descriptor backbones under the shared protocol.
+        ``ranking_features`` may differ from ``features`` so exemplar selection
+        can use a stable descriptor representation independent of model inputs.
         """
 
         features = np.asarray(features, dtype=np.float32)

@@ -5,17 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from src.training.train_cil import (
-    build_balanced_sampler,
     build_student_old_indices,
-    expand_model_for_seen_classes,
-    method_protocol_name,
     ordered_raw_classes,
 )
 from src.utils.logging import RunLogger, ensure_run_paths
+from tests.tiny_tddi import expand_tiny_tddi
 
 
 class ClassAlignmentRegressionTest(unittest.TestCase):
@@ -23,21 +20,21 @@ class ClassAlignmentRegressionTest(unittest.TestCase):
         old_map = {6: 0, 11: 1, 41: 2}
         current_map = {1: 0, 6: 1, 11: 2, 30: 3, 41: 4}
         torch.manual_seed(7)
-        previous_model = expand_model_for_seen_classes(
+        previous_model = expand_tiny_tddi(
             previous_model=None,
             previous_seen_map=None,
             current_seen_map=old_map,
-            variant="small",
+            variant="tddi_paper_member",
             input_dim=5,
             dropout=0.0,
             activation="gelu",
             norm="none",
         )
-        expanded_model = expand_model_for_seen_classes(
+        expanded_model = expand_tiny_tddi(
             previous_model=previous_model,
             previous_seen_map=old_map,
             current_seen_map=current_map,
-            variant="small",
+            variant="tddi_paper_member",
             input_dim=5,
             dropout=0.0,
             activation="gelu",
@@ -74,22 +71,6 @@ class ClassAlignmentRegressionTest(unittest.TestCase):
             build_student_old_indices([6, 11], {6: 0})
         with self.assertRaisesRegex(ValueError, "dense"):
             ordered_raw_classes({6: 0, 11: 2})
-
-
-class ReplayProtocolRegressionTest(unittest.TestCase):
-    def test_replay_protocol_explicitly_uses_balanced_replacement_sampling(self) -> None:
-        labels = np.array([0, 0, 0, 1], dtype=np.int64)
-        sampler = build_balanced_sampler(labels)
-        weights = sampler.weights.numpy()
-
-        self.assertTrue(sampler.replacement)
-        self.assertEqual(sampler.num_samples, len(labels))
-        self.assertAlmostEqual(float(weights[labels == 0].sum()), 1.0)
-        self.assertAlmostEqual(float(weights[labels == 1].sum()), 1.0)
-        self.assertEqual(
-            method_protocol_name("replay", 50),
-            "replay_balanced_per_class_cap50",
-        )
 
 
 class RunProvenanceTest(unittest.TestCase):

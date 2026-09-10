@@ -5,7 +5,7 @@ import warnings
 
 import numpy as np
 
-from src.eval.classification_metrics import compute_classification_metrics
+from src.eval.metrics import compute_aurc, compute_classification_metrics
 
 
 class ClassificationMetricsTest(unittest.TestCase):
@@ -25,7 +25,18 @@ class ClassificationMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["accuracy"], 0.5)
         self.assertAlmostEqual(metrics["macro_f1"], 2.0 / 3.0)
         self.assertAlmostEqual(metrics["weighted_f1"], 2.0 / 3.0)
+        self.assertAlmostEqual(metrics["macro_precision"], 1.0)
+        self.assertAlmostEqual(metrics["macro_recall"], 0.5)
+        self.assertAlmostEqual(metrics["weighted_precision"], 1.0)
         self.assertAlmostEqual(metrics["balanced_accuracy"], 0.5)
+
+    def test_aurc_uses_entropy_confidence_order(self) -> None:
+        value = compute_aurc(
+            np.array([0, 0, 1]),
+            np.array([0, 1, 1]),
+            np.array([0.9, 0.1, 0.8]),
+        )
+        self.assertAlmostEqual(value, (0.0 + 0.0 + 1.0 / 3.0) / 3.0)
 
     def test_default_labels_are_ground_truth_classes(self) -> None:
         metrics = compute_classification_metrics(

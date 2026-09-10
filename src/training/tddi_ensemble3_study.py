@@ -22,11 +22,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.eval.member_predictions import (  # noqa: E402
+from src.eval.predictions import (  # noqa: E402
     MemberPredictionArtifact,
     load_member_prediction_artifact,
 )
-from src.eval.offline_ensemble import (  # noqa: E402
+from src.eval.ensemble_ue import (  # noqa: E402
     OfflineEnsembleArtifact,
     aggregate_member_predictions,
     load_offline_ensemble_artifact,
@@ -112,6 +112,9 @@ class StudyConfig:
     checkpoint_resume_policy: Mapping[str, Any]
     focal_gamma: float
     device: str
+    ensemble_mode: str
+    fold_count: int | None
+    fold_seed: int | None
     prediction_splits: tuple[str, ...]
     output_root: Path
     member_namespace: str
@@ -198,6 +201,7 @@ def load_study_config(
     model = _object(payload.get("model"), "model")
     training = _object(payload.get("training"), "training")
     outputs = _object(payload.get("outputs"), "outputs")
+    ensemble = _object(payload.get("ensemble", {"mode": "seeded"}), "ensemble")
     protocol_id = str(protocol.get("id", ""))
     protocol_name = str(protocol.get("name", ""))
     if protocol_id not in SUPPORTED_PROTOCOLS:
@@ -237,6 +241,18 @@ def load_study_config(
     prediction_splits = tuple(str(value) for value in payload.get("prediction_splits", []))
     if prediction_splits != ("validation", "test"):
         raise ValueError("prediction_splits must be exactly ['validation', 'test'].")
+    ensemble_mode = str(ensemble.get("mode", "seeded"))
+    if ensemble_mode not in {"seeded", "stratified_3fold"}:
+        raise ValueError("ensemble.mode must be seeded or stratified_3fold.")
+    fold_count = None
+    fold_seed = None
+    if ensemble_mode == "stratified_3fold":
+        fold_count = int(ensemble.get("fold_count", 3))
+        fold_seed = int(ensemble.get("fold_seed", 42))
+        if fold_count != len(member_ids):
+            raise ValueError("stratified_3fold fold_count must equal the three members.")
+        if fold_seed < 0:
+            raise ValueError("ensemble.fold_seed must be non-negative.")
 
     task_file = _resolve_path(protocol.get("task_file"), project_root, "protocol.task_file")
     if not task_file.is_file():
@@ -419,6 +435,9 @@ def load_study_config(
         checkpoint_resume_policy=dict(checkpoint_resume_policy),
         focal_gamma=float(training["focal_gamma"]),
         device=str(training.get("device", "auto")),
+        ensemble_mode=ensemble_mode,
+        fold_count=fold_count,
+        fold_seed=fold_seed,
         prediction_splits=prediction_splits,
         output_root=_resolve_path(outputs.get("root"), project_root, "outputs.root"),
         member_namespace=member_namespace,
@@ -448,11 +467,16 @@ def member_prediction_path(
 
 
 def ensemble_output_path(config: StudyConfig, task_id: int, split: str) -> Path:
+    output_split = (
+        "oof"
+        if config.ensemble_mode == "stratified_3fold" and split == "validation"
+        else split
+    )
     return (
         config.output_root
         / config.ensemble_namespace
         / f"task_{task_id}"
-        / f"{split}.npz"
+        / f"{output_split}.npz"
     )
 
 
@@ -726,10 +750,23 @@ def _training_command(
         str(member_id),
         "--device",
         config.device,
+        "--ensemble-mode",
+        config.ensemble_mode,
         "--export-member-predictions",
         "--member-prediction-splits",
         *config.prediction_splits,
     ]
+    if config.ensemble_mode == "stratified_3fold":
+        command.extend(
+            (
+                "--fold-id",
+                str(member_id),
+                "--fold-count",
+                str(config.fold_count),
+                "--fold-seed",
+                str(config.fold_seed),
+            )
+        )
     if config.method == EWC_METHOD:
         if config.ewc_lambda is None:
             raise RuntimeError("EWC study config is missing ewc_lambda.")
@@ -767,12 +804,15 @@ def _ensemble_command(
     member_artifacts: tuple[Path, Path, Path],
     output_path: Path,
     python_executable: str,
+    ensemble_mode: str = "seeded",
 ) -> tuple[str, ...]:
     return (
         python_executable,
-        str(PROJECT_ROOT / "src/eval/offline_ensemble.py"),
+        str(PROJECT_ROOT / "src/eval/ensemble_ue.py"),
         "--member-artifacts",
         *(str(path) for path in member_artifacts),
+        "--mode",
+        ensemble_mode,
         "--out",
         str(output_path),
     )
@@ -830,7 +870,12 @@ def build_study_plan(
                     command=(
                         None
                         if status == "complete"
-                        else _ensemble_command(paths, output_path, python_executable)  # type: ignore[arg-type]
+                        else _ensemble_command(
+                            paths,
+                            output_path,
+                            python_executable,
+                            config.ensemble_mode,
+                        )  # type: ignore[arg-type]
                     ),
                 )
             )
@@ -864,7 +909,11 @@ def _validate_member_group(
             )
         artifacts.append(artifact)
         paths.append(path)
-    aggregate = aggregate_member_predictions(artifacts, source_artifact_paths=paths)
+    aggregate = aggregate_member_predictions(
+        artifacts,
+        source_artifact_paths=paths,
+        ensemble_mode=config.ensemble_mode,
+    )
     return artifacts, aggregate
 
 
@@ -974,7 +1023,14 @@ def _manifest_payload(
                     "offline_ensemble": {
                         "path": str(output_path),
                         "sha256": _sha256_file(output_path),
-                        "command": list(_ensemble_command(paths, output_path, python_executable)),  # type: ignore[arg-type]
+                        "command": list(
+                            _ensemble_command(
+                                paths,
+                                output_path,
+                                python_executable,
+                                config.ensemble_mode,
+                            )
+                        ),  # type: ignore[arg-type]
                     },
                 }
             )
@@ -987,6 +1043,14 @@ def _manifest_payload(
         "study_config_sha256": config.sha256,
         "method": config.method,
         "method_protocol": config.method_protocol,
+        "ensemble": {
+            "mode": config.ensemble_mode,
+            "fold_count": config.fold_count,
+            "fold_seed": config.fold_seed,
+            "threshold_source": (
+                "oof" if config.ensemble_mode == "stratified_3fold" else "validation"
+            ),
+        },
         "model": {
             "variant": config.variant,
             "hidden_dimensions": (
@@ -1076,7 +1140,12 @@ def execute_study(
                 _validate_existing_ensemble(output_path, expected)
                 continue
             runner(
-                _ensemble_command(paths, output_path, python_executable),  # type: ignore[arg-type]
+                _ensemble_command(
+                    paths,
+                    output_path,
+                    python_executable,
+                    config.ensemble_mode,
+                ),  # type: ignore[arg-type]
                 PROJECT_ROOT,
             )
             _validate_existing_ensemble(output_path, expected)

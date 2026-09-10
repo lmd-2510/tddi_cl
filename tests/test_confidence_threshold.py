@@ -7,13 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.eval.calibration_metrics import (
-    expected_calibration_error,
-    map_raw_labels_to_indices,
-    multiclass_brier_score,
-    negative_log_likelihood,
-)
-from src.eval.confidence_threshold import (
+from src.eval.threshold import (
     export_frozen_threshold_artifact,
     export_threshold_report,
     evaluate_with_frozen_threshold,
@@ -21,8 +15,8 @@ from src.eval.confidence_threshold import (
     load_threshold_selection_config,
     select_confidence_threshold,
 )
-from src.eval.member_predictions import MemberPredictionArtifact, MemberPredictionContext
-from src.eval.offline_ensemble import (
+from src.eval.predictions import MemberPredictionArtifact, MemberPredictionContext
+from src.eval.ensemble_ue import (
     aggregate_member_predictions,
     export_offline_ensemble_artifact,
 )
@@ -153,23 +147,18 @@ def test_legacy_config_defaults_to_entropy_confidence(tmp_path: Path) -> None:
     assert config.probability_source == "raw"
 
 
-def test_full_p3_primary_and_sensitivity_configs_are_separate() -> None:
+def test_full_p3_primary_config_matches_paper_threshold_rule() -> None:
     primary_path = Path(
-        "configs/tddi_ensemble_confidence_threshold_full_p3_primary.json"
+        "configs/eval_tddi_p3_ensemble_entropy_threshold.json"
     )
-    sensitivity_path = Path(
-        "configs/tddi_ensemble_confidence_threshold_full_p3_low_coverage_sensitivity.json"
-    )
-
     primary = load_threshold_selection_config(primary_path)
-    sensitivity = load_threshold_selection_config(sensitivity_path)
 
-    assert primary.confidence_score == sensitivity.confidence_score == "entropy_confidence"
-    assert primary.probability_source == sensitivity.probability_source == "raw"
-    assert primary.minimum_coverage == 0.5
-    assert sensitivity.minimum_coverage == 0.1
-    assert primary.candidate_grid == sensitivity.candidate_grid
-    assert primary.source_path != sensitivity.source_path
+    assert primary.confidence_score == "entropy_confidence"
+    assert primary.probability_source == "raw"
+    assert primary.selection_rule == "smallest_threshold_meeting_target_accuracy"
+    assert primary.target_accuracy == 0.95
+    assert primary.low_threshold == 0.5
+    assert primary.candidate_grid == tuple(value / 100 for value in range(50, 100))
 
 
 def test_explicit_max_probability_score_changes_threshold_selection(tmp_path: Path) -> None:
@@ -208,7 +197,6 @@ def test_explicit_max_probability_score_changes_threshold_selection(tmp_path: Pa
     assert report["threshold_probability_source"] == "raw"
     assert report["high_confidence"]["coverage"] == 0.5
     assert report["entropy_confidence_selective_metrics"]["coverage"] == 0.25
-    assert report["full_set"]["ece_score_name"] == "max_probability"
 
 
 def test_calibrated_probability_source_never_silently_uses_raw_ensemble(
@@ -267,22 +255,13 @@ def test_test_evaluation_requires_frozen_artifact_loaded_from_disk(tmp_path: Pat
         "coverage": 0.5,
     }
 
-    dense_labels = map_raw_labels_to_indices(LABELS, RAW_CLASS_IDS)
     full = report["full_set"]
     assert full["sample_count"] == 4
     assert full["accuracy"] == pytest.approx(0.5)
     assert full["macro_f1"] == pytest.approx(0.5)
-    assert full["ece"] == pytest.approx(
-        expected_calibration_error(PROBABILITIES, dense_labels, num_bins=5)
-    )
-    assert full["ece_score_name"] == "max_probability"
-    assert full["max_probability_ece"] == pytest.approx(full["ece"])
-    assert full["negative_log_likelihood"] == pytest.approx(
-        negative_log_likelihood(PROBABILITIES, dense_labels)
-    )
-    assert full["brier_score"] == pytest.approx(
-        multiclass_brier_score(PROBABILITIES, dense_labels)
-    )
+    assert "ece" not in full
+    assert "negative_log_likelihood" not in full
+    assert "brier_score" not in full
     assert report["entropy_confidence_selective_metrics"] == {
         "threshold_score_name": "entropy_confidence",
         "probability_source": "raw",

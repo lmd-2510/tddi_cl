@@ -384,7 +384,7 @@ Sau khi pull phiên bản repo mới lên server, có thể dựng lại báo c�
 mà không train và không chạy inference:
 
 ```bash
-python src/eval/build_final_report.py \
+python src/eval/report.py \
   --full-root outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_v1 \
   --task-file study_assets/task_protocols/tail_to_head_tasks.json \
   --overwrite

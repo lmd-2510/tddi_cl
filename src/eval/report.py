@@ -23,12 +23,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.eval.classification_metrics import compute_classification_metrics  # noqa: E402
-from src.eval.continual_metrics import (  # noqa: E402
+from src.eval.metrics import compute_classification_metrics  # noqa: E402
+from src.eval.metrics import (  # noqa: E402
     compute_forgetting,
     result_matrix_to_frame,
 )
-from src.eval.offline_ensemble import (  # noqa: E402
+from src.eval.ensemble_ue import (  # noqa: E402
     OfflineEnsembleArtifact,
     load_offline_ensemble_artifact,
 )
@@ -168,8 +168,10 @@ def _build_task_row(
     selected = report.get("threshold_score_selective_metrics", report.get("high_confidence"))
     if not isinstance(threshold, dict) or not isinstance(full, dict) or not isinstance(selected, dict):
         raise ValueError(f"Threshold report is missing metric sections at task {task_id}.")
-    if threshold.get("source_split") != "validation":
-        raise ValueError(f"Task {task_id} threshold did not originate from validation.")
+    if threshold.get("source_split") not in {"validation", "oof"}:
+        raise ValueError(
+            f"Task {task_id} threshold did not originate from validation or OOF."
+        )
     if threshold.get("probability_source", "raw") != "raw":
         raise ValueError("This report builder expects raw offline ensemble probabilities.")
 
@@ -440,7 +442,7 @@ def _build_markdown(
             "- Balanced Accuracy là macro recall, nên mỗi class có trọng số bằng nhau.",
             "- Weighted F1 lấy F1 từng class và đặt trọng số theo số mẫu thật của class.",
             "- Metric `full_*` dùng toàn bộ test samples của các class đã thấy.",
-            "- Metric `threshold_*` chỉ dùng samples vượt frozen validation threshold và "
+            "- Metric `threshold_*` chỉ dùng samples vượt frozen validation/OOF threshold và "
             "phải được báo cáo cùng coverage.",
             "- Diversity được tổng hợp từ offline ensemble artifact, không chạy lại model.",
             "",

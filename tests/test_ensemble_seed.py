@@ -14,7 +14,6 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src.data.class_mapping import build_seen_class_map
 from src.data.fixed_budget_replay import FixedBudgetReplayBuffer, FixedReplaySampler
-from src.models.mlp import MLP, preset_config
 from src.training.train_cil import (
     FIXED_BUDGET_METHOD,
     fixed_replay_seed_provenance,
@@ -50,18 +49,14 @@ class SeedDerivationTest(unittest.TestCase):
         set_configured_seeds(first)
         first_python = random.random()
         first_numpy = np.random.random()
-        first_model = MLP(
-            preset_config("small", input_dim=4, num_classes=2, dropout=0.0)
-        )
-        first_weight = first_model.head.weight.detach().clone()
+        first_model = torch.nn.Linear(4, 2)
+        first_weight = first_model.weight.detach().clone()
 
         set_configured_seeds(second)
         second_python = random.random()
         second_numpy = np.random.random()
-        second_model = MLP(
-            preset_config("small", input_dim=4, num_classes=2, dropout=0.0)
-        )
-        second_weight = second_model.head.weight.detach().clone()
+        second_model = torch.nn.Linear(4, 2)
+        second_weight = second_model.weight.detach().clone()
 
         self.assertEqual(first_python, second_python)
         self.assertEqual(first_numpy, second_numpy)
@@ -199,9 +194,9 @@ class SeedCliAndProvenanceTest(unittest.TestCase):
             seed_mode=configuration.mode,
             member_seed_derivation=configuration.derivation,
             method="ewc",
-            memory_per_class=50,
-            variant="small",
-            graph_cache=None,
+            variant="tddi_paper_member",
+            dropout=0.2,
+            activation="gelu",
             task_file=task_file,
         )
 

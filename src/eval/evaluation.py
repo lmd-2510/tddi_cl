@@ -18,8 +18,7 @@ except ImportError:  # pragma: no cover - environment may not have torch yet
     nn = None
     DataLoader = None
 
-from src.eval.classification_metrics import compute_classification_metrics
-from src.eval.classwise_metrics import compute_classwise_metrics
+from src.eval.metrics import compute_classification_metrics, compute_classwise_metrics
 
 
 @dataclass(frozen=True)

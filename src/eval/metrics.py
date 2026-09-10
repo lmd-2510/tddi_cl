@@ -1,14 +1,114 @@
-"""Per-class evaluation trajectories for class-incremental runs."""
+"""Classification, class-wise, and continual-learning metrics."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import precision_recall_fscore_support
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    precision_recall_fscore_support,
+    precision_score,
+    recall_score,
+)
+
+
+def compute_classification_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    labels: list[int] | None = None,
+) -> dict[str, float]:
+    """Compute classification metrics over an explicit evaluation label set."""
+
+    y_true = np.asarray(y_true, dtype=np.int64)
+    y_pred = np.asarray(y_pred, dtype=np.int64)
+    evaluation_labels = (
+        sorted(np.unique(y_true).astype(int).tolist())
+        if labels is None
+        else [int(label) for label in labels]
+    )
+    if not evaluation_labels:
+        raise ValueError("At least one evaluation label is required.")
+    if len(set(evaluation_labels)) != len(evaluation_labels):
+        raise ValueError("Evaluation labels must not contain duplicates.")
+
+    accuracy = float(accuracy_score(y_true, y_pred))
+    macro_recall = float(
+        recall_score(
+            y_true,
+            y_pred,
+            labels=evaluation_labels,
+            average="macro",
+            zero_division=0,
+        )
+    )
+    return {
+        "accuracy": accuracy,
+        "macro_precision": float(
+            precision_score(
+                y_true,
+                y_pred,
+                labels=evaluation_labels,
+                average="macro",
+                zero_division=0,
+            )
+        ),
+        "macro_recall": macro_recall,
+        "macro_f1": float(
+            f1_score(
+                y_true,
+                y_pred,
+                labels=evaluation_labels,
+                average="macro",
+                zero_division=0,
+            )
+        ),
+        "weighted_f1": float(
+            f1_score(
+                y_true,
+                y_pred,
+                labels=evaluation_labels,
+                average="weighted",
+                zero_division=0,
+            )
+        ),
+        "weighted_precision": float(
+            precision_score(
+                y_true,
+                y_pred,
+                labels=evaluation_labels,
+                average="weighted",
+                zero_division=0,
+            )
+        ),
+        # Compatibility alias: for explicit multiclass labels this is macro recall.
+        "balanced_accuracy": macro_recall,
+    }
+
+
+def compute_aurc(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    confidence: np.ndarray,
+) -> float:
+    """Area under the selective risk-coverage curve; lower is better."""
+
+    y_true = np.asarray(y_true, dtype=np.int64)
+    y_pred = np.asarray(y_pred, dtype=np.int64)
+    confidence = np.asarray(confidence, dtype=np.float64)
+    if y_true.ndim != 1 or y_pred.shape != y_true.shape or confidence.shape != y_true.shape:
+        raise ValueError("y_true, y_pred and confidence must be equally sized vectors.")
+    if y_true.size == 0 or not np.isfinite(confidence).all():
+        raise ValueError("AURC requires non-empty finite confidence values.")
+    order = np.argsort(-confidence, kind="stable")
+    errors = (y_pred[order] != y_true[order]).astype(np.float64)
+    selective_risk = np.cumsum(errors) / np.arange(1, errors.size + 1)
+    return float(np.mean(selective_risk))
 
 
 CLASS_METRIC_COLUMNS = [
@@ -253,3 +353,75 @@ class ClasswiseTracker:
         self.trajectory_frame().to_csv(trajectory_path, index=False)
         self.forgetting_frame().to_csv(forgetting_path, index=False)
         return trajectory_path, forgetting_path
+
+
+def init_result_matrix(num_tasks: int) -> np.ndarray:
+    return np.full((num_tasks, num_tasks), np.nan, dtype=np.float64)
+
+
+def compute_forgetting(result_matrix: np.ndarray) -> pd.DataFrame:
+    num_tasks = result_matrix.shape[0]
+    final_row = num_tasks - 1
+    rows: list[dict[str, Any]] = []
+    forgetting_values: list[float] = []
+
+    for task_id in range(num_tasks):
+        observed = result_matrix[task_id:, task_id]
+        observed = observed[~np.isnan(observed)]
+        if observed.size == 0:
+            continue
+        best = float(np.max(observed))
+        final = (
+            float(result_matrix[final_row, task_id])
+            if not np.isnan(result_matrix[final_row, task_id])
+            else np.nan
+        )
+        forgetting = best - final if not np.isnan(final) else np.nan
+        rows.append(
+            {
+                "task_id": task_id,
+                "best_macro_f1": best,
+                "final_macro_f1": final,
+                "forgetting": forgetting,
+            }
+        )
+        if task_id < final_row and not np.isnan(forgetting):
+            forgetting_values.append(forgetting)
+
+    mean_forgetting = float(np.mean(forgetting_values)) if forgetting_values else 0.0
+    rows.append(
+        {
+            "task_id": "mean_old_tasks",
+            "best_macro_f1": np.nan,
+            "final_macro_f1": np.nan,
+            "forgetting": mean_forgetting,
+        }
+    )
+    return pd.DataFrame(rows)
+
+
+def result_matrix_to_frame(result_matrix: np.ndarray) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for train_task in range(result_matrix.shape[0]):
+        row: dict[str, Any] = {"train_task_id": train_task}
+        for test_task in range(result_matrix.shape[1]):
+            row[f"test_task_{test_task}"] = result_matrix[train_task, test_task]
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def compute_average_incremental_macro_f1(result_matrix: np.ndarray) -> float:
+    """Mean performance on all seen task groups after each training task."""
+
+    matrix = np.asarray(result_matrix, dtype=np.float64)
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1] or matrix.shape[0] == 0:
+        raise ValueError("result_matrix must be a non-empty square matrix.")
+    per_step = []
+    for train_task in range(matrix.shape[0]):
+        observed = matrix[train_task, : train_task + 1]
+        observed = observed[np.isfinite(observed)]
+        if observed.size:
+            per_step.append(float(np.mean(observed)))
+    if not per_step:
+        raise ValueError("result_matrix contains no finite observed task results.")
+    return float(np.mean(per_step))
