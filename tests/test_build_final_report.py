@@ -90,9 +90,6 @@ def _write_task_artifact(
             "sample_count": len(labels),
             "accuracy": metrics["accuracy"],
             "macro_f1": metrics["macro_f1"],
-            "ece": 0.1,
-            "brier_score": 0.2,
-            "negative_log_likelihood": 0.3,
         },
         "threshold_score_selective_metrics": {
             "selected_count": len(labels),
