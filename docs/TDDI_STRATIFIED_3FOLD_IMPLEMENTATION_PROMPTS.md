@@ -297,7 +297,7 @@ Tạo scripts/build_development_folds.py.
 Ghép logic train + validation thành development pool nhưng không sao chép
 3780 feature columns. Dùng StratifiedKFold theo raw class ID, shuffle=True
 và fold seed explicit. Xuất fold_assignments.parquet và fold_manifest.json
-theo schema trong src/data/development_folds.py.
+theo schema trong src/data/stratified_folds.py, tái sử dụng builder hiện có.
 
 Test giữ nguyên và chỉ dùng để kiểm tra overlap. Không đưa test vào fold.
 Không ghi đè output tồn tại; dùng atomic writes.
