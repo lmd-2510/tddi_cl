@@ -220,3 +220,76 @@ Nếu chạy lại, chọn outdir audit mới; không xóa artifact cũ để v�
 **Dừng ở đây trước training.** Gửi `fold_manifest.json` và bốn file audit để làm
 Prompt 4: chốt split policy, preprocessing, buffer/replay và config dựa trên số liệu
 thật. Chưa quyết định các giá trị đó trong Prompt 3; chưa chạy dataset thật ở máy code.
+
+## Loader từ assignment đã lưu — Prompt 5
+
+Prompt 6 bổ sung iterator đọc batch và hai preprocessing policy riêng; xem
+[Preprocessing A/B](TDDI_STRATIFIED_3FOLD_PREPROCESSING.md). Loader raw bên dưới
+vẫn giữ nguyên contract; chưa tích hợp trainer.
+
+Hai API mới nằm trong `src/data/ddi_dataset.py`. Đây là API đọc dữ liệu, **chưa
+được nối vào trainer/config**; không phải lệnh bắt đầu training.
+
+```python
+from src.data.ddi_dataset import (
+    prepare_development_fold_context,
+    load_development_fold_arrays,
+)
+
+# Bắt buộc gọi lại ở đầu MỖI run/resume; không pickle/restore context cũ.
+context = prepare_development_fold_context(
+    "study_assets/stratified_3fold_seed42/fold_assignments.parquet",
+    "study_assets/stratified_3fold_seed42/fold_manifest.json",
+    source_paths={
+        "train": "train_extracted.parquet",
+        "validation": "validation_extracted.parquet",
+        "test": "test_extracted.parquet",
+    },
+    expected_metadata={"fold_seed": 42},
+)
+
+# Ví dụ raw class IDs không liên tục; thay bằng danh sách class của task thật.
+arrays = load_development_fold_arrays(
+    context,
+    feature_columns=["descriptor_1", "descriptor_2"],
+    role="train",       # hoặc "validation"
+    member_id=0,
+    validation_fold=0,  # phải khớp mapping trong manifest
+    class_ids=[10, 57],
+)
+sample_ids = arrays.metadata["sample_id"]
+source_indices = arrays.metadata["source_row_index"]
+```
+
+- `prepare_development_fold_context`: kiểm tra SHA256 assignment và cả ba nguồn,
+  schema/mapping, đầy đủ source rows, ID/label từng dòng, duplicate IDs và ordered
+  development/test overlap. Không tạo lại StratifiedKFold. Đổi path được nếu bytes
+  không đổi. Test chỉ đọc drug IDs để kiểm tra leakage, không đọc label/descriptor.
+- Context cache chỉ identity/label/fold metadata. Giữ các file bất biến trong run;
+  trước/sau load có kiểm tra file stat (identity, size, mtime/ctime). Đây không thay
+  thế kiểm tra byte hash đầu run/resume. Nếu file thay đổi, loader fail và yêu cầu
+  tạo/validate context mới, không âm thầm dùng dữ liệu đã đổi.
+- Khi tích hợp resume ở bước sau, truyền `expected_metadata` chứa ít nhất
+  `assignment_sha256` đã lưu trong checkpoint để pin partition cũ; có thể pin thêm
+  các field manifest. `context.manifest` là bản copy; `context.manifest_sha256`
+  cung cấp hash manifest để ghi provenance. Loader chưa triển khai checkpoint.
+- `load_development_fold_arrays`: train lấy hai folds, validation lấy held-out;
+  tiếp tục lọc theo **raw class ID**, không phải cột của head. `None` chọn mọi
+  class, danh sách rỗng hoặc không tìm thấy trả arrays 0 dòng. Khi nối trainer,
+  caller phải truyền class task/seen hợp lệ, không dùng `None` cho CIL training.
+- Features đọc theo batch từ hai Parquet gốc, chỉ các descriptor được yêu cầu,
+  không tạo sáu bản feature Parquet. Thứ tự luôn nguồn train rồi validation,
+  tăng theo index dòng gốc; không shuffle và không reset index sau lọc.
+- Kết quả là `DDIBatchArrays`: `features` float64 **raw**, `labels` int64,
+  `metadata` gồm `sample_id`, `source_split`, `source_row_index`, `source_path`,
+  `fold_id` và hai drug IDs. Raw giữ NaN/Inf; null descriptor thành NaN, không tự
+  impute/clip/drop. Chính sách xử lí nonfinite thuộc bước preprocessing tiếp theo.
+- A/B gọi cùng context/member/role/classes nhận cùng rows/IDs/raw values, kể cả
+  thay đổi kích thước batch đọc. Chưa áp scaler, chưa quyết định pilot thắng.
+- `load_split_arrays` và API runtime fold cũ giữ nguyên behavior/dtype.
+
+Test synthetic, không cần dataset thật:
+
+```bash
+python -m pytest tests/test_development_fold_loader.py tests/test_fold_artifact.py tests/test_stratified_ensemble_mode.py tests/test_build_stratified_3fold_assignments.py tests/test_audit_development_folds.py -q
+```
