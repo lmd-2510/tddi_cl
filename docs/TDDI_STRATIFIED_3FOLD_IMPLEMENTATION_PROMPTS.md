@@ -1,544 +1,403 @@
-# T-DDI Stratified 3-Fold Development Pipeline
+# Các prompt tiếp theo — T-DDI stratified 3-fold và pilot A/B
 
-## 1. Mục tiêu
+Cập nhật: 2026-09-13. Nguồn quyết định:
+[TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md).
 
-Tài liệu này chia việc bổ sung data pipeline mới thành các prompt nhỏ, độc lập và dễ kiểm tra cho study:
+**Bắt đầu ở Prompt 5 bên dưới.** Các prompt đã hoàn thành (audit code, fold schema,
+build/audit và decision record) đã được bỏ khỏi danh sách thực hiện. Không làm lại.
+Giữ số 5 để nối tiếp lịch sử; từ Prompt 7 trở đi là thứ tự mới, không dùng nội dung
+của prompt cũ cùng số.
 
-```text
-replay_distill_fixed_budget_uniform
-× tddi_paper_member
-× ensemble 3 members
-× P3 tail-to-head
-× experiment seed 0
-```
+Đã có assignment fold seed 42, 694.455 development samples/178 class, audit 19 PASS.
+Giữ hai script riêng: `scripts/build_stratified_3fold_assignments.py` tạo assignment,
+`scripts/audit_development_folds.py` kiểm tra. Không tạo thuật toán chia fold thứ hai.
+Xem [hướng dẫn artifact/build/audit](TDDI_STRATIFIED_3FOLD_ARTIFACT.md) nếu cần tra lệnh
+hoặc phục hồi backup; không bắt buộc chạy lại trước từng prompt.
 
-Data partition mong muốn:
+## Cách sử dụng và giới hạn chung
 
-```text
-development data = train_extracted.parquet + validation_extracted.parquet
+- Mỗi lần giao **một prompt** trong khối text, kèm yêu cầu đọc decision record và
+  giới hạn chung này. Đọc code hiện có, chỉ triển khai phần thiếu, không tạo module trùng.
+- Mỗi lượt báo file đã sửa, lệnh/tests, kết quả, failure có sẵn và giới hạn còn lại.
+- Chỉ unit/synthetic tests trên máy code. Dataset thật ở server; không tự chạy
+  preprocessing, smoke, pilot hoặc full training thật trong các task viết code.
+- Giữ EWC, replay legacy, loader API, config seeded/3-fold cũ khi không bật policy
+  mới. Không đổi artifact/result cũ, không xóa output, không tự commit/push.
+- Giữ P3, experiment seed 0, fold seed 42; member 0/1/2 có validation fold 0/1/2.
+  Test không dùng chọn preprocessing/ranking/hyper/threshold.
+- Pilot A: raw descriptors + input LayerNorm. Pilot B: scaler chỉ fit trên
+  training task 0 của member, đóng băng; không fit toàn bộ hai training folds.
+- Buffer/replay mới phải opt-in, có policy/version rõ; không gọi kết quả là recipe
+  uniform cũ mà không mô tả thay đổi.
+- Không bắt buộc common calibration split: đã chốt OOF threshold và giới hạn
+  một prediction/mẫu. Chỉ mean probabilities trên common test.
+- Rounding, tie-break, epsilon, variance convention, dtype và xử lí nonfinite phải
+  được quy định/test/báo rõ; không âm thầm chọn hyper nghiên cứu khác.
+- Các module/CLI mới dưới đây là vị trí dự kiến; tái sử dụng helper chung nếu phù
+  hợp. Kiểm tra tên CLI thực tế bằng --help/tests trước khi viết runbook.
+- Có mâu thuẫn cần quyết định nghiên cứu mới thì dừng hỏi, không suy ra phương án thắng.
 
-member 0: train B+C, validation A
-member 1: train A+C, validation B
-member 2: train A+B, validation C
+## Lộ trình và điểm dừng
 
-test_extracted.parquet: giữ nguyên cho cả ba member
-```
+| Prompt | Công việc |
+| --- | --- |
+| 5 | Loader từ assignment đã lưu, raw features và IDs |
+| 6 | Preprocessing A raw / B scaler-task0-frozen |
+| 7 | Buffer quota sqrt, IDs và ranking chung tạm thời |
+| 8 | Sampler replay fraction/cap/luân phiên |
+| 9 | Tích hợp trainer, validation và audit |
+| 10 | Checkpoint/resume cho policy mới |
+| 11 | Config/orchestrator smoke và pilot A/B |
+| 12 | Công cụ so sánh validation + runbook GPU |
+| **Dừng** | Người dùng chạy smoke/pilot trên server và gửi artifacts |
+| 13 | Đọc kết quả preprocessing, chờ người dùng duyệt |
+| 14 | Pilot cách chọn exemplar sau khi preprocessing được duyệt |
+| **Dừng** | Chờ kết quả và người dùng chốt ranking cuối |
+| 15 | Prediction/OOF/ensemble UE và provenance |
+| 16 | Threshold chính/fallback/frozen evaluation |
+| 17 | Pilot ba member và điều kiện trước full tám task |
 
-Pipeline mới phải tồn tại song song với pipeline train/validation/test hiện tại. Không xóa hoặc ghi đè dữ liệu, config, checkpoint hay kết quả cũ.
+Prompt 5–12 triển khai hai phương án đã được phép thử, không cần chốt một
+preprocessing cuối. Không thực hiện phân tích kết quả giả ở Prompt 13 khi chưa
+có artifact thật. Full run chưa được tự động cho phép.
 
-## 1.1. Trạng thái implementation hiện có và nguyên tắc bắt buộc
-
-Repository hiện đã có một implementation chưa được hợp nhất hoàn toàn tại:
-
-```text
-src/data/stratified_folds.py
-```
-
-Module này đã được `src/training/train_cil.py` import, được
-`src/training/tddi_ensemble3_study.py` sử dụng và có test liên quan. Vì vậy,
-không được coi đây là file thừa hoặc tạo thêm một hệ thống chia fold song song
-mà chưa audit implementation hiện tại.
-
-Trước khi thực hiện bất kỳ prompt triển khai nào trong tài liệu này, bắt buộc
-thực hiện Prompt 0 bên dưới. Ưu tiên tái sử dụng hoặc refactor
-`src/data/stratified_folds.py`. Chỉ tạo module mới nếu audit chứng minh module
-hiện tại không thể mở rộng an toàn và phải ghi rõ kế hoạch migration, import
-path cuối cùng và cách loại bỏ chức năng trùng lặp.
-
-Không được để đồng thời hai implementation cùng quyết định fold assignment.
-Tại mọi thời điểm phải xác định rõ một source of truth duy nhất cho:
-
-- sample identity;
-- fold assignment;
-- member-to-validation-fold mapping;
-- fold seed và thuật toán stratification;
-- provenance/hash dùng khi training và resume.
-
-Lưu ý: tài liệu Markdown chỉ là kế hoạch triển khai, không tự thay đổi behavior
-runtime. Tuy nhiên, làm theo các prompt cũ mà bỏ qua code hiện có có thể tạo ra
-hai pipeline không tương thích.
-
-## 2. Hai script dữ liệu phải tách riêng
-
-### 2.1. Script tạo fold
-
-File dự kiến:
-
-```text
-scripts/build_development_folds.py
-```
-
-Script này chỉ tạo fold assignment, không audit toàn bộ pipeline và không train model.
-
-Đầu vào dự kiến:
-
-```bash
-python scripts/build_development_folds.py \
-  --train train_extracted.parquet \
-  --validation validation_extracted.parquet \
-  --test test_extracted.parquet \
-  --n-splits 3 \
-  --fold-seed 0 \
-  --outdir study_assets/data_partitions/development_3fold_seed0
-```
-
-Artifact dự kiến:
+## Prompt 5 — Loader fold-aware từ artifact đã audit
 
 ```text
-study_assets/data_partitions/development_3fold_seed0/
-├── fold_assignments.parquet
-└── fold_manifest.json
+Đọc decision record và giới hạn chung của file prompts. Chỉ triển khai loader;
+chưa sửa trainer, preprocessing hoặc config training.
+
+Mở rộng src/data/ddi_dataset.py, dùng src/data/stratified_folds.py và
+src/data/sample_identity.py để load hai Parquet nguồn theo assignment/manifest
+đã lưu. Không dựng lại StratifiedKFold khi load.
+
+API mới nhận role=train/validation, member_id, validation_fold và raw class_ids.
+Validate mapping, assignment/source hashes, row coverage và ID/label agreement.
+Cho phép đổi path nguồn nếu byte hashes không đổi. Trả raw descriptors, labels,
+sample IDs và source-row provenance; chưa tự áp scaler cũ.
+Giữ source order train rồi validation, index nguồn sau lọc. Không copy sáu feature
+Parquet. Có thể cache validated context để không hash hàng GB mỗi batch, nhưng
+phải validate đầu run/resume, không bỏ kiểm tra integrity.
+
+Tests synthetic: mọi member/role/class filter, row order và metadata alignment,
+hash/source/label mismatch, held-out/test không vào train, deterministic A/B rows.
+Giữ load_split_arrays và runtime fold API cũ. Không chạy dataset thật.
 ```
 
-`fold_assignments.parquet` nên chứa:
+Acceptance: A/B nhận cùng raw rows/IDs; sai partition fail trước training; API cũ
+vẫn qua tests. Raw class IDs không được mặc định liên tục 0–177.
 
-- `source_split`: `train` hoặc `validation`;
-- `source_row_index`: vị trí dòng trong Parquet nguồn;
-- `sample_id`: định danh ổn định từ cặp thuốc;
-- `raw_class_id`: nhãn class gốc;
-- `fold_id`: 0, 1 hoặc 2.
-
-`fold_manifest.json` nên chứa:
-
-- schema và version;
-- `fold_seed` và `n_splits`;
-- thuật toán chia fold và `shuffle` policy;
-- hash và số dòng của train, validation và test nguồn;
-- số mẫu tổng cộng và số mẫu mỗi fold;
-- phân bố class trong từng fold;
-- ánh xạ member sang validation fold;
-- SHA256 của assignment artifact;
-- timestamp và command tạo artifact.
-
-Script phải ghép train và validation theo thứ tự xác định, stratify theo raw class ID, fail nếu class không đủ mẫu, không đưa test vào development, không ghi đè output đã tồn tại và ghi artifact theo cách atomic.
-
-Không nên tạo sáu file feature Parquet như `member_0_train.parquet`, `member_0_validation.parquet`, v.v. Một sidecar assignment nhỏ giúp tránh nhân bản hàng chục GB dữ liệu.
-
-### 2.2. Script audit fold
-
-File dự kiến:
+## Prompt 6 — Preprocessing A/B, không fit task tương lai
 
 ```text
-scripts/audit_development_folds.py
+Đọc decision record và giới hạn chung. Chỉ triển khai preprocessing trên loader
+Prompt 5; không đổi behavior scripts/preprocess_features.py và scaler legacy.
+
+Thêm API/module và CLI chuẩn bị artifact riêng, ví dụ src/data/fold_preprocessing.py
+và scripts/prepare_fold_preprocessing.py. Hai policy explicit/versioned:
+A raw_identity: không fit dataset scaler, giữ input LayerNorm.
+B task0_standard_frozen: scaler riêng từng member, chỉ fit rows thuộc hai training
+folds và classes task 0 trong P3 task file; không refit task 1–7 hoặc resume.
+
+Train/replay/validation/test của B transform bằng cùng scaler. Không fit từ held-out,
+test, future classes hoặc dùng lại scaler cũ. Raw mode cũng có metadata nhưng không
+giả thống kê như đã fit. Ghi policy/version, member/fold/seed, assignment/source/
+task-file/feature-order hashes, fit task/classes/rows, mean/scale, variance/dtype.
+Quy định zero-variance/nonfinite policy chung; không âm thầm clip/drop rows hoặc
+dùng future/validation statistics để thay thế. Ghi convention rõ trong docs/tests.
+Scan theo batch, atomic write vào namespace mới, không overwrite.
+
+Tests tính tay scaler task0-train, raw identity, source-row fit coverage, sửa future/
+held-out values không đổi fit statistics (source hash vẫn phải phản ánh file đổi),
+transform/frozen round-trip, nhầm member/policy/hash fail, legacy compatibility.
+Không chạy preprocessing dataset thật hoặc training.
 ```
 
-Script này chỉ đọc và kiểm tra artifact do script tạo fold sinh ra. Nó không được tự sửa hoặc tạo lại assignment.
+Acceptance: chứng minh đúng tập IDs dùng fit, không chỉ đúng row count; artifact
+portable sang server, scaler B cố định xuyên task.
 
-Đầu vào dự kiến:
-
-```bash
-python scripts/audit_development_folds.py \
-  --fold-assignments study_assets/data_partitions/development_3fold_seed0/fold_assignments.parquet \
-  --fold-manifest study_assets/data_partitions/development_3fold_seed0/fold_manifest.json \
-  --train train_extracted.parquet \
-  --validation validation_extracted.parquet \
-  --test test_extracted.parquet \
-  --outdir study_assets/data_partitions/development_3fold_seed0/audit
-```
-
-Artifact audit dự kiến:
+## Prompt 7 — Buffer mới: quota q=10 + sqrt, IDs và ranking chung
 
 ```text
-fold_audit.json
-fold_class_counts.csv
-fold_member_views.csv
-fold_audit.md
+Đọc decision record và giới hạn chung. Chỉ triển khai buffer/ranking mới, chưa sửa
+sampler/trainer. Tham khảo src/data/fixed_budget_replay.py; giữ allocator/buffer
+legacy nguyên behavior. Thêm policy/class có tên/version riêng.
+
+Study thật: floor(4%*694455)=27778 slots, member0/1/2=9260/9259/9259. Cho phép
+overlap giữa member, mỗi bản lưu tính một slot; không nhân bản ID trong một buffer.
+Thuật toán dùng chung nhận budget/count làm input để test synthetic nhỏ.
+
+Quota nền q10 giới hạn feasible capacity; phần dư chia theo sqrt số training samples
+class đó của member khi class xuất hiện. Không dùng future-class/held-out/test counts.
+Tách observed count (trọng số) và retained capacity: class cũ chỉ còn buffer, class
+mới có current data. Redistribute khi chạm capacity, không lấy discarded old data.
+Quy định rounding integer/tie-break deterministic, test budget nhỏ hơn quota nền,
+rare class, saturated class, total feasible size và trường hợp quota cũ muốn tăng.
+
+Ranking tạm cho hai pilot: từ raw descriptors normalize từng mẫu không learned affine,
+cố định epsilon/variance/dtype; Euclidean tới class mean trong không gian đó, tie-break
+sample ID. Không phụ thuộc scaler A/B, model latent hay UE. Class cũ giữ rank prefix.
+Lưu sample IDs/raw labels/source provenance/rank priorities/counts. Tách selection
+representation khỏi model inputs; A/B phải chọn cùng IDs nhưng model inputs có thể khác.
+Không giữ full dữ liệu task cũ ngoài buffer. Chuẩn bị state serialization cho resume.
+
+Tests tính tay allocation/ranking, saturation, no held-out/test/future exemplars,
+old trimming, A/B retained-ID equality, overlap/global-slot accounting và legacy.
+Không train dataset thật.
 ```
 
-Các invariant bắt buộc:
+Acceptance: ranking này chỉ là control cho pilot; không coi là thuật toán cuối
+tối ưu. Log rõ policy mới khác uniform buffer cũ.
 
-- mỗi development sample xuất hiện đúng một lần;
-- không thiếu hoặc thừa dòng;
-- chỉ có fold 0, 1 và 2;
-- ba fold không chồng nhau;
-- hợp ba fold bằng đúng train + validation;
-- không có test sample trong development;
-- source hash và row count khớp manifest;
-- mỗi class có mặt trong cả ba fold;
-- phân bố mỗi class giữa các fold cân bằng theo stratification;
-- member 0/1/2 có đúng training và validation folds;
-- sample order deterministic;
-- không có duplicate sample ID gây lỗi prediction export.
-
-Audit phải exit với mã khác 0 nếu invariant bắt buộc bị vi phạm.
-
-## 3. Những script hiện tại có thể tham khảo
-
-- `scripts/inspect_splits.py`: cách đọc schema, class counts và tạo báo cáo audit.
-- `scripts/check_leakage.py`: cách xây sample identity và kiểm tra ordered/unordered drug-pair overlap.
-- `scripts/preprocess_features.py`: cách scan Parquet theo batch và fit preprocessing chỉ từ training data.
-- `scripts/build_cil_tasks.py`: chỉ xây class-to-task protocol; không dùng để chia sample thành folds.
-
-Các script cũ phải được giữ nguyên behavior để tái lập study cũ.
-
-## 4. Lưu ý quan trọng về validation ensemble
-
-Ba member có ba validation set khác nhau:
+## Prompt 8 — Sampler fraction/cap và luân phiên
 
 ```text
-member 0 validation = A
-member 1 validation = B
-member 2 validation = C
+Đọc decision record và giới hạn chung. Chỉ thêm sampler policy mới; giữ
+FixedReplaySampler legacy trong src/data/fixed_budget_replay.py. Chưa nối trainer.
+
+Mỗi task/epoch dùng mọi current sample đúng một lần. Replay target f=0.125 tổng draws,
+xấp xỉ N_current/7; định nghĩa rounding integer rõ. Task0 replay=0.
+Cap3/exemplar/epoch; nếu thiếu capacity thì giảm replay, không bỏ current hoặc vượt cap.
+Không ép 56+8 mỗi microbatch và không drop current tail batch.
+
+Ưu tiên đều old classes, cap-aware redistribution. Luân phiên class khi draws ít
+hơn classes; trong class luân phiên IDs trước lặp để không luôn dùng cùng prefix.
+Buffer lớn chỉ replay số cần, không nhất thiết hết buffer.
+RNG member/task/epoch riêng khỏi model/dropout. Hai pilot có early stopping khác
+nhau vẫn phải cùng sampler order tại cùng member/task/local epoch nếu memory IDs
+giống nhau: số epoch task trước không được làm lệch A/B ở task sau.
+Quy định reset state ở task boundary, serialization epoch/cursors/queues/RNG cần thiết
+và deterministic resume; không dùng hash() ngẫu nhiên của Python.
+
+Audit target/actual fraction, current/replay draws, per-class exposure, unique IDs,
+repeat histogram/max repeat và coverage. Tests current đầy đủ, cap, thiếu capacity,
+rare class, task0, tiny N/zero replay, fairness qua epoch, A/B order, state round-trip.
+Không đổi effective batch hoặc loss reduction và không train dataset thật.
 ```
 
-Vì sample IDs khác nhau, không được mean probability của ba validation artifact này. Pipeline vẫn có thể:
+Acceptance: deterministic order và cap được chứng minh bằng tests theo sample IDs;
+các state phải rõ để Prompt 10 nối resume.
 
-- early stopping riêng trên A/B/C;
-- ensemble ba member trên test chung;
-- tính UE trên test chung;
-- ghép A/B/C thành OOF predictions để đánh giá member-level generalization.
-
-OOF predictions không phải prediction của ensemble ba member.
-
-Nếu cần chọn ensemble confidence threshold hoặc fit temperature calibration chỉ bằng validation, study phải dành thêm một common calibration split mà không member nào được train trên đó. Đây là một thiết kế thí nghiệm riêng, không được âm thầm suy ra từ ba held-out folds.
-
-## 5. Lưu ý về preprocessing
-
-Scaler hiện tại được fit trên old train split. Sau khi ghép old train + old validation rồi chia lại A/B/C, scaler cũ có thể đã nhìn thấy mẫu thuộc held-out fold của một member.
-
-Để tránh validation leakage mà vẫn giữ recipe preprocessing hiện tại, nên fit ba scaler riêng:
+## Prompt 9 — Tích hợp trainer và validation pilot
 
 ```text
-member 0 scaler: fit trên B+C
-member 1 scaler: fit trên A+C
-member 2 scaler: fit trên A+B
+Đọc decision record và giới hạn chung. Nối API Prompt 5–8 vào
+src/training/train_cil.py bằng opt-in CLI/policy. Không đổi old seeded/stratified/EWC
+khi không bật new mode. Chỉ sửa src/methods/replay.py nếu integration thật sự cần.
+
+New mode đọc assignment đã lưu, mapping member=held-out fold, source hashes đúng.
+Current chỉ class mới trong hai training folds; validation là all-seen classes
+trong held-out. Tách raw ranking features khỏi model inputs A/B. Nối buffer/sampler
+mới, kiểm tra runtime quota/cap/IDs/current coverage; không đọc discarded old data.
+Giữ model size/head expansion/teacher raw-class mapping và baseline loss formulas.
+AdamW mới mỗi task, không thêm scheduler. Log riêng classification, logit distillation,
+feature-distillation và total loss, cùng các trọng số tương ứng.
+
+Microbatch64/accumulation16/effective target1024; không bỏ tail batch, log actual steps
+và tail effective batch. Early stopping theo validation Macro-F1.
+Thêm validation-only pilot mode: không cần chạy/export test để chọn A/B.
+Ưu tiên giữ full P3 task file/hash, thêm execution stop-after-task1 rõ ràng thay vì
+âm thầm thay class protocol. Kiểm tra đủ layout178 và raw class mapping.
+
+Ghi run_config/audit policy versions, assignment/preprocess/ranking/budget/sampler
+seeds/hashes. Synthetic two-task smoke nhỏ cho A/B: current/retained IDs và order,
+old/new validation metrics, head expansion và loss finite; legacy regression.
+Không chạy training thật. Checkpoint new mode hoàn thiện ở Prompt10.
 ```
 
-Không scaler nào được fit trên held-out fold hoặc test. Phần này phải được triển khai sau khi build/audit fold đã ổn định.
+Acceptance: audit đủ dữ liệu kiểm chứng A/B chứ không chỉ console; không chọn
+checkpoint bằng test; policy khác được ghi rõ, không trộn result cũ.
 
-## 6. Thứ tự triển khai
-
-Thứ tự khuyến nghị:
+## Prompt 10 — Task-boundary checkpoint/resume mới
 
 ```text
-Prompt 0: audit implementation hiện có
-         → Prompt 1 → Prompt 2 → Prompt 3
-         → chạy build/audit fold trên máy dữ liệu
-         → Prompt 4: decision gate, chưa sửa code training/config
-         → người dùng chốt buffer/replay/preprocessing/calibration policy
-         → Prompt 5 → ... → Prompt 11
+Đọc decision record và giới hạn chung. Mở rộng src/training/replay_checkpoint.py
+và integration trainer cho new policy; không thay EWC hoặc replay legacy contract.
+
+Checkpoint versioned sau task lưu best model_state, raw class map, completed/next task,
+fold/source/assignment/task hashes, preprocessing policy/scaler state hoặc reference
+hash cần thiết, budget/allocation/ranking/sampler versions, buffer IDs/labels/features/
+observed counts/capacities/rank priorities, RNG/scheduling state và metric/tracker/audit.
+Không lưu teacher trùng: clone từ boundary model khi resume. Không bắt buộc optimizer
+vì task mới tạo optimizer; không claim mid-epoch resume.
+Tách pilot-scope complete task1 với full-trajectory complete task7.
+
+Fail rõ A/B/scaler/member/fold/hash/class map/budget mismatch. Không refit scaler B
+hoặc rebuild folds khi resume. Atomic writes, không re-export/overwrite task hoàn tất,
+không xóa artifact. Tests continuous vs resume 2–3 task cho A/B: model/head/teacher/
+buffer/class map/next task/metrics trong tolerance; sampler order đúng và mismatch
+guards. Legacy checkpoint vẫn chạy. Không train dataset thật.
 ```
 
-Ba prompt đầu chỉ xử lý data partition. Prompt 4 là điểm dừng bắt buộc để đọc số liệu thật và chốt thiết kế. Chưa thay đổi training hoặc tạo config chính thức trước khi fold artifact vượt qua audit và người dùng phê duyệt decision record.
+Acceptance: completion xác minh bằng metadata/artifacts, không chỉ directory;
+scope prefix không khiến full run bị skip nhầm.
 
-## 7. Các prompt triển khai
-
-### Prompt 0 — Audit implementation stratified 3-fold hiện có
+## Prompt 11 — Config/orchestrator smoke và pilot A/B
 
 ```text
-Trước khi triển khai, audit implementation hiện có tại
-src/data/stratified_folds.py, src/training/train_cil.py,
-src/training/tddi_ensemble3_study.py, config stratified 3-fold hiện tại và
-các test liên quan.
+Đọc decision record và giới hạn chung. Mở rộng src/training/tddi_ensemble3_study.py
+hoặc entrypoint pilot nhỏ dùng helpers chung. Tạo config smoke A/B và pilot A/B mới,
+không ghi đè config hiện có. Không tự launch training.
 
-Không tạo một hệ thống chia fold song song hoặc module development_folds.py
-trùng chức năng. Ưu tiên tái sử dụng/refactor stratified_folds.py. Xác định
-chính xác phần nào của kế hoạch đã hoàn thành, phần nào còn thiếu và phần nào
-đang khác thiết kế, sau đó chỉ đề xuất triển khai phần thiếu.
+P3 study_assets/task_protocols/tail_to_head_tasks.json, seed0/fold_seed42, member0,
+execution task0–1, same assignment. A raw và B task0_standard_frozen; paths nguồn/
+assignment/manifest/preprocessing explicit và có server override.
+Budget dùng full development694455, không tính lại từ pilot prefix: member0=9260,
+global27778, planned member1/2=9259. q10+sqrt, f0.125/cap3/class-uniform replay,
+same temporary ranking. Smoke2–3 epochs; pilot20/patience5. Giữ microbatch64,
+effective1024, accumulation16, AdamW lr0.001/wd0.0001, GELU/dropout0.2/LayerNorm,
+focal1, distill alpha1/T2/feature0.5.
 
-Audit tối thiểu phải làm rõ:
-
-- nơi fold assignment được tạo và source of truth hiện tại;
-- train + validation được ghép và chia như thế nào;
-- member 0/1/2 nhận training/validation folds nào;
-- sample identity, duplicate detection và deterministic order;
-- fold seed, experiment/member seed và vai trò riêng của từng seed;
-- artifact/manifest/hash nào đã có hoặc còn thiếu;
-- scaler hiện tại có nguy cơ nhìn thấy held-out fold hay không;
-- checkpoint/resume đã validate fold provenance hay chưa;
-- validation output là OOF hay ensemble và metric UE nào không có ý nghĩa
-  khi mỗi sample chỉ có prediction từ một member;
-- config nào hiện đang bật stratified_3fold;
-- test nào đang bảo vệ behavior này.
-
-Tạo một audit/checklist ngắn trong docs. Chưa thay đổi config, behavior
-training, output hoặc artifact. Dừng lại sau audit để người dùng xác nhận
-hướng refactor trước khi chạy Prompt 1.
+Gỡ khóa6800 chỉ cho new policy, giữ validation legacy. Manifest policy/scope/run IDs/
+fold/data/order hashes. Pilot mặc định validation-only, không bắt đủ ba member hoặc
+test/threshold. Dry-run không tạo model; --execute mới được launch. A/B và member
+tuần tự; namespace riêng smoke/pilot/A/B. Skip complete đúng scope, resume valid,
+incomplete không checkpoint fail rõ, không overwrite.
+Tests runner giả cho sequential/selected member/skip/resume, config equality ngoài
+preprocessing/output fields, budget/scope/dry-run và legacy regressions.
 ```
 
-Acceptance criteria:
+Acceptance: tên/path config và CLI thực tế được ghi rõ; test bảo vệ không có khác
+biệt ẩn về hyper, data hoặc exemplar selection giữa A/B.
 
-- không tạo file/module chia fold mới;
-- chỉ ra chính xác integration và phần còn thiếu;
-- phân biệt OOF validation với common-test ensemble;
-- ghi rõ rủi ro preprocessing leakage và provenance;
-- đề xuất một source of truth duy nhất, không để hai pipeline cùng tồn tại.
-
-### Prompt 1 — Hoàn thiện fold artifact trên implementation hiện có
+## Prompt 12 — Report validation A/B và runbook GPU
 
 ```text
-Đọc kết quả Prompt 0 và mở rộng/refactor src/data/stratified_folds.py để định
-nghĩa schema/version, load/save/validation cho artifact stratified development
-3-fold. Không tạo development_folds.py hoặc một implementation song song,
-trừ khi audit đã được người dùng phê duyệt migration rõ ràng.
+Đọc decision record và giới hạn chung. Tạo công cụ so sánh, ví dụ
+scripts/compare_preprocessing_pilots.py và docs/TDDI_PREPROCESSING_AB_PILOT_RUNBOOK.md.
+Không train và không tự chọn pipeline thắng trong task này.
 
-Artifact assignment phải chứa source_split, source_row_index, sample_id,
-raw_class_id và fold_id. Manifest phải chứa source hashes, source row counts,
-fold seed, n_splits, split strategy, member-to-validation-fold mapping và
-assignment SHA256.
+Report chỉ dùng validation/training audit: seen_all task1 Macro-F1/Balanced Accuracy,
+old/new classes theo P3, epoch curves/best epoch, loss components, optimizer steps,
+runtime/peak allocated+reserved VRAM/checkpoint size, replay coverage/cap.
+Kiểm tra same fold/member/task/hyper, retained IDs và sampler order ở các epoch cả
+hai đã chạy. Fail/flag mismatch trước so điểm. Thiếu telemetry ghi unavailable,
+không bịa hoặc tự train lại. Xuất JSON/Markdown, không gộp mean stage thành final.
 
-Chưa thêm CLI, chưa sửa loader/training. Thêm unit tests cho schema,
-round-trip, duplicate identity, invalid fold ID và hash mismatch.
-Không thay đổi pipeline cũ.
+Runbook dùng CLI thực tế: environment/data/P3/fold hashes, chuẩn bị B, dry-run,
+smoke A/B rồi pilot A và B bằng nohup CUDA0, PID/log/VRAM, task-boundary resume,
+thu thập/so sánh artifacts. Scope chỉ member0 task0–1. Không chạy ba member/threshold
+để chọn preprocessing. Namespace riêng; không mkdir outdir gây conflict guard.
+Nếu OOM, giảm microbatch/tăng accumulation giữ effective batch, áp cùng điều kiện
+cho đối chứng và ghi config; không âm thầm thay hyper hoặc overwrite incomplete run.
+Bundle review cần configs/provenance, validation metrics, memory-ID/sampler-order
+audit hoặc digests, logs/telemetry. Phân biệt report-only với backup đầy đủ có cả
+assignment+manifest; không đóng gói dataset lớn nếu không cần.
+
+Synthetic end-to-end tests nhỏ và CLI help/dry-run. Runbook dừng sau báo cáo A/B,
+đợi người dùng gửi kết quả cho Prompt13; không tự chạy full.
 ```
 
-Acceptance criteria:
+**Dừng tại đây để chạy trên server.** Prompt 13 cần kết quả thật. Không tự sửa
+preprocessing/ranking cuối dựa trên dry-run hoặc synthetic metrics.
 
-- artifact có schema/version rõ ràng;
-- loader fail rõ khi thiếu field hoặc metadata không khớp;
-- round-trip giữ nguyên row order và dtype;
-- chưa thay đổi command train hiện tại.
-
-### Prompt 2 — Script tạo folds
+## Prompt 13 — Đọc pilot preprocessing và đề xuất, chưa tự chốt
 
 ```text
-Tạo scripts/build_development_folds.py.
+Đọc decision record và A/B artifacts thật người dùng gửi. Kiểm tra cùng data/member/
+hyper/exemplar IDs/sampler order ở epoch chung; early stopping có thể khác.
+Thiếu hoặc mismatch evidence thì báo rõ, không giả định so sánh hợp lệ.
 
-Ghép logic train + validation thành development pool nhưng không sao chép
-3780 feature columns. Dùng StratifiedKFold theo raw class ID, shuffle=True
-và fold seed explicit. Xuất fold_assignments.parquet và fold_manifest.json
-theo schema trong src/data/stratified_folds.py, tái sử dụng builder hiện có.
-
-Test giữ nguyên và chỉ dùng để kiểm tra overlap. Không đưa test vào fold.
-Không ghi đè output tồn tại; dùng atomic writes.
-
-Thêm tests chứng minh cùng seed cho cùng assignment, mỗi sample thuộc đúng
-một fold, mỗi class được phân bổ cân bằng và seed khác làm thay đổi assignment.
-Không chạy dataset thật.
+So validation task1 seen_all Macro-F1/Balanced Accuracy, old/new classes, curves/
+loss/telemetry. Không dùng test hoặc threshold để chọn. Kết luận giới hạn ở
+member0/task0–1 với ranking tạm; chưa chứng minh khả năng task7.
+Nếu sát nhau/trade-off, đề xuất thêm task/member, không ép winner.
+Tạo báo cáo docs và bổ sung evidence/proposal vào decision record. Không đánh dấu
+preprocessing approved trước xác nhận người dùng, không sửa training/config hoặc
+tự chạy thử tiếp. Dừng chờ quyết định trước Prompt14.
 ```
 
-Acceptance criteria:
-
-- cùng inputs + fold seed tạo cùng assignment;
-- mỗi development row được gán đúng một fold;
-- không có test row trong assignment;
-- không tạo bản sao feature Parquet cho từng member.
-
-### Prompt 3 — Script audit độc lập
+## Prompt 14 — Pilot không gian exemplar sau khi preprocessing được duyệt
 
 ```text
-Tạo scripts/audit_development_folds.py, chỉ audit, không tạo hoặc sửa folds.
+Chỉ làm khi người dùng đã duyệt preprocessing từ Prompt13. Đọc decision record
+cập nhật; nếu chưa chốt thì dừng, không tự chọn A/B.
 
-Kiểm tra source hash/count, assignment coverage, fold disjointness, class
-stratification, member fold mapping, duplicate sample IDs và test leakage.
-Xuất fold_audit.json, fold_class_counts.csv, fold_member_views.csv và
-fold_audit.md.
+Giữ preprocessing, quota/replay/seeds/hyper/folds. Tạo hai ranking policy/version:
+normalize từng mẫu tạm hiện tại và không gian input của pipeline đã chọn; đều
+Euclidean gần class mean, tie-break sample ID. Đây là đối chứng ranking nên IDs
+có thể khác, không ép same-ID invariant của pilot preprocessing.
+Không dùng learned latent/UE hay policy thứ ba nếu chưa được yêu cầu.
+Class cũ chỉ rút gọn retained buffer, không đọc discarded old data.
+Nối ranking provenance vào config/checkpoint, thêm mismatch/round-trip tests.
 
-Audit phải exit non-zero nếu invariant bắt buộc fail. Thêm synthetic tests.
-Không sửa training.
+Chuẩn bị config/runbook và validation comparison cho hai ranking pilots riêng
+namespace. Không tự train thật hoặc chọn winner. Khi có kết quả, báo trade-off,
+cập nhật đề xuất rồi chờ người dùng duyệt ranking cuối, không auto full job.
 ```
 
-Acceptance criteria:
+**Dừng sau kết quả exemplar.** Cần người dùng chốt preprocessing/ranking cuối trước
+study ba member chính thức. Helpers offline Prompt 15–16 có thể làm sớm nếu được
+yêu cầu riêng, nhưng không được tự suy ra policy thắng để train.
 
-- audit tốt trả exit code 0;
-- assignment sai, trùng hoặc thiếu row trả exit code khác 0;
-- báo cáo thể hiện rõ train/validation size của từng member;
-- chưa thay đổi loader hoặc model.
-
-### Prompt 4 — Decision gate sau audit, chưa triển khai training
+## Prompt 15 — Prediction provenance, OOF và ensemble UE
 
 ```text
-Đọc các artifact thật do scripts/build_development_folds.py và
-scripts/audit_development_folds.py tạo ra, tối thiểu gồm fold_manifest.json,
-fold_audit.json, fold_class_counts.csv và fold_member_views.csv.
+Đọc decision record và giới hạn chung. Mở rộng src/eval/predictions.py,
+src/eval/ensemble_ue.py và integration cần thiết; không train.
 
-Chưa sửa loader, train_cil.py, checkpoint, orchestrator hoặc config training.
-Không tự chọn hyperparameter thay người dùng.
+Artifacts giữ IDs/labels/task/member/seeds/raw-class column order, thêm partition/
+preprocess/ranking/budget provenance. Đối chiếu IDs/labels với assignment và seen
+classes. Scaler hashes giữa member có thể khác hợp lệ: phải đúng member và cùng
+policy, không assert hash scaler của ba member bằng nhau.
+OOF nối đúng held-out A/B/C, mỗi expected seen-class sample đúng một lần/đúng fold.
+Không mean A/B/C như cùng validation set. Ghi source member_count3 nhưng per-sample
+prediction_count1; MI/variance/disagreement không khả dụng từ OOF này, không dùng
+giá trị0 như bằng chứng ensemble chắc chắn. Version/schema mới, legacy vẫn đọc được.
 
-Tạo docs/TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md để tổng hợp:
-
-- tổng development samples và số mẫu từng fold;
-- training/validation size thực tế của từng member;
-- phân bố class và các cảnh báo imbalance/duplicate/leakage;
-- exact development fraction được dùng bởi từng member;
-- các lựa chọn còn phải chốt: row-level hay group-aware split;
-- có hay không common calibration split;
-- preprocessing raw/identity hay scaler riêng từng member;
-- global buffer fraction, global buffer count và per-member count;
-- cách làm tròn budget giữa ba member;
-- buffer allocation policy theo class;
-- replay fraction, replay draws mỗi epoch và repeat cap;
-- current-sample scheduling policy;
-- task file P3 được giữ nguyên hay tạo protocol mới;
-- output namespace mới.
-
-Với mỗi mục chưa chốt, trình bày 2-3 lựa chọn, trade-off, khuyến nghị và
-đánh dấu trạng thái TBD. Không điền số liệu không có trong audit. Kết thúc
-bằng một bảng quyết định để người dùng xác nhận trước khi tiếp tục.
-
-Chỉ tạo decision record; dừng lại sau khi báo cáo và chờ người dùng chốt.
+Common test chỉ aggregate đủ ba member cùng sample/label/task/class order và study
+contract; mean probabilities, giữ UE metrics/edge cases. Không dùng test chọn hyper.
+Tests coverage/duplicates/misalignment/wrong-fold/provenance, numerical UE và legacy
+load; không sửa artifact lịch sử hoặc tạo common calibration split.
 ```
 
-Acceptance criteria:
-
-- số liệu trong decision record truy ngược được về artifact audit;
-- buffer count chưa được chốt trước khi biết `N_development` thật;
-- không tạo config training tạm thời chứa giả định chưa được duyệt;
-- không sửa behavior của code;
-- Prompt 5–11 được xem là blocked cho tới khi decision record được người dùng xác nhận.
-
-### Prompt 5 — Loader fold-aware
+## Prompt 16 — Threshold chính + fallback, freeze trước test
 
 ```text
-Mở rộng src/data/ddi_dataset.py bằng API mới để load development rows từ
-hai Parquet nguồn theo fold assignment, role=train/validation,
-validation_fold và class_ids.
+Đọc decision record và giới hạn chung. Mở rộng src/eval/threshold.py với policy/config
+eval mới, giữ legacy behavior; không train hoặc thêm post-hoc temperature calibration.
 
-Không đổi behavior load_split_arrays hiện tại. Bảo toàn deterministic row
-order và metadata alignment. Validate source rows/hashes trước khi dùng.
-Thêm tests cho member mapping, class filtering, row order và legacy loader.
-Chưa sửa train_cil.py.
+Mỗi task dùng OOF seen-class để chọn, entropy_confidence/raw probabilities,
+grid0.50..0.99 step0.01. Chính: threshold nhỏ nhất selected OOF accuracy>=0.95.
+Chỉ nếu không đạt: fallback candidates coverage>=0.50, accuracy cao nhất; hòa thì
+coverage cao hơn rồi threshold thấp hơn. Không candidate hợp lệ: threshold=null,
+status=no_selection, không lọc. Candidate 0 mẫu không được đạt; fallback không
+giả là đạt95%. Không áp minimum coverage fallback lên primary rule.
+
+Freeze full grid/results/rule/status target_met/fallback/no_selection, source split,
+task/class/fold metadata/hashes. Test chỉ load frozen artifact, không refit; validate
+liên kết OOF với test qua provenance đúng, không đòi OOF/test có cùng sample IDs.
+Report full-set, selected metrics/coverage khi có, ECE/NLL/Brier và score semantics.
+OOF95% không bảo đảm test95%; entropy confidence không phải max probability.
+No-selection vẫn chạy pipeline tiếp; không hard-code0.88.
+
+Tests chính/fallback/ties/no_selection/zero coverage, validation-only guard,
+frozen round-trip, mismatch task/class/partition và legacy compatibility.
 ```
 
-Acceptance criteria:
-
-- `role=train` chỉ trả hai folds training;
-- `role=validation` chỉ trả held-out fold;
-- class filtering vẫn hoạt động theo P3 task;
-- API cũ cho kết quả như trước.
-
-### Prompt 6 — Preprocessing theo member
+## Prompt 17 — Pilot ba member và điều kiện trước full P3
 
 ```text
-Thêm pipeline preprocessing fold-aware mà không sửa behavior
-scripts/preprocess_features.py cũ.
+Chỉ tạo config training chính thức khi người dùng duyệt preprocessing/ranking cuối.
+Đọc decision record, tái sử dụng orchestrator/checkpoint/policy mới đã có, không
+nhân đôi trainer. Không tự train dataset thật.
 
-Fit một scaler riêng cho mỗi member chỉ trên hai training folds của member;
-không fit trên held-out fold hoặc test. Lưu fold hash, validation_fold,
-rows_fitted và source hashes trong scaler metadata.
+Tạo pilot task0–1 ba member chạy tuần tự0→1→2, P3/seed0/fold_seed42,
+budgets9260/9259/9259, hyper baseline trừ thay đổi đã được duyệt.
+Sau đủ ba member mới OOF → frozen threshold/fallback → ensemble test/UE/report.
+Giữ skip/resume đúng scope/provenance, incomplete không checkpoint fail.
+Runbook dry-run/nohup CUDA0/PID/log/telemetry/acceptance từng task/member, ensemble/
+OOF/threshold commands và review bundle. Synthetic integration tests sequential/
+skip/resume/coverage/fallback/no_selection và legacy regressions.
 
-Thêm tests chống validation leakage và kiểm tra deterministic artifacts.
-Không train model.
+Task0–1 chưa chứng minh hiệu quả task7. Full8 là bước sau cần người dùng cho phép,
+không auto launch/chaining. Nếu chuẩn bị template full8, mặc định dry-run, kiểm tra
+layout178/hash P3, output tách pilot/cũ. Kết thúc bằng artifact cần gửi để go/no-go,
+không tự đổi method/hyper.
 ```
 
-Acceptance criteria:
+## Kết thúc
 
-- mỗi scaler chỉ dùng rows của hai training folds;
-- metadata cho biết chính xác scaler thuộc member/fold nào;
-- dùng nhầm scaler phải fail rõ;
-- scaler cũ vẫn dùng được cho study cũ.
-
-### Prompt 7 — Tích hợp `train_cil.py`
-
-```text
-Thêm optional CLI --development-fold-assignments và --validation-fold vào
-src/training/train_cil.py.
-
-Khi bật fold mode, current training samples và replay-buffer exemplars chỉ
-đến từ hai training folds; early stopping dùng held-out fold. Test giữ
-nguyên. Khi không bật fold mode, command cũ phải giữ nguyên behavior.
-
-Ghi partition mode, fold hash, validation fold và source hashes vào
-run_config/training audit. Thêm synthetic two-task tests. Không chạy data thật.
-```
-
-Acceptance criteria:
-
-- current samples và exemplars không chứa held-out fold;
-- test chưa bao giờ được dùng để train hoặc early stopping;
-- legacy CLI không đổi;
-- run config đủ provenance để tái lập partition.
-
-### Prompt 8 — Resume provenance
-
-```text
-Mở rộng riêng replay task-boundary checkpoint để lưu và validate fold
-assignment SHA256, validation_fold, partition schema và source hashes.
-
-Resume bằng fold/config khác phải fail rõ. EWC checkpoint và replay legacy
-không được thay đổi behavior. Thêm round-trip synthetic tests.
-```
-
-Acceptance criteria:
-
-- resume tiếp tục đúng member, fold và next task;
-- checkpoint của member/fold khác bị từ chối;
-- continuous run và save/resume tương đương trong tolerance;
-- không thay đổi EWC resume.
-
-### Prompt 9 — Orchestrator và config
-
-```text
-Mở rộng tddi_ensemble3_study.py cho stratified 3-fold development mode:
-
-member 0 train B+C, validate A;
-member 1 train A+C, validate B;
-member 2 train A+B, validate C.
-
-Tạo config P3 mới và output namespace mới. Manifest lưu fold provenance.
-Dry-run phải hiển thị chính xác fold của từng member. Giữ config và study
-P3 cũ hoạt động. Không chạy training.
-```
-
-Acceptance criteria:
-
-- dry-run tạo đúng ba command và đúng validation fold;
-- member chạy tuần tự;
-- complete member được skip, incomplete member được resume an toàn;
-- task file P3 và class order không thay đổi;
-- output mới không đè study P3 cũ.
-
-### Prompt 10 — Ensemble/export policy
-
-```text
-Điều chỉnh study orchestration để validation artifacts của ba held-out
-fold không bị đưa nhầm vào offline ensemble.
-
-Cho phép offline ensemble ba member trên common test artifacts. Xuất OOF
-validation report riêng và ghi rõ OOF không phải ensemble. Fail rõ nếu cố
-aggregate A/B/C như cùng validation set.
-
-Giữ offline ensemble và artifact cũ tương thích. Không train model.
-```
-
-Acceptance criteria:
-
-- test artifacts của ba member có cùng sample IDs và ensemble được;
-- A/B/C validation artifacts không bị mean sai;
-- OOF report ghi rõ semantics;
-- artifact pilot cũ vẫn load được.
-
-### Prompt 11 — Runbook và integration tests
-
-```text
-Tạo runbook cho P3 stratified-3fold study: build folds, audit, fit
-member-specific preprocessing, dry-run, train member 0/1/2 tuần tự,
-resume, test ensemble và UE audit.
-
-Thêm synthetic integration test từ fold creation đến orchestrator command.
-Không chạy full dataset và không xóa artifact cũ.
-```
-
-Acceptance criteria:
-
-- runbook có command chính xác cho máy GPU;
-- có preflight, PID/log/VRAM monitoring và resume command;
-- chỉ ensemble sau khi đủ ba member;
-- synthetic pipeline chạy hoàn chỉnh mà không cần dataset thật.
-
-## 8. Những thứ không được xóa
-
-Không xóa:
-
-- `train_extracted.parquet`;
-- `validation_extracted.parquet`;
-- `test_extracted.parquet`;
-- scripts audit/preprocessing cũ;
-- config P3 hiện tại;
-- output, checkpoint và prediction artifacts của study trước;
-- P3 task file hiện tại.
-
-Các file này là dữ liệu nguồn và baseline cần thiết để so sánh study cũ với study 3-fold mới.
-
-## 9. Điểm dừng bắt buộc sau Prompt 3
-
-Sau khi hoàn thành Prompt 1–3, chưa nên tích hợp training ngay. Trước hết cần chạy hai script trên máy chứa dữ liệu và kiểm tra:
-
-- fold audit đạt toàn bộ invariant;
-- kích thước ba fold hợp lý;
-- mỗi class xuất hiện trong cả ba fold;
-- không có test leakage;
-- assignment có thể tái tạo bằng cùng seed;
-- artifact không chiếm dung lượng bất hợp lý.
-
-Sau khi các điều kiện trên đạt yêu cầu, chỉ chạy Prompt 4 để tạo decision record. Chưa chạy Prompt 5 trở đi cho đến khi người dùng chốt rõ buffer, replay, preprocessing và validation/calibration policy.
+Chỉ sửa phạm vi prompt đang làm, giữ thay đổi người dùng trong worktree. Không xóa
+Parquet nguồn, assignment/manifest, scaler cũ, P3 task file, checkpoint hay result cũ.
+Nếu code và tài liệu chưa khớp, báo phần thiếu thay vì giả định policy đã hoạt động.

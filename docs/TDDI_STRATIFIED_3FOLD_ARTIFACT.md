@@ -1,9 +1,14 @@
 # Fold artifact — kết quả Prompt 1–3
 
 Implementation nằm trong `src/data/stratified_folds.py`. Prompt 1 bổ sung định dạng
-và API lưu/đọc; Prompt 2 thêm CLI build `scripts/build_development_folds.py`.
+và API lưu/đọc; Prompt 2 thêm CLI build `scripts/build_stratified_3fold_assignments.py`.
 Prompt 3 thêm CLI audit độc lập `scripts/audit_development_folds.py`.
 Chưa nối artifact này vào training.
+Script build được đổi tên thành `build_stratified_3fold_assignments.py` để thể hiện
+rõ mục đích: gán mỗi mẫu development vào một trong ba stratified folds. Các lệnh
+mới bên dưới dùng tên mới; tên file đầu ra, schema và thuật toán không thay đổi.
+Không cần build lại folds đã audit chỉ vì đổi tên script. `creation_command` trong
+manifest lịch sử vẫn giữ nguyên để bảo toàn provenance; không sửa hash/artifact cũ.
 Thuật toán runtime `build_stratified_fold_assignments` và `select_development_fold`
 được giữ nguyên. Không có module `development_folds.py` thứ hai.
 
@@ -80,7 +85,7 @@ Chạy từ repo trên **server có dataset**, không phải máy code hiện t�
 seed hoặc cấu hình buffer. Phải truyền seed rõ ràng, không có default ngầm.
 
 ```bash
-python scripts/build_development_folds.py \
+python scripts/build_stratified_3fold_assignments.py \
   --train train_extracted.parquet \
   --validation validation_extracted.parquet \
   --test test_extracted.parquet \
@@ -117,12 +122,12 @@ chưa làm training hiện tại chuyển sang đọc artifact, chưa fit scaler
 duplicate/source-row coverage, invalid fold, null/dtype, hash/metadata mismatch,
 nguồn đổi nội dung, đường dẫn nguồn thay đổi, không overwrite và save gián đoạn.
 
-`tests/test_build_development_folds.py` kiểm tra assignment deterministic, seed khác,
+`tests/test_build_stratified_3fold_assignments.py` kiểm tra assignment deterministic, seed khác,
 coverage/disjointness và cân bằng từng class; tương thích builder cũ; không đọc feature
 hoặc test label; input lỗi, nguồn bị đổi, không overwrite và CLI chạy ngoài repo.
 
 ```bash
-python -m pytest tests/test_build_development_folds.py tests/test_fold_artifact.py tests/test_stratified_ensemble_mode.py -q
+python -m pytest tests/test_build_stratified_3fold_assignments.py tests/test_fold_artifact.py tests/test_stratified_ensemble_mode.py -q
 ```
 
 Kết quả kiểm tra local ngày 2026-09-12: **63 passed**, 85,99 giây, chỉ dữ liệu giả.
@@ -134,7 +139,7 @@ test leakage, cảnh báo unordered pair, output preservation và nguồn đổi
 Kiểm tra gộp sau Prompt 3 (local, chỉ dữ liệu giả):
 
 ```bash
-python -m pytest tests/test_audit_development_folds.py tests/test_build_development_folds.py tests/test_fold_artifact.py tests/test_stratified_ensemble_mode.py -q
+python -m pytest tests/test_audit_development_folds.py tests/test_build_stratified_3fold_assignments.py tests/test_fold_artifact.py tests/test_stratified_ensemble_mode.py -q
 ```
 
 Kết quả ngày 2026-09-12: **84 passed**, 81,39 giây (21 tests audit mới).

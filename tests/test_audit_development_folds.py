@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from scripts import audit_development_folds as audit
-from scripts.build_development_folds import build_development_folds
+from scripts.build_stratified_3fold_assignments import build_development_folds
 from src.data.stratified_folds import FOLD_ASSIGNMENT_SCHEMA, describe_fold_source, fold_file_sha256
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persist stratified development folds using the existing shared fold builder."""
+"""Create a 3-fold stratified sample-assignment table and provenance manifest."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import shlex
 import sys
 from typing import Sequence
 
-# Support `python scripts/build_development_folds.py` from a server checkout.
+# Support `python scripts/build_stratified_3fold_assignments.py` from a server checkout.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))

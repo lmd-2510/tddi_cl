@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from scripts import build_development_folds as script
+from scripts import build_stratified_3fold_assignments as script
 from src.data.stratified_folds import (
     FOLD_ASSIGNMENT_SCHEMA, build_stratified_fold_assignments, load_fold_artifact,
 )

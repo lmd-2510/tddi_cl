@@ -58,7 +58,7 @@ Chưa có:
 - `fold_assignments.parquet`, `fold_manifest.json`, schema partition và assignment SHA256;
 - `source_split`, `source_row_index`, raw label được lưu kèm assignment;
 - hash/row count nguồn gắn với assignment, identity/algorithm version và mapping cố định;
-- `scripts/build_development_folds.py`, `scripts/audit_development_folds.py` và báo cáo audit fold;
+- `scripts/build_stratified_3fold_assignments.py`, `scripts/audit_development_folds.py` và báo cáo audit fold (tên script build đã cập nhật sau audit);
 - scaler theo member có fold provenance.
 
 Config 3-fold vẫn trỏ tới `study_assets/preprocessing/scaler.pkl`. `scaler_config.json` ghi standard scaler, zero imputation, `rows_fitted=520841`; `preprocessing_report.md` ghi fit trên toàn bộ train gốc. `load_development_fold_split` áp cùng scaler cho cả hai nguồn trước khi chọn fold. Vì held-out mới chứa các mẫu từ train gốc, statistics của scaler có thể chứa chính held-out samples. Đây là vấn đề preprocessing leakage, dù các hàng đó không được đưa vào gradient training.
