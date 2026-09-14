@@ -15,8 +15,12 @@ from src.training import fold_pilot_training as pilot, train_cil as engine
 from src.training import replay_checkpoint as checkpoint
 
 
-def run(data, monkeypatch, *, policy="raw_identity", suffix="", stop=2, resume=None):
-    command = cli(data, policy, suffix, extra=["--stop-after-task", str(stop)])
+def run(data, monkeypatch, *, policy="raw_identity", suffix="", stop=2, resume=None,
+        ranking=None):
+    extra = ["--stop-after-task", str(stop)]
+    if ranking is not None:
+        extra += ["--exemplar-ranking-policy", ranking]
+    command = cli(data, policy, suffix, extra=extra)
     if resume:
         command += ["--resume-fold-checkpoint", str(resume)]
     monkeypatch.setattr(sys, "argv", command)
@@ -217,3 +221,28 @@ def test_missing_completion_evidence_and_model_only_not_resumable(data, monkeypa
     torch.save(state, root / "checkpoints/task_0.pt")
     with pytest.raises(ValueError, match="completion evidence"):
         run(data, monkeypatch, stop=1, resume=root / "checkpoints/task_0.pt")
+
+
+def test_pipeline_ranking_checkpoint_roundtrip_and_policy_guard(data, monkeypatch, tiny):
+    from src.data.fold_replay_buffer import PIPELINE_INPUT_RANKING_POLICY
+
+    root = run(data, monkeypatch, policy="task0_standard_frozen", suffix="_pipeline_rank",
+               stop=0, ranking=PIPELINE_INPUT_RANKING_POLICY)
+    state = load(root, 0)
+    ranking = state["contract"]["buffer"]["ranking"]
+    assert ranking["policy"] == PIPELINE_INPUT_RANKING_POLICY
+    assert ranking["preprocessing_sha256"] == state["contract"]["preprocessing_sha256"]
+    run(data, monkeypatch, policy="task0_standard_frozen", suffix="_pipeline_rank",
+        stop=1, resume=root / "checkpoints/task_0.pt", ranking=PIPELINE_INPUT_RANKING_POLICY)
+    assert load(root, 1)["next_task_id"] == 2
+
+    sample_root = run(data, monkeypatch, policy="task0_standard_frozen", suffix="_sample_rank",
+                      stop=0)
+    command = cli(data, "task0_standard_frozen", "_sample_rank", extra=[
+        "--stop-after-task", "1", "--resume-fold-checkpoint",
+        str(sample_root / "checkpoints/task_0.pt"), "--exemplar-ranking-policy",
+        PIPELINE_INPUT_RANKING_POLICY,
+    ])
+    monkeypatch.setattr(sys, "argv", command)
+    with pytest.raises(ValueError, match="contract mismatch"):
+        engine.main()

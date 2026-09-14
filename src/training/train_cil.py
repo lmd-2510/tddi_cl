@@ -45,6 +45,7 @@ from src.data.fixed_budget_replay import (
     FixedReplaySampler,
     ReplayEpochAudit,
 )
+from src.data.fold_replay_buffer import RANKING_POLICIES, RANKING_POLICY
 from src.data.sample_identity import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
 from src.data.stratified_folds import (
     StratifiedFoldAssignments,
@@ -249,6 +250,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resume-fold-checkpoint", type=Path,
                         help="Resume only the frozen-fold policy at a completed task boundary.")
     parser.add_argument("--preprocessing-policy", choices=["raw_identity", "task0_standard_frozen"])
+    parser.add_argument(
+        "--exemplar-ranking-policy",
+        choices=RANKING_POLICIES,
+        default=RANKING_POLICY,
+        help=(
+            "Frozen-fold exemplar space. The default preserves the Prompt 7–13 "
+            "sample-normalized control; pipeline-input ranking is opt-in."
+        ),
+    )
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--stop-after-task", type=int,
                         help="Execution boundary; does not truncate/change the full task protocol.")
@@ -270,6 +280,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 args.preprocessing_policy, args.validation_only, args.stop_after_task is not None,
                 args.resume_fold_checkpoint)):
             parser.error("New fold options require --fold-replay-policy stratified_fraction_v1.")
+        if any(token.split("=")[0] == "--exemplar-ranking-policy"
+               for token in (sys.argv[1:] if argv is None else argv)):
+            parser.error("--exemplar-ranking-policy is only valid with the frozen-fold replay policy.")
         if args.batch_size is None:
             args.batch_size = 1024
     return args

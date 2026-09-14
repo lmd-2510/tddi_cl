@@ -23,14 +23,20 @@ from src.utils.seed import resolve_seed_configuration
 
 
 BUFFER_POLICY = "fold_min_quota_sqrt_capacity_v1"
-RANKING_POLICY = "raw_sample_normalized_class_mean_control_v1"
+SAMPLE_NORMALIZED_RANKING_POLICY = "raw_sample_normalized_class_mean_control_v1"
+PIPELINE_INPUT_RANKING_POLICY = "frozen_preprocessed_input_class_mean_v1"
+RANKING_POLICIES = (SAMPLE_NORMALIZED_RANKING_POLICY, PIPELINE_INPUT_RANKING_POLICY)
+# Backward-compatible name used by Prompt 7–13 configs and imports.
+RANKING_POLICY = SAMPLE_NORMALIZED_RANKING_POLICY
 RANKING_EPSILON = 1e-5
-RANKING_CONVENTIONS = {
+SAMPLE_NORMALIZED_RANKING_CONVENTIONS = {
     "policy": RANKING_POLICY, "epsilon": RANKING_EPSILON, "variance_ddof": 0,
     "dtype": "float64", "distance": "euclidean", "tie_break": "sample_id_lexicographic",
     "reduction_order": "sample_id_ascending", "learned_affine": False,
     "nonfinite_policy": "error", "status": "temporary_AB_control_not_final_optimum",
 }
+# Backward-compatible immutable template; per-buffer metadata is built below.
+RANKING_CONVENTIONS = SAMPLE_NORMALIZED_RANKING_CONVENTIONS
 META_KEYS = ("sample_id", "source_split", "source_row_index", "fold_id", DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN)
 
 
@@ -141,6 +147,32 @@ def rank_raw_class_exemplars(raw_features: np.ndarray, sample_ids: np.ndarray) -
     return canonical[order], distances[order]
 
 
+def rank_input_class_exemplars(input_features: np.ndarray, sample_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Rank one class in frozen preprocessing-output space, before model LayerNorm.
+
+    Reductions use sample-ID order so source row order cannot affect the mean or
+    ranking. This is descriptor-space selection only: no latent, UE or RNG.
+    """
+    values = np.asarray(input_features)
+    ids = np.asarray(sample_ids)
+    if values.ndim != 2 or not values.shape[0] or not values.shape[1] or values.dtype.kind not in "fiu":
+        raise ValueError("Ranking requires a nonempty numeric preprocessing-output matrix.")
+    if (ids.shape != (len(values),) or not all(isinstance(s, (str, np.str_)) and s for s in ids)
+            or len(set(ids.tolist())) != len(ids)):
+        raise ValueError("Ranking sample IDs must be unique nonempty strings aligned to rows.")
+    values = values.astype(np.float64, copy=False)
+    if not np.isfinite(values).all():
+        raise ValueError("Ranking preprocessing outputs must be finite; nonfinite policy=error.")
+    canonical = np.argsort(ids, kind="stable")
+    x = values[canonical]
+    with np.errstate(over="ignore", invalid="ignore"):
+        distances = np.linalg.norm(x - x.mean(axis=0, keepdims=True), axis=1)
+    if not np.isfinite(distances).all():
+        raise ValueError("Ranking class-mean distance overflowed float64.")
+    order = np.lexsort((ids[canonical], distances))
+    return canonical[order], distances[order]
+
+
 def _copy_arrays(arrays: DDIBatchArrays, indices) -> DDIBatchArrays:
     # copy even for slices: trimmed entries must not retain discarded backing arrays.
     return DDIBatchArrays(arrays.features[indices].copy(), arrays.labels[indices].copy(),
@@ -157,7 +189,10 @@ class FoldSqrtReplayBuffer:
 
     def __init__(self, *, context: DevelopmentFoldContext, task_file: str | Path,
                  feature_columns: Sequence[str], member_id: int, total_memory_budget: int,
-                 base_quota: int = 10, experiment_seed: int = 0) -> None:
+                 base_quota: int = 10, experiment_seed: int = 0,
+                 ranking_policy: str = RANKING_POLICY,
+                 ranking_preprocessing: FoldPreprocessing | None = None,
+                 ranking_preprocessing_sha256: str | None = None) -> None:
         context.assert_unchanged()
         self._member_id = _integer(member_id, "member_id")
         if self._member_id not in (0, 1, 2):
@@ -172,6 +207,39 @@ class FoldSqrtReplayBuffer:
             raise ValueError("feature_columns must contain unique descriptor names.")
         if set(self._columns) & {*DEFAULT_META_COLS, context.label_col, *META_KEYS, "rank_priority", "rank_distance"}:
             raise ValueError("Labels and source/ID metadata cannot be descriptor columns.")
+        if ranking_policy not in RANKING_POLICIES:
+            raise ValueError(f"ranking_policy must be one of {RANKING_POLICIES}.")
+        self._ranking_policy = ranking_policy
+        self._ranking_preprocessing = ranking_preprocessing
+        if ranking_policy == SAMPLE_NORMALIZED_RANKING_POLICY:
+            if ranking_preprocessing is not None or ranking_preprocessing_sha256 is not None:
+                raise ValueError("Sample-normalized ranking must not depend on a fitted preprocessing artifact.")
+            ranking = dict(SAMPLE_NORMALIZED_RANKING_CONVENTIONS)
+        else:
+            if ranking_preprocessing is None or ranking_preprocessing_sha256 is None:
+                raise ValueError("Pipeline-input ranking requires the frozen preprocessing object and SHA256.")
+            prep_metadata = ranking_preprocessing.metadata
+            if prep_metadata["policy"] != "task0_standard_frozen":
+                raise ValueError("Pipeline-input ranking requires the approved task0_standard_frozen preprocessing.")
+            if (not isinstance(ranking_preprocessing_sha256, str)
+                    or len(ranking_preprocessing_sha256) != 64
+                    or any(c not in "0123456789abcdef" for c in ranking_preprocessing_sha256)):
+                raise ValueError("ranking_preprocessing_sha256 must be a lowercase SHA256 digest.")
+            provenance = prep_metadata["provenance"]
+            if (provenance["seeds"]["member_id"] != self._member_id
+                    or tuple(provenance["feature_columns"]) != self._columns):
+                raise ValueError("Ranking preprocessing member/feature-order provenance mismatch.")
+            ranking = {
+                "policy": PIPELINE_INPUT_RANKING_POLICY,
+                "policy_version": 1,
+                "feature_space": "frozen_preprocessing_output_before_model_layernorm",
+                "preprocessing_policy": prep_metadata["policy"],
+                "preprocessing_sha256": ranking_preprocessing_sha256,
+                "dtype": "float64", "distance": "euclidean",
+                "tie_break": "sample_id_lexicographic", "reduction_order": "sample_id_ascending",
+                "learned_latent": False, "uses_ue": False, "nonfinite_policy": "error",
+                "status": "exemplar_ranking_pilot_candidate",
+            }
         self._task_path = Path(task_file)
         content = self._task_path.read_bytes()
         spec = json.loads(content)
@@ -189,7 +257,7 @@ class FoldSqrtReplayBuffer:
         manifest = context.manifest
         self._metadata = {
             "policy": BUFFER_POLICY, "schema_version": 1, "base_quota": self._base_quota,
-            "total_memory_budget": self._budget, "ranking": dict(RANKING_CONVENTIONS),
+            "total_memory_budget": self._budget, "ranking": ranking,
             "storage": "retained_raw_float64_only", "class_order": "raw_class_id_ascending",
             "allocation_rounding": "clipped_base_max_min_then_capped_sqrt_largest_remainder_raw_id_tie",
             "seeds": asdict(resolve_seed_configuration(seed, self._member_id)),
@@ -199,10 +267,29 @@ class FoldSqrtReplayBuffer:
             "task_file_sha256": hashlib.sha256(content).hexdigest(),
             "feature_columns": list(self._columns), "feature_order_sha256": _digest(list(self._columns)),
         }
+        if self._ranking_policy == PIPELINE_INPUT_RANKING_POLICY:
+            provenance = self._ranking_preprocessing.metadata["provenance"]
+            for key in ("seeds", "validation_fold", "fold_seed", "assignment_sha256",
+                        "fold_manifest_sha256", "sources", "task_file_sha256",
+                        "feature_columns", "feature_order_sha256"):
+                if provenance[key] != self._metadata[key]:
+                    raise ValueError(f"Ranking preprocessing provenance mismatch: {key}.")
         self._completed_task_id = -1
         self._observed: dict[int, int] = {}
         self._entries: dict[int, DDIBatchArrays] = {}
         self._history: list[dict] = []
+
+    def _rank_new_class(self, raw_features: np.ndarray, sample_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if self._ranking_policy == SAMPLE_NORMALIZED_RANKING_POLICY:
+            return rank_raw_class_exemplars(raw_features, sample_ids)
+        preprocessing = self._ranking_preprocessing
+        if preprocessing is None:  # construction validates this; defensive guard for corrupted objects
+            raise RuntimeError("Missing frozen preprocessing for pipeline-input ranking.")
+        values = preprocessing.transform(
+            raw_features, feature_columns=list(self._columns), member_id=self._member_id,
+            policy="task0_standard_frozen",
+        )
+        return rank_input_class_exemplars(values, sample_ids)
 
     @property
     def metadata(self) -> dict:
@@ -292,7 +379,9 @@ class FoldSqrtReplayBuffer:
                 updated[c] = _copy_arrays(self._entries[c], slice(0, quota))
             else:
                 indices = np.flatnonzero(current.labels == c)
-                rank, distances = rank_raw_class_exemplars(current.features[indices], current.metadata["sample_id"][indices])
+                rank, distances = self._rank_new_class(
+                    current.features[indices], current.metadata["sample_id"][indices]
+                )
                 selected = indices[rank[:quota]]
                 updated[c] = DDIBatchArrays(
                     np.asarray(current.features[selected], dtype=np.float64).copy(), current.labels[selected].astype(np.int64),

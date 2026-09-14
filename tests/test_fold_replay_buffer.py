@@ -73,6 +73,29 @@ def test_ranking_by_hand_and_input_permutation():
     np.testing.assert_array_equal(ds, [0, 0])
 
 
+def test_pipeline_input_ranking_by_hand_and_permutation():
+    x = np.array([[0., 0.], [2., 0.], [10., 0.]])
+    ids = np.array(["b", "a", "c"])
+    order, distances = replay.rank_input_class_exemplars(x, ids)
+    assert ids[order].tolist() == ["a", "b", "c"]
+    np.testing.assert_array_equal(distances, [2., 4., 6.])
+    perm = np.array([2, 0, 1])
+    other, other_distances = replay.rank_input_class_exemplars(x[perm], ids[perm])
+    assert ids[perm][other].tolist() == ["a", "b", "c"]
+    np.testing.assert_array_equal(other_distances, distances)
+    # The two candidate spaces are genuinely different ranking functions.
+    raw = np.array([
+        [1.1626641008, 6.4952563575, 1.0248931554],
+        [-4.3842692045, 7.1572402525, 1.3844882337],
+        [-1.8064953921, 4.5939967254, 1.1307682473],
+        [0.9895628984, 0.2246904417, 1.6957007501],
+    ])
+    names = np.array(["a", "b", "c", "d"])
+    sample_order, _ = replay.rank_raw_class_exemplars(raw, names)
+    input_order, _ = replay.rank_input_class_exemplars(raw, names)
+    assert names[sample_order].tolist() != names[input_order].tolist()
+
+
 @pytest.mark.parametrize("x,ids", [([[np.nan, 2]], ["a"]), ([[np.inf, 2]], ["a"]),
     ([[1, 2], [2, 3]], ["a", "a"]), ([[1, 2]], [""]), ([[1e308, -1e308]], ["a"])])
 def test_ranking_invalid(x, ids):
@@ -201,6 +224,53 @@ def test_ab_ids_equal_model_features_can_differ(data):
         av, bv = a.model_arrays(raw), b.model_arrays(scaler)
         np.testing.assert_array_equal(av.metadata["sample_id"], bv.metadata["sample_id"])
         assert not np.allclose(av.features, bv.features)
+
+
+def test_two_ranking_spaces_provenance_selection_and_roundtrip(data):
+    kw = settings(data, budget=1)
+    prep_kwargs = {k: v for k, v in kw.items() if k != "total_memory_budget"}
+    scaler = prepare_fold_preprocessing(**prep_kwargs, validation_fold=0,
+                                        policy="task0_standard_frozen")
+    pipeline_kw = {
+        **kw,
+        "ranking_policy": replay.PIPELINE_INPUT_RANKING_POLICY,
+        "ranking_preprocessing": scaler,
+        "ranking_preprocessing_sha256": "a" * 64,
+    }
+    sample_buffer = replay.FoldSqrtReplayBuffer(**kw)
+    pipeline_buffer = replay.FoldSqrtReplayBuffer(**pipeline_kw)
+    rows = current(kw, 0)
+    sample_buffer.update(rows, task_id=0, feature_columns=["x", "y"])
+    pipeline_buffer.update(rows, task_id=0, feature_columns=["x", "y"])
+    metadata = pipeline_buffer.metadata["ranking"]
+    assert metadata["policy"] == replay.PIPELINE_INPUT_RANKING_POLICY
+    assert metadata["preprocessing_policy"] == "task0_standard_frozen"
+    assert metadata["preprocessing_sha256"] == "a" * 64
+    assert metadata["feature_space"] == "frozen_preprocessing_output_before_model_layernorm"
+    class_rows = rows.features[rows.labels == 10]
+    class_ids = rows.metadata["sample_id"][rows.labels == 10]
+    transformed = scaler.transform(class_rows, feature_columns=["x", "y"], member_id=0,
+                                   policy="task0_standard_frozen")
+    expected, _ = replay.rank_input_class_exemplars(transformed, class_ids)
+    assert pipeline_buffer.get_all().metadata["sample_id"].tolist() == [class_ids[expected[0]]]
+    # Candidate spaces may select the same IDs for a particular class; equality is
+    # not forced either way. Provenance, not artificial divergence, distinguishes them.
+    snapshot = pickle.loads(pickle.dumps(pipeline_buffer.state_dict()))
+    restored = replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **pipeline_kw)
+    assert_arrays_equal(restored.get_all(), pipeline_buffer.get_all())
+    with pytest.raises(ValueError, match="metadata mismatch"):
+        replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **kw)
+
+
+def test_pipeline_ranking_requires_approved_frozen_scaler(data):
+    kw = settings(data)
+    common = {k: v for k, v in kw.items() if k != "total_memory_budget"}
+    raw = prepare_fold_preprocessing(**common, validation_fold=0, policy="raw_identity")
+    with pytest.raises(ValueError, match="task0_standard_frozen"):
+        replay.FoldSqrtReplayBuffer(
+            **kw, ranking_policy=replay.PIPELINE_INPUT_RANKING_POLICY,
+            ranking_preprocessing=raw, ranking_preprocessing_sha256="a" * 64,
+        )
 
 
 @pytest.mark.parametrize("save_after,budget", [(-1, 5), (0, 5), (1, 5), (2, 5), (0, 0), (1, 1)])

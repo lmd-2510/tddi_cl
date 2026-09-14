@@ -26,7 +26,13 @@ from src.data.ddi_dataset import (
     prepare_development_fold_context,
 )
 from src.data.fold_preprocessing import load_fold_preprocessing
-from src.data.fold_replay_buffer import FoldSqrtReplayBuffer, four_percent_member_budgets
+from src.data.fold_replay_buffer import (
+    PIPELINE_INPUT_RANKING_POLICY,
+    RANKING_POLICIES,
+    SAMPLE_NORMALIZED_RANKING_POLICY,
+    FoldSqrtReplayBuffer,
+    four_percent_member_budgets,
+)
 from src.data.fold_replay_sampler import FoldReplayFractionSampler, SAMPLER_POLICY, RNG_DERIVATION
 from src.data.stratified_folds import fold_file_sha256
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, paper_member_manifest
@@ -86,6 +92,11 @@ def validate_fold_options(args):
         raise ValueError("--stop-after-task must be between 0 and 7.")
     if args.epochs <= 0 or args.patience <= 0:
         raise ValueError("Epochs and patience must be positive.")
+    if args.exemplar_ranking_policy not in RANKING_POLICIES:
+        raise ValueError(f"Unsupported exemplar ranking policy: {args.exemplar_ranking_policy}.")
+    if (args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY
+            and args.preprocessing_policy != "task0_standard_frozen"):
+        raise ValueError("Pipeline-input exemplar ranking requires task0_standard_frozen preprocessing.")
     for name in ("lr", "weight_decay", "distill_alpha", "temperature", "feature_distill_weight", "focal_gamma"):
         value = getattr(args, name)
         if not math.isfinite(value) or value < 0 or (name in ("lr", "temperature") and value == 0):
@@ -176,7 +187,9 @@ def prepare_fold_run(args, *, engine, context=None):
     budgets = four_percent_member_budgets(manifest["assignment_row_count"])
     buffer_kwargs = dict(context=context, task_file=args.task_file, feature_columns=columns,
         member_id=args.member_id, total_memory_budget=budgets[args.member_id], base_quota=10,
-        experiment_seed=args.seed)
+        experiment_seed=args.seed, ranking_policy=args.exemplar_ranking_policy,
+        ranking_preprocessing=(prep if args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY else None),
+        ranking_preprocessing_sha256=(prep_hash if args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY else None))
     buffer = FoldSqrtReplayBuffer(**buffer_kwargs)
     seeds = resolve_seed_configuration(args.seed, args.member_id)
     device = engine.resolve_device(args.device)
@@ -192,7 +205,11 @@ def prepare_fold_run(args, *, engine, context=None):
         "sources": buffer.metadata["sources"], "preprocessing_sha256": prep_hash,
         "preprocessing": prep.metadata, "buffer": buffer.metadata,
         "member_budgets": budgets, "global_slot_budget": sum(budgets.values()),
-        "ranking_seed_role": "no_rng_raw_LN_class_mean_sample_ID_tie",
+        "ranking_seed_role": (
+            "no_rng_per_sample_normalized_class_mean_sample_ID_tie"
+            if args.exemplar_ranking_policy == SAMPLE_NORMALIZED_RANKING_POLICY
+            else "no_rng_frozen_preprocessed_input_class_mean_sample_ID_tie"
+        ),
         "microbatch": args.batch_size, "gradient_accumulation": 1024 // args.batch_size, "effective_batch_target": 1024,
         "drop_last": False, "optimizer": "AdamW_new_each_task", "scheduler": None,
         "classification_weight": 1.0, "logit_distillation_weight": args.distill_alpha,

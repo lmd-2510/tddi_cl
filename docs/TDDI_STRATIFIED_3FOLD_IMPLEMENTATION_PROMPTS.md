@@ -3,8 +3,8 @@
 Cập nhật: 2026-09-14. Nguồn quyết định:
 [TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md).
 
-**Bước tiếp theo: chạy smoke/pilot trên server, rồi Prompt 13 khi có kết quả thật.**
-Prompt 5–12 đã được triển khai; giữ nội dung bên dưới
+**Bước tiếp theo: chạy smoke/pilot ranking theo runbook Prompt 14 trên server.**
+Prompt 5–14 đã được triển khai; giữ nội dung bên dưới
 để tra phạm vi và acceptance, không thực hiện lại. Các bước audit code, fold schema,
 build/audit và decision record trước đó đã hoàn thành. Giữ số prompt để nối lịch sử;
 từ Prompt 7 trở đi là thứ tự mới, không dùng nội dung của prompt cũ cùng số.
@@ -61,6 +61,11 @@ hoặc phục hồi backup; không bắt buộc chạy lại trước từng pro
 Prompt 5–12 triển khai hai phương án đã được phép thử, không cần chốt một
 preprocessing cuối. Không thực hiện phân tích kết quả giả ở Prompt 13 khi chưa
 có artifact thật. Full run chưa được tự động cho phép.
+
+Prompt 13 đã đọc bundle thật ngày 2026-09-14 và người dùng đã duyệt preprocessing
+B `task0_standard_frozen`; xem
+[báo cáo pilot preprocessing](TDDI_PREPROCESSING_AB_PILOT_RESULTS.md). Không thực
+hiện full8; Prompt 14 chỉ chuẩn bị đối chứng ranking validation member0/task0–1.
 
 ## Prompt 5 — Loader fold-aware từ artifact đã audit
 
@@ -304,6 +309,8 @@ preprocessing/ranking cuối dựa trên dry-run hoặc synthetic metrics.
 
 ## Prompt 13 — Đọc pilot preprocessing và đề xuất, chưa tự chốt
 
+Trạng thái: **đã hoàn thành; người dùng đã duyệt B `task0_standard_frozen`.**
+
 ```text
 Đọc decision record và A/B artifacts thật người dùng gửi. Kiểm tra cùng data/member/
 hyper/exemplar IDs/sampler order ở epoch chung; early stopping có thể khác.
@@ -319,6 +326,9 @@ tự chạy thử tiếp. Dừng chờ quyết định trước Prompt14.
 ```
 
 ## Prompt 14 — Pilot không gian exemplar sau khi preprocessing được duyệt
+
+Trạng thái: **đã triển khai code/config/tests/runbook; chưa chạy dữ liệu thật.**
+Xem [runbook pilot exemplar ranking](TDDI_EXEMPLAR_RANKING_PILOT_RUNBOOK.md).
 
 ```text
 Chỉ làm khi người dùng đã duyệt preprocessing từ Prompt13. Đọc decision record

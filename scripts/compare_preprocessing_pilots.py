@@ -41,7 +41,8 @@ def number(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def read_run(root, case, protocol, task_hash):
+def read_run(root, case, protocol, task_hash, *, expected_preprocessing_policy=None,
+             expected_ranking_policy=None, comparison_name="preprocessing"):
     root = Path(root).resolve()
     inventory, warnings = {}, []
     def load(relative):
@@ -53,14 +54,20 @@ def read_run(root, case, protocol, task_hash):
     config = load("run_config.json")
     contract = config["checkpoint_contract"]
     resolved = config["resolved"]
-    require(contract["method"] == "replay_distill_fixed_budget_uniform" and contract["model"]["variant"] == "tddi_paper_member", "Wrong method/backbone for preprocessing pilot")
+    require(contract["method"] == "replay_distill_fixed_budget_uniform" and contract["model"]["variant"] == "tddi_paper_member", f"Wrong method/backbone for {comparison_name} pilot")
     require(config["config_sha256"] == digest({"arguments": config["arguments"], "resolved": resolved}), "run_config checksum mismatch")
     require(contract["training_policy"] == "frozen_fold_replay_distill_v1" and contract["validation_only"], "Only frozen-fold validation-only pilots are accepted; no test selection")
     require(contract["task_file_sha256"] == task_hash and contract["task_protocol"] == "tail_to_head"
             and contract["task_layout"] == LAYOUT, "P3 task-file hash/layout mismatch")
     require(contract["seeds"]["experiment_seed"] == 0 and contract["seeds"]["member_id"] == 0
             and contract["validation_fold"] == 0 and contract["fold_seed"] == 42, "Report scope is seed0/fold42/member0")
-    require(contract["preprocessing"]["policy"] == {"A": "raw_identity", "B": "task0_standard_frozen"}[case], "A/B preprocessing policy mismatch")
+    if expected_preprocessing_policy is None:
+        expected_preprocessing_policy = {"A": "raw_identity", "B": "task0_standard_frozen"}[case]
+    require(contract["preprocessing"]["policy"] == expected_preprocessing_policy,
+            f"{comparison_name} preprocessing policy mismatch")
+    if expected_ranking_policy is not None:
+        require(contract["buffer"]["ranking"]["policy"] == expected_ranking_policy,
+                f"{comparison_name} ranking policy mismatch")
     require(resolved["stop_after_task"] in (0, 1), "Not a full8 report")
     require(all(resolved.get(k) == v for k, v in contract.items() if k not in ("hyperparameters", "sampler")), "Resolved/contract mismatch")
     require(all(config["arguments"].get(k) == v for k, v in contract["hyperparameters"].items()), "Argument/hyperparameter mismatch")
@@ -132,7 +139,8 @@ def read_run(root, case, protocol, task_hash):
         require(boundary.resolve().is_relative_to(root), "Boundary path escapes root")
         telemetry["boundary_checkpoint_size_bytes"] = boundary.stat().st_size if boundary.is_file() else None
         if not boundary.is_file(): warnings.append(f"{case} task{task} boundary checkpoint size: unavailable (report-only bundle is allowed)")
-        tasks.append(dict(task_id=task, best_epoch=summary["best_epoch"], epochs_trained=len(curves),
+        tasks.append(dict(task_id=task, artifact_directory=folder.as_posix(),
+            best_epoch=summary["best_epoch"], epochs_trained=len(curves),
             raw_classes={"seen_all": raw, "old": sorted(set(raw) - set(inputs["current_raw_classes"])), "current": inputs["current_raw_classes"]},
             metrics=by_group, epoch_curves=curves, telemetry=telemetry,
             memory_before=summary["memory_before"], memory_after=summary["memory_after"],

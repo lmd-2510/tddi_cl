@@ -107,8 +107,10 @@ quy định/test rõ khi triển khai.
 
 ## 6. Preprocessing và exemplar — kiểm chứng hai giai đoạn
 
-**Chưa chốt preprocessing cuối cùng.** Các trao đổi trước về chọn scaler task 0
-hoặc bỏ scaler không phải quyết định cuối; kế hoạch dưới đây thay thế chúng.
+**Đã chốt preprocessing B `task0_standard_frozen` ngày 2026-09-14.** Mỗi member
+fit scaler riêng chỉ trên training rows task 0 của chính member, sau đó đóng băng.
+Không dùng scaler member 0 cho member 1/2; không fit lại bằng task tương lai,
+validation hoặc test.
 
 ### Giai đoạn A: hai pilot preprocessing
 
@@ -151,6 +153,24 @@ Sau khi có kết quả preprocessing:
 - Nguyên tắc đang theo đuổi: **chọn gần trung bình class**. Không gian khoảng cách
   cuối cùng chờ kết quả, không tự quyết định trong lượt triển khai đầu.
 - Nếu hai pilot chưa rõ, mở rộng kiểm tra; không ép chọn phương án thắng.
+
+### Evidence pilot member 0, task 0–1 — 2026-09-14
+
+Hai pilot thật trên server đã hoàn tất và bundle report-only được comparator đọc lại
+thành công. Alignment `PASS`: A/B cùng assignment/task hash, current/validation/replay
+IDs, retained exemplar IDs và sampler order ở epoch chung. Không dùng test để so sánh.
+
+Tại task 1 `seen_all`, B (`task0_standard_frozen`) đạt Macro-F1 `0,859409` và
+Balanced Accuracy `0,853691`; A (`raw_identity`) đạt lần lượt `0,838958` và
+`0,830732`. B cũng giữ old classes tốt hơn, trong khi A tốt hơn nhẹ trên current
+classes. A đạt best epoch đúng giới hạn 20; dữ liệu tail chỉ tạo một optimizer step
+mỗi epoch. Vì vậy **đề xuất tạm thời là B**, nhưng chưa coi là winner cuối cho toàn
+pipeline và chưa được phép tự chuyển sang full8.
+
+Trạng thái: **người dùng đã tạm duyệt B ngày 2026-09-14 để thực hiện Prompt 14**.
+Prompt 14 chỉ so sánh ranking trên validation; không tự chọn ranking hoặc chạy full8.
+Báo cáo đầy đủ:
+[Kết quả preprocessing A/B](TDDI_PREPROCESSING_AB_PILOT_RESULTS.md).
 
 ## 7. Hyper training tạm giữ — đã chốt làm baseline
 
@@ -233,10 +253,10 @@ Các output phải ở namespace mới, tách A/B và tách result cũ; tên/pat
 | Current/replay/cap/class scheduling | Đã chốt policy; chi tiết rounding/state cần tests |
 | Hyper training | Giữ cũ làm mốc |
 | OOF threshold và fallback | Đã chốt |
-| Preprocessing cuối cùng | **Chờ hai pilot A/B** |
+| Preprocessing cuối cùng | **Đã chốt B `task0_standard_frozen`** |
 | Không gian exemplar cuối cùng | **Chờ giai đoạn B** |
 | Xếp hạng chung cho pilot A/B | Tạm dùng để đối chứng, không coi là tối ưu |
-| Code/config hỗ trợ toàn bộ thiết kế | Cần triển khai/kiểm chứng theo prompt cập nhật |
+| Code/config hỗ trợ toàn bộ thiết kế | Prompt 5–14 đã triển khai; chờ chạy ranking pilot thật và duyệt winner |
 
 Tài liệu liên quan: [Implementation prompts](TDDI_STRATIFIED_3FOLD_IMPLEMENTATION_PROMPTS.md),
 [fold artifact và runbook build/audit](TDDI_STRATIFIED_3FOLD_ARTIFACT.md).
