@@ -557,3 +557,48 @@ def load_development_fold_arrays(
         metadata={key: np.concatenate([part.metadata[key] for part in parts])
                   for key in parts[0].metadata},
     )
+
+
+def load_development_fold_identity(
+    context: DevelopmentFoldContext,
+    *,
+    role: str,
+    member_id: int,
+    validation_fold: int,
+    class_ids: Iterable[int] | None = None,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Select frozen-fold labels/provenance without reading descriptor columns.
+
+    This is used to prove prediction/OOF coverage.  It preserves train-source
+    then validation-source order and uses the already startup-validated frozen
+    assignment tables; it does not rebuild folds or touch test descriptors.
+    """
+
+    context.assert_unchanged()
+    if role not in {"train", "validation", "all"}:
+        raise ValueError("role must be train, validation or all.")
+    mapping = context.manifest["member_to_validation_fold"]
+    if type(member_id) is not int or str(member_id) not in mapping:
+        raise ValueError("member_id must be 0, 1 or 2.")
+    if type(validation_fold) is not int or validation_fold != mapping[str(member_id)]:
+        raise ValueError("validation_fold does not match manifest member mapping.")
+    class_values = None if class_ids is None else np.asarray(list(class_ids), dtype=np.int64)
+    selected = []
+    for rows in context._rows:
+        folds = rows["fold_id"].to_numpy()
+        if role == "validation":
+            mask = folds == validation_fold
+        elif role == "train":
+            mask = folds != validation_fold
+        else:
+            mask = np.ones(rows.num_rows, dtype=bool)
+        if class_values is not None:
+            mask &= np.isin(rows["raw_class_id"].to_numpy(), class_values)
+        selected.append(rows.filter(pa.array(mask)))
+    table = pa.concat_tables(selected)
+    metadata_columns = ["sample_id", "source_split", "source_row_index", "fold_id"]
+    context.assert_unchanged()
+    return (
+        table["raw_class_id"].to_numpy(),
+        {column: table[column].to_numpy() for column in metadata_columns},
+    )

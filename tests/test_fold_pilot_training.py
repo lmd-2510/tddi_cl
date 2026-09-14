@@ -14,6 +14,7 @@ from src.data.ddi_dataset import prepare_development_fold_context
 from src.data.fold_preprocessing import prepare_fold_preprocessing, save_fold_preprocessing
 from src.data.stratified_folds import FOLD_ASSIGNMENT_SCHEMA, describe_fold_source, save_fold_artifact
 from src.models.tddi_paper_member import TDDIPaperMember, TDDIPaperMemberConfig
+from src.eval.predictions import load_member_prediction_artifact
 from src.training import fold_pilot_training as pilot, train_cil as engine
 
 
@@ -149,11 +150,32 @@ def test_ab_two_task_full_protocol_alignment_and_losses(data, monkeypatch, tiny)
     assert (roots[-1] / "run_summary.json").read_bytes() == before
 
 
+def test_fold_training_exports_assignment_bound_validation_predictions(data, monkeypatch, tiny):
+    command = cli(
+        data, suffix="_predictions",
+        extra=["--export-member-predictions", "--member-prediction-splits", "validation"],
+    )
+    monkeypatch.setattr(sys, "argv", command)
+    engine.main()
+    root = data["root"] / "run_raw_identity_predictions"
+    for task_id, class_count in ((0, 38), (1, 58)):
+        path = root / "member_predictions" / f"task_{task_id}" / "validation.npz"
+        artifact = load_member_prediction_artifact(path)
+        assert artifact.context.ensemble_mode == "stratified_3fold"
+        assert artifact.context.fold_id == artifact.context.member_id == 0
+        assert artifact.class_count == class_count
+        assert artifact.provenance is not None
+        assert artifact.provenance.preprocessing_member_id == 0
+        assert artifact.provenance.preprocessing_policy == "raw_identity"
+        assert artifact.provenance.expected_oof_rows == artifact.row_count * 3
+        np.testing.assert_array_equal(artifact.fold_ids, 0)
+
+
 @pytest.mark.parametrize("extra,match", [
     (["--method", "ewc"], "requires replay"), (["--seed", "1"], "seed 0"),
     (["--fold-id", "1"], "member=held-out"), (["--scaler", "old.pkl"], "legacy --scaler"),
-    (["--resume-replay-checkpoint", "old.pt"], "Prompt 10"),
-    (["--export-member-predictions"], "export"), (["--max-train-rows-per-task", "4"], "complete"),
+        (["--resume-replay-checkpoint", "old.pt"], "Prompt 10"),
+        (["--max-train-rows-per-task", "4"], "complete"),
     (["--batch-size", "128"], "microbatch 64"), (["--stop-after-task", "8"], "between 0 and 7"),
 ])
 def test_options_fail_before_io(data, monkeypatch, extra, match):

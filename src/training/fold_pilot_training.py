@@ -22,7 +22,8 @@ from torch.utils.data import DataLoader
 
 from src.data.class_mapping import build_seen_class_map, invert_class_map, remap_labels
 from src.data.ddi_dataset import (
-    load_development_fold_arrays, load_feature_columns, load_split_frame,
+    DEFAULT_META_COLS, load_development_fold_arrays, load_development_fold_identity,
+    load_feature_columns, load_split_frame,
     prepare_development_fold_context,
 )
 from src.data.fold_preprocessing import load_fold_preprocessing
@@ -36,6 +37,12 @@ from src.data.fold_replay_buffer import (
 from src.data.fold_replay_sampler import FoldReplayFractionSampler, SAMPLER_POLICY, RNG_DERIVATION
 from src.data.stratified_folds import fold_file_sha256
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, paper_member_manifest
+from src.eval.predictions import (
+    MemberPredictionContext,
+    PredictionProvenance,
+    export_member_prediction_artifact,
+    partition_identity_sha256,
+)
 from src.utils.logging import RunLogger
 from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 from src.training.replay_checkpoint import (
@@ -79,8 +86,8 @@ def validate_fold_options(args):
         raise ValueError("Do not pass the legacy --scaler with the frozen-fold policy.")
     if args.resume_replay_checkpoint or args.resume_ewc_checkpoint:
         raise ValueError("Prompt 10 uses --resume-fold-checkpoint; legacy checkpoints are incompatible.")
-    if args.export_member_predictions:
-        raise ValueError("Frozen-fold prediction provenance/export is reserved for its later prompt; omit --export-member-predictions.")
+    if args.export_member_predictions and not args.member_prediction_splits:
+        raise ValueError("Prediction export requires at least one validation/test split.")
     if any(v is not None for v in (args.max_train_rows_per_task, args.max_validation_rows_per_task,
                                    args.max_test_rows_per_task)):
         raise ValueError("Frozen-fold policy requires complete current/validation rows; no row limits.")
@@ -136,6 +143,98 @@ def _model_values(raw, prep, columns, member):
 
 def _ids(arrays):
     return arrays.metadata["sample_id"].tolist()
+
+
+def _prediction_provenance(prepared, *, metadata, labels, all_oof=None):
+    """Bind one prediction to frozen assignment/preprocess/ranking/budget state."""
+
+    fold_ids = np.asarray(metadata["fold_id"], dtype=np.int16)
+    sample_ids = np.asarray(metadata["sample_id"]).astype(np.str_, copy=False)
+    oof_rows = oof_sha = None
+    if all_oof is not None:
+        oof_labels, oof_metadata = all_oof
+        oof_rows = int(len(oof_labels))
+        oof_sha = partition_identity_sha256(
+            oof_metadata["sample_id"], oof_labels, oof_metadata["fold_id"]
+        )
+    resolved, buffer = prepared["resolved"], prepared["buffer"]
+    member_id = prepared["seeds"].member_id
+    # This digest intentionally excludes member seed/fold, scaler bytes and the
+    # one-slot budget remainder. Those are recorded below but legitimately vary.
+    shared_contract = {
+        "training_policy": resolved["training_policy"],
+        "method": resolved["method"],
+        "method_protocol": resolved["method_protocol"],
+        "experiment_seed": prepared["seeds"].experiment_seed,
+        "fold_seed": resolved["fold_seed"],
+        "task_protocol": resolved["task_protocol"],
+        "task_file_sha256": prepared["task_hash"],
+        "task_layout": resolved["task_layout"],
+        "assignment_sha256": prepared["manifest"]["assignment_sha256"],
+        "fold_manifest_sha256": prepared["context"].manifest_sha256,
+        "preprocessing_policy": resolved["preprocessing"]["policy"],
+        "ranking_policy": buffer.metadata["ranking"]["policy"],
+        "buffer_policy": buffer.metadata["policy"],
+        "global_memory_budget": sum(prepared["budgets"].values()),
+        "model": resolved["model"],
+        "microbatch": resolved["microbatch"],
+        "effective_batch_target": resolved["effective_batch_target"],
+        "loss_scope": resolved["loss_scope"],
+        "hyperparameters": prepared["contract"]["hyperparameters"],
+        "sampler": prepared["contract"]["sampler"],
+        "implementation_sha256": resolved["implementation_sha256"],
+    }
+    return PredictionProvenance(
+        assignment_sha256=prepared["manifest"]["assignment_sha256"],
+        fold_manifest_sha256=prepared["context"].manifest_sha256,
+        task_file_sha256=prepared["task_hash"],
+        study_contract_sha256=_digest(shared_contract),
+        preprocessing_policy=resolved["preprocessing"]["policy"],
+        preprocessing_sha256=prepared["prep_hash"],
+        preprocessing_member_id=member_id,
+        ranking_policy=buffer.metadata["ranking"]["policy"],
+        buffer_policy=buffer.metadata["policy"],
+        member_memory_budget=prepared["budgets"][member_id],
+        global_memory_budget=sum(prepared["budgets"].values()),
+        expected_partition_rows=int(len(labels)),
+        expected_partition_sha256=partition_identity_sha256(sample_ids, labels, fold_ids),
+        expected_oof_rows=oof_rows,
+        expected_oof_sha256=oof_sha,
+    )
+
+
+def _export_fold_prediction(
+    prepared, *, engine, model, values, labels, metadata, seen_map, criterion,
+    run_id, task_id, split, root, device, batch_size, all_oof=None,
+):
+    loader = DataLoader(
+        engine.build_tensor_dataset(values, remap_labels(labels, seen_map)),
+        batch_size=batch_size, shuffle=False, drop_last=False,
+        generator=torch.Generator().manual_seed(0),
+    )
+    result = engine.evaluate_model(
+        model, loader, criterion, device, invert_class_map(seen_map),
+        evaluation_class_indices=list(range(len(seen_map))), collect_outputs=True,
+    )
+    if result.outputs is None:
+        raise RuntimeError("Fold prediction collection did not return outputs.")
+    member_id = prepared["seeds"].member_id
+    artifact_path = root / "member_predictions" / f"task_{task_id}" / f"{split}.npz"
+    export_member_prediction_artifact(
+        result.outputs, metadata,
+        MemberPredictionContext(
+            run_id=run_id, method=prepared["resolved"]["method"],
+            method_protocol=TRAINING_POLICY, task_id=task_id, split=split,
+            member_id=member_id, experiment_seed=prepared["seeds"].experiment_seed,
+            member_seed=prepared["seeds"].member_seed,
+            ensemble_mode="stratified_3fold", fold_id=member_id,
+            fold_count=3, fold_seed=prepared["resolved"]["fold_seed"],
+        ), artifact_path,
+        provenance=_prediction_provenance(
+            prepared, metadata=metadata, labels=labels, all_oof=all_oof
+        ),
+    )
+    return artifact_path
 
 
 def _eval_groups(engine, model, values, labels, seen_map, new_classes, criterion, device, batch_size=64):
@@ -217,6 +316,12 @@ def prepare_fold_run(args, *, engine, context=None):
         "loss_scope": "focal_and_old_column_KL_T2_and_latent_MSE_on_all_current_plus_replay_draws",
         "early_stopping": "held_out_all_seen_macro_f1", "validation_only": args.validation_only,
         "test_policy": "integrity_hash_and_pair_IDs_only" if args.validation_only else "report_only_after_best_validation",
+        "prediction_export": {
+            "enabled": bool(args.export_member_predictions),
+            "splits": list(args.member_prediction_splits) if args.export_member_predictions else [],
+            "schema": "member_prediction_v3_assignment_bound",
+            "oof_policy": "concatenate_one_held_out_fold_prediction_per_sample",
+        },
         "checkpoint_policy": "immutable_frozen_fold_task_boundary_v1",
         "model": paper_member_manifest(dropout=args.dropout, activation=args.activation), "device": device,
         "implementation_sha256": {name: fold_file_sha256(Path(__file__).parents[1] / name) for name in (
@@ -250,7 +355,6 @@ def run_fold_training(args, *, engine):
         ("prep", "prep_hash", "budgets", "buffer_kwargs", "buffer"))
     seeds, device, stop, arguments, resolved, contract = (prepared[k] for k in
         ("seeds", "device", "stop", "arguments", "resolved", "contract"))
-    del prepared
     loaded = None
     if resume_path:
         loaded, buffer = load_fold_replay_checkpoint(resume_path, root=root, expected_contract=contract,
@@ -389,12 +493,43 @@ def run_fold_training(args, *, engine):
                         "run_id": run_id, "resumable": False, "policy": TRAINING_POLICY}, handle))
         metrics = [{"task": task_id, "split": "validation", **m} for m in
                    _eval_groups(engine, model, val_inputs, validation.labels, seen_map, new_classes, criterion, device, args.batch_size)]
+        prediction_paths = []
+        if args.export_member_predictions and "validation" in args.member_prediction_splits:
+            all_oof = load_development_fold_identity(
+                context, role="all", member_id=args.member_id,
+                validation_fold=args.member_id, class_ids=list(seen_map),
+            )
+            prediction_paths.append(_export_fold_prediction(
+                prepared, engine=engine, model=model, values=val_inputs,
+                labels=validation.labels, metadata=validation.metadata,
+                seen_map=seen_map, criterion=criterion, run_id=run_id,
+                task_id=task_id, split="validation", root=root, device=device,
+                batch_size=args.batch_size, all_oof=all_oof,
+            ))
         if not args.validation_only:
             context.assert_unchanged()
-            frame = load_split_frame(args.test, columns, class_ids=list(seen_map))
+            frame = load_split_frame(
+                args.test, columns, class_ids=list(seen_map),
+                include_metadata=True, meta_cols=DEFAULT_META_COLS,
+            )
             test_values = _model_values(frame[columns].to_numpy(dtype=np.float64), prep, columns, args.member_id)
+            test_labels = frame["class"].to_numpy(dtype=np.int64)
             metrics.extend({"task": task_id, "split": "test", **m} for m in
-                _eval_groups(engine, model, test_values, frame["class"].to_numpy(), seen_map, new_classes, criterion, device, args.batch_size))
+                _eval_groups(engine, model, test_values, test_labels, seen_map, new_classes, criterion, device, args.batch_size))
+            if args.export_member_predictions and "test" in args.member_prediction_splits:
+                test_metadata = {column: frame[column].to_numpy(copy=False) for column in DEFAULT_META_COLS}
+                test_metadata["sample_id"] = np.char.add(
+                    np.char.add(test_metadata[DEFAULT_META_COLS[0]].astype(np.str_), "|"),
+                    test_metadata[DEFAULT_META_COLS[1]].astype(np.str_),
+                )
+                test_metadata["fold_id"] = np.full(len(frame), -1, dtype=np.int16)
+                prediction_paths.append(_export_fold_prediction(
+                    prepared, engine=engine, model=model, values=test_values,
+                    labels=test_labels, metadata=test_metadata, seen_map=seen_map,
+                    criterion=criterion, run_id=run_id, task_id=task_id,
+                    split="test", root=root, device=device,
+                    batch_size=args.batch_size,
+                ))
             del frame, test_values
         buffer_audit = buffer.update(current, task_id=task_id, feature_columns=columns)
         after = buffer.get_all()
@@ -414,6 +549,7 @@ def run_fold_training(args, *, engine):
             "checkpoint_size_bytes": (task_root / "best_model.pt").stat().st_size,
             "artifact_directory": task_root.relative_to(root).as_posix(),
             "boundary_checkpoint": f"checkpoints/task_{task_id}.pt",
+            "prediction_artifacts": [path.relative_to(root).as_posix() for path in prediction_paths],
             "completion_policy": "requires_valid_boundary_checkpoint_and_hashed_artifacts"}
         summary = json.loads(_json(summary))
         _publish_json(task_root / "completed_task.json", summary)
@@ -421,6 +557,8 @@ def run_fold_training(args, *, engine):
         all_epochs.extend(epoch_rows)
         task_summaries.append(summary)
         artifact_hashes.update(fold_artifact_inventory(root, task_root))
+        if prediction_paths:
+            artifact_hashes.update(fold_artifact_inventory(root, prediction_paths[0].parent))
         boundary_path = save_fold_replay_checkpoint(root / "checkpoints" / f"task_{task_id}.pt", run_id=run_id,
             completed_task_id=task_id, model_state=best_state, seen_class_map=seen_map, contract=contract,
             buffer=buffer, sampler=sampler, run_config_sha256=config_hash, artifact_hashes=artifact_hashes,

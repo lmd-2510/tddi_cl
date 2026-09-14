@@ -172,6 +172,26 @@ Prompt 14 chỉ so sánh ranking trên validation; không tự chọn ranking ho
 Báo cáo đầy đủ:
 [Kết quả preprocessing A/B](TDDI_PREPROCESSING_AB_PILOT_RESULTS.md).
 
+### Evidence ranking member 0, task 0–7 — 2026-09-15
+
+Hai trajectory validation-only giữ cố định preprocessing B, folds, seed, quota,
+replay và hyperparameter; chỉ thay không gian xếp hạng exemplar. Buffer chưa đầy ở
+task 0–3 nên hai run giống nhau. Sau task 4, exemplar bắt đầu khác; Jaccard giữa hai
+buffer giảm từ `0,913421` ở task 4 xuống `0,236728` ở task 6.
+
+Tại task 7 `seen_all`, ranking chuẩn hóa từng mẫu đạt Macro-F1 `0,525253` và
+Balanced Accuracy `0,440017`; ranking trong không gian input sau scaler đạt lần lượt
+`0,504230` và `0,416425`. Trên old classes, chuẩn hóa từng mẫu cũng tốt hơn về
+Accuracy (`0,272793` so với `0,229922`), Macro-F1 (`0,495228` so với `0,471755`)
+và Balanced Accuracy (`0,382980` so với `0,355739`). Pipeline-input chỉ nhỉnh hơn
+nhẹ trên current classes.
+
+Quyết định: **người dùng đã chốt `raw_sample_normalized_class_mean_control_v1` làm
+exemplar ranking ngày 2026-09-15**. Đây chỉ là quyết định policy từ validation
+member 0; không biến pilot thành kết quả test hoặc official ensemble study. Model
+input vẫn dùng preprocessing B `task0_standard_frozen`; “sample-normalized” chỉ mô
+tả không gian dùng để chọn exemplar.
+
 ## 7. Hyper training tạm giữ — đã chốt làm baseline
 
 | Tham số | Giá trị |
@@ -254,9 +274,10 @@ Các output phải ở namespace mới, tách A/B và tách result cũ; tên/pat
 | Hyper training | Giữ cũ làm mốc |
 | OOF threshold và fallback | Đã chốt |
 | Preprocessing cuối cùng | **Đã chốt B `task0_standard_frozen`** |
-| Không gian exemplar cuối cùng | **Chờ giai đoạn B** |
-| Xếp hạng chung cho pilot A/B | Tạm dùng để đối chứng, không coi là tối ưu |
-| Code/config hỗ trợ toàn bộ thiết kế | Prompt 5–14 đã triển khai; chờ chạy ranking pilot thật và duyệt winner |
+| Không gian exemplar cuối cùng | **Đã chốt `raw_sample_normalized_class_mean_control_v1`** |
+| Xếp hạng chung cho pilot A/B | Đã hoàn tất vai trò control; kết quả validation chọn sample-normalized |
+| Prediction provenance/OOF/common-test UE | **Prompt 15 đã triển khai; OOF one-prediction metrics được đánh dấu không khả dụng** |
+| Code/config hỗ trợ toàn bộ thiết kế | Prompt 5–15 đã triển khai và duyệt; bước tiếp theo là Prompt 16 |
 
 Tài liệu liên quan: [Implementation prompts](TDDI_STRATIFIED_3FOLD_IMPLEMENTATION_PROMPTS.md),
 [fold artifact và runbook build/audit](TDDI_STRATIFIED_3FOLD_ARTIFACT.md).

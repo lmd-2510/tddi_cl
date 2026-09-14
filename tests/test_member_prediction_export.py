@@ -15,8 +15,10 @@ from src.eval.evaluation import EvaluationResult, PredictionOutputs, evaluate_mo
 from src.eval.predictions import (
     MEMBER_PREDICTION_SCHEMA_VERSION,
     MemberPredictionContext,
+    PredictionProvenance,
     export_member_prediction_artifact,
     load_member_prediction_artifact,
+    partition_identity_sha256,
 )
 from src.data.sample_identity import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
 from src.training.train_cil import export_member_evaluation
@@ -231,3 +233,59 @@ def test_evaluation_and_export_preserve_deterministic_sample_order(tmp_path: Pat
     # Different batch widths may select different GEMM kernels; row alignment
     # remains deterministic up to ordinary float32 round-off.
     np.testing.assert_allclose(artifacts[0].logits, artifacts[1].logits, rtol=1e-6, atol=1e-7)
+
+
+def test_schema_three_fold_provenance_round_trip_and_assignment_guard(tmp_path: Path) -> None:
+    context = replace(
+        _context(), ensemble_mode="stratified_3fold", fold_id=0,
+        fold_count=3, fold_seed=42,
+    )
+    metadata = {**_metadata(), "fold_id": np.zeros(3, dtype=np.int16)}
+    ids = np.asarray(["DB001|DB101", "DB002|DB102", "DB003|DB103"])
+    digest = partition_identity_sha256(ids, _outputs().labels, metadata["fold_id"])
+    provenance = PredictionProvenance(
+        assignment_sha256="a" * 64, fold_manifest_sha256="b" * 64,
+        task_file_sha256="c" * 64, study_contract_sha256="d" * 64,
+        preprocessing_policy="task0_standard_frozen",
+        preprocessing_sha256="e" * 64, preprocessing_member_id=0,
+        ranking_policy="raw_sample_normalized_class_mean_control_v1",
+        buffer_policy="stratified_fraction_v1", member_memory_budget=9260,
+        global_memory_budget=27778, expected_partition_rows=3,
+        expected_partition_sha256=digest, expected_oof_rows=9,
+        expected_oof_sha256="f" * 64,
+    )
+    with pytest.raises(ValueError, match="requires assignment provenance"):
+        export_member_prediction_artifact(
+            _outputs(), metadata, context, tmp_path / "missing-provenance.npz"
+        )
+    path = export_member_prediction_artifact(
+        _outputs(), metadata, context, tmp_path / "fold.npz", provenance=provenance
+    )
+    loaded = load_member_prediction_artifact(path)
+    assert loaded.provenance == provenance
+    np.testing.assert_array_equal(loaded.fold_ids, 0)
+
+    with pytest.raises(ValueError, match="IDs/labels/folds"):
+        export_member_prediction_artifact(
+            replace(_outputs(), labels=np.asarray([30, 30, 10], dtype=np.int64)),
+            metadata, context, tmp_path / "bad-fold.npz", provenance=provenance,
+        )
+
+
+def test_member_schema_two_remains_readable(tmp_path: Path) -> None:
+    current = export_member_prediction_artifact(
+        _outputs(), _metadata(), _context(), tmp_path / "current.npz"
+    )
+    with np.load(current, allow_pickle=False) as payload:
+        legacy = {
+            key: np.asarray(payload[key])
+            for key in payload.files
+            if key not in {"fold_ids", "provenance_json"}
+        }
+    legacy["schema_version"] = np.asarray(2, dtype=np.int32)
+    legacy_path = tmp_path / "schema2.npz"
+    np.savez_compressed(legacy_path, **legacy)
+
+    loaded = load_member_prediction_artifact(legacy_path)
+    assert loaded.provenance is None
+    np.testing.assert_array_equal(loaded.fold_ids, -1)

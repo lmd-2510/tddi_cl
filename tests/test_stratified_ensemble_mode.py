@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.data.ddi_dataset import load_split_arrays
 from src.data.stratified_folds import (
@@ -15,7 +17,12 @@ from src.eval.threshold import (
     load_threshold_selection_config,
     select_confidence_threshold,
 )
-from src.eval.predictions import MemberPredictionArtifact, MemberPredictionContext
+from src.eval.predictions import (
+    MemberPredictionArtifact,
+    MemberPredictionContext,
+    PredictionProvenance,
+    partition_identity_sha256,
+)
 from src.eval.ensemble_ue import aggregate_member_predictions, export_offline_ensemble_artifact
 
 
@@ -82,6 +89,40 @@ def _fold_member(fold_id: int, sample_ids: list[str]) -> MemberPredictionArtifac
     )
 
 
+def _provenanced_fold_members() -> list[MemberPredictionArtifact]:
+    rows = {0: ["c", "f"], 1: ["a", "d"], 2: ["b", "e"]}
+    all_ids = np.asarray(["c", "f", "a", "d", "b", "e"])
+    all_labels = np.zeros(6, dtype=np.int64)
+    all_folds = np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int16)
+    oof_sha = partition_identity_sha256(all_ids, all_labels, all_folds)
+    members = []
+    for fold_id, sample_ids in rows.items():
+        artifact = _fold_member(fold_id, sample_ids)
+        fold_ids = np.full(2, fold_id, dtype=np.int16)
+        provenance = PredictionProvenance(
+            assignment_sha256="a" * 64,
+            fold_manifest_sha256="b" * 64,
+            task_file_sha256="c" * 64,
+            study_contract_sha256="d" * 64,
+            preprocessing_policy="task0_standard_frozen",
+            # Per-member scaler hashes are expected to differ.
+            preprocessing_sha256=str(fold_id + 1) * 64,
+            preprocessing_member_id=fold_id,
+            ranking_policy="raw_sample_normalized_class_mean_control_v1",
+            buffer_policy="stratified_fraction_v1",
+            member_memory_budget=9260 if fold_id == 0 else 9259,
+            global_memory_budget=27778,
+            expected_partition_rows=2,
+            expected_partition_sha256=partition_identity_sha256(
+                artifact.sample_ids, artifact.labels, fold_ids
+            ),
+            expected_oof_rows=6,
+            expected_oof_sha256=oof_sha,
+        )
+        members.append(replace(artifact, fold_ids=fold_ids, provenance=provenance))
+    return members
+
+
 def test_three_disjoint_validation_folds_become_one_oof_artifact(tmp_path: Path) -> None:
     members = [
         _fold_member(0, ["c", "f"]),
@@ -93,7 +134,11 @@ def test_three_disjoint_validation_folds_become_one_oof_artifact(tmp_path: Path)
     assert oof.context.ensemble_mode == "stratified_3fold"
     assert oof.sample_ids.tolist() == ["a", "b", "c", "d", "e", "f"]
     np.testing.assert_allclose(oof.entropy_confidence, 1.0 - oof.normalized_entropy)
-    np.testing.assert_array_equal(oof.mutual_information, 0.0)
+    np.testing.assert_array_equal(oof.prediction_count, np.ones(6, dtype=np.int16))
+    assert "mutual_information" in oof.unavailable_metrics
+    assert np.isnan(oof.mutual_information).all()
+    assert np.isnan(oof.mean_probability_variance).all()
+    assert np.isnan(oof.pairwise_disagreement).all()
 
     config_path = tmp_path / "threshold.json"
     config_path.write_text(
@@ -136,3 +181,74 @@ def test_oof_merge_rejects_overlapping_fold_samples() -> None:
         assert "overlap" in str(error).lower()
     else:
         raise AssertionError("Overlapping OOF samples were accepted.")
+
+
+def test_oof_provenance_proves_coverage_and_allows_different_member_scalers() -> None:
+    oof = aggregate_member_predictions(
+        _provenanced_fold_members(), ensemble_mode="stratified_3fold"
+    )
+
+    assert oof.row_count == 6
+    assert oof.member_provenance is not None
+    assert len({item.preprocessing_sha256 for item in oof.member_provenance}) == 3
+    np.testing.assert_array_equal(oof.prediction_count, 1)
+
+
+def test_oof_rejects_incomplete_wrong_fold_and_wrong_study_contract() -> None:
+    incomplete = _provenanced_fold_members()
+    first = incomplete[0]
+    incomplete[0] = replace(
+        first,
+        sample_ids=first.sample_ids[:1], labels=first.labels[:1],
+        logits=first.logits[:1], probabilities=first.probabilities[:1],
+        fold_ids=first.fold_ids[:1],
+        provenance=replace(
+            first.provenance,
+            expected_partition_rows=1,
+            expected_partition_sha256=partition_identity_sha256(
+                first.sample_ids[:1], first.labels[:1], first.fold_ids[:1]
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="coverage"):
+        aggregate_member_predictions(incomplete, ensemble_mode="stratified_3fold")
+
+    wrong_fold = _provenanced_fold_members()
+    wrong_fold[1] = replace(wrong_fold[1], fold_ids=np.zeros(2, dtype=np.int16))
+    with pytest.raises(ValueError, match="wrong held-out fold"):
+        aggregate_member_predictions(wrong_fold, ensemble_mode="stratified_3fold")
+
+    wrong_contract = _provenanced_fold_members()
+    wrong_contract[2] = replace(
+        wrong_contract[2],
+        provenance=replace(
+            wrong_contract[2].provenance, study_contract_sha256="e" * 64
+        ),
+    )
+    with pytest.raises(ValueError, match="same partition/study contract"):
+        aggregate_member_predictions(wrong_contract, ensemble_mode="stratified_3fold")
+
+
+def test_common_test_means_three_predictions_under_shared_study_contract() -> None:
+    members = _provenanced_fold_members()
+    sample_ids = np.asarray(["test-a", "test-b"])
+    labels = np.zeros(2, dtype=np.int64)
+    fold_ids = np.full(2, -1, dtype=np.int16)
+    digest = partition_identity_sha256(sample_ids, labels, fold_ids)
+    converted = []
+    for artifact in members:
+        converted.append(replace(
+            artifact,
+            context=replace(artifact.context, split="test"),
+            sample_ids=sample_ids.copy(), labels=labels.copy(), fold_ids=fold_ids.copy(),
+            provenance=replace(
+                artifact.provenance, expected_partition_rows=2,
+                expected_partition_sha256=digest,
+                expected_oof_rows=None, expected_oof_sha256=None,
+            ),
+        ))
+
+    ensemble = aggregate_member_predictions(converted, ensemble_mode="stratified_3fold")
+    np.testing.assert_array_equal(ensemble.prediction_count, 3)
+    assert not ensemble.unavailable_metrics
+    assert np.isfinite(ensemble.mutual_information).all()

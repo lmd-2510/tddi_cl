@@ -9,7 +9,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from src.data.ddi_dataset import (
-    load_development_fold_arrays, load_split_arrays, prepare_development_fold_context,
+    load_development_fold_arrays, load_development_fold_identity, load_split_arrays,
+    prepare_development_fold_context,
 )
 from src.data import stratified_folds as folds
 
@@ -91,6 +92,25 @@ def test_train_heldout_disjoint_complete_and_no_refolding_or_rehash(frozen, monk
         assert train | valid == {r["sample_id"] for r in frozen[3]}
         all_validation.extend(valid)
     assert len(all_validation) == len(set(all_validation)) == 18
+
+
+def test_identity_only_oof_view_matches_descriptor_loader(frozen):
+    context = prepare(frozen)
+    labels, metadata = load_development_fold_identity(
+        context, role="validation", member_id=2, validation_fold=2,
+        class_ids=[10, 901],
+    )
+    arrays = load(context, member=2, role="validation", class_ids=[10, 901])
+    np.testing.assert_array_equal(labels, arrays.labels)
+    for key in ("sample_id", "source_split", "source_row_index", "fold_id"):
+        np.testing.assert_array_equal(metadata[key], arrays.metadata[key])
+
+    all_labels, all_metadata = load_development_fold_identity(
+        context, role="all", member_id=2, validation_fold=2,
+        class_ids=[10, 901],
+    )
+    assert len(all_labels) == sum(r["raw_class_id"] in {10, 901} for r in frozen[3])
+    assert set(all_metadata["fold_id"].tolist()) == {0, 1, 2}
 
 
 def test_context_only_reads_identity_and_labels_and_protects_manifest(frozen, monkeypatch):

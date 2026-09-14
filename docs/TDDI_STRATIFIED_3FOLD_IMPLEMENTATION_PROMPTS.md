@@ -1,10 +1,11 @@
 # Các prompt tiếp theo — T-DDI stratified 3-fold và pilot A/B
 
-Cập nhật: 2026-09-14. Nguồn quyết định:
+Cập nhật: 2026-09-15. Nguồn quyết định:
 [TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md).
 
-**Bước tiếp theo: chạy smoke/pilot ranking theo runbook Prompt 14 trên server.**
-Prompt 5–14 đã được triển khai; giữ nội dung bên dưới
+**Bước tiếp theo: Prompt 16 — threshold chính/fallback/frozen evaluation.**
+Prompt 5–15 đã được triển khai và các quyết định preprocessing/ranking đã được duyệt;
+giữ nội dung bên dưới
 để tra phạm vi và acceptance, không thực hiện lại. Các bước audit code, fold schema,
 build/audit và decision record trước đó đã hoàn thành. Giữ số prompt để nối lịch sử;
 từ Prompt 7 trở đi là thứ tự mới, không dùng nội dung của prompt cũ cùng số.
@@ -64,8 +65,10 @@ có artifact thật. Full run chưa được tự động cho phép.
 
 Prompt 13 đã đọc bundle thật ngày 2026-09-14 và người dùng đã duyệt preprocessing
 B `task0_standard_frozen`; xem
-[báo cáo pilot preprocessing](TDDI_PREPROCESSING_AB_PILOT_RESULTS.md). Không thực
-hiện full8; Prompt 14 chỉ chuẩn bị đối chứng ranking validation member0/task0–1.
+[báo cáo pilot preprocessing](TDDI_PREPROCESSING_AB_PILOT_RESULTS.md). Prompt 14
+đã mở rộng đối chứng validation member 0 đến task 7 và người dùng chốt
+`raw_sample_normalized_class_mean_control_v1` ngày 2026-09-15. Các pilot này không
+phải kết quả test hoặc official ensemble study.
 
 ## Prompt 5 — Loader fold-aware từ artifact đã audit
 
@@ -327,7 +330,7 @@ tự chạy thử tiếp. Dừng chờ quyết định trước Prompt14.
 
 ## Prompt 14 — Pilot không gian exemplar sau khi preprocessing được duyệt
 
-Trạng thái: **đã triển khai code/config/tests/runbook; chưa chạy dữ liệu thật.**
+Trạng thái: **đã hoàn thành pilot thật; người dùng đã duyệt sample-normalized.**
 Xem [runbook pilot exemplar ranking](TDDI_EXEMPLAR_RANKING_PILOT_RUNBOOK.md).
 
 ```text
@@ -351,7 +354,16 @@ cập nhật đề xuất rồi chờ người dùng duyệt ranking cuối, kh�
 study ba member chính thức. Helpers offline Prompt 15–16 có thể làm sớm nếu được
 yêu cầu riêng, nhưng không được tự suy ra policy thắng để train.
 
+Quyết định ngày 2026-09-15: giữ preprocessing B `task0_standard_frozen` và chọn
+`raw_sample_normalized_class_mean_control_v1` cho exemplar ranking. Có thể tiếp tục
+Prompt 15; không tái sử dụng output pilot làm official run.
+
 ## Prompt 15 — Prediction provenance, OOF và ensemble UE
+
+Trạng thái: **đã triển khai bằng schema member v3 và offline ensemble v4.**
+OOF có `member_count=3` ở mức nguồn nhưng `prediction_count=1` trên mỗi dòng;
+MI/variance/disagreement được đánh dấu không khả dụng bằng metadata và `NaN`, không
+được diễn giải như giá trị 0. Common test vẫn mean probabilities của đủ ba member.
 
 ```text
 Đọc decision record và giới hạn chung. Mở rộng src/eval/predictions.py,
