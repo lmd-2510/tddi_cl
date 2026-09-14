@@ -1,4 +1,4 @@
-"""Opt-in frozen-fold replay trainer (Prompt 9); no legacy resume/export claims.
+"""Opt-in frozen-fold replay trainer with task-boundary resume (Prompts 9--10).
 
 The numerical training/expansion/evaluation kernels remain in train_cil. This
 module only composes the validated APIs from Prompts 5--8. Never fits a scaler,
@@ -27,11 +27,15 @@ from src.data.ddi_dataset import (
 )
 from src.data.fold_preprocessing import load_fold_preprocessing
 from src.data.fold_replay_buffer import FoldSqrtReplayBuffer, four_percent_member_budgets
-from src.data.fold_replay_sampler import FoldReplayFractionSampler
+from src.data.fold_replay_sampler import FoldReplayFractionSampler, SAMPLER_POLICY, RNG_DERIVATION
 from src.data.stratified_folds import fold_file_sha256
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, paper_member_manifest
 from src.utils.logging import RunLogger
 from src.utils.seed import resolve_seed_configuration, set_configured_seeds
+from src.training.replay_checkpoint import (
+    atomic_publish_fold_file, fold_artifact_inventory, load_fold_replay_checkpoint,
+    save_fold_replay_checkpoint, restore_rng_state,
+)
 
 TRAINING_POLICY = "frozen_fold_replay_distill_v1"
 P3_LAYOUT = [38, 20, 20, 20, 20, 20, 20, 20]
@@ -47,8 +51,11 @@ def _digest(value):
 
 def _publish_json(path, payload):
     # A fresh run owns these files. Exclusive create never clobbers old artifacts.
-    with Path(path).open("x", encoding="utf-8") as handle:
-        handle.write(_json(payload) + "\n")
+    atomic_publish_fold_file(path, lambda handle: handle.write((_json(payload) + "\n").encode("utf-8")))
+
+
+def _publish_csv(path, rows):
+    atomic_publish_fold_file(path, lambda handle: handle.write(pd.DataFrame(rows).to_csv(index=False).encode("utf-8")))
 
 
 def validate_fold_options(args):
@@ -65,7 +72,7 @@ def validate_fold_options(args):
     if args.scaler is not None:
         raise ValueError("Do not pass the legacy --scaler with the frozen-fold policy.")
     if args.resume_replay_checkpoint or args.resume_ewc_checkpoint:
-        raise ValueError("Frozen-fold resume is reserved for Prompt 10; legacy checkpoints are incompatible.")
+        raise ValueError("Prompt 10 uses --resume-fold-checkpoint; legacy checkpoints are incompatible.")
     if args.export_member_predictions:
         raise ValueError("Frozen-fold prediction provenance/export is reserved for its later prompt; omit --export-member-predictions.")
     if any(v is not None for v in (args.max_train_rows_per_task, args.max_validation_rows_per_task,
@@ -145,7 +152,8 @@ def run_fold_training(args, *, engine):
     """
     validate_fold_options(args)
     root = Path(args.outdir)
-    if root.exists():
+    resume_path = getattr(args, "resume_fold_checkpoint", None)
+    if root.exists() and not resume_path:
         raise FileExistsError(f"Frozen-fold run output already exists; never overwrite/restart: {root}")
     columns = load_feature_columns(args.feature_cols)
     if len(columns) != TDDI_PAPER_INPUT_DIM or len(set(columns)) != len(columns):
@@ -164,9 +172,10 @@ def run_fold_training(args, *, engine):
         feature_columns=columns, member_id=args.member_id, validation_fold=args.member_id,
         policy=args.preprocessing_policy, experiment_seed=args.seed, expected_sha256=prep_hash)
     budgets = four_percent_member_budgets(manifest["assignment_row_count"])
-    buffer = FoldSqrtReplayBuffer(context=context, task_file=args.task_file, feature_columns=columns,
+    buffer_kwargs = dict(context=context, task_file=args.task_file, feature_columns=columns,
         member_id=args.member_id, total_memory_budget=budgets[args.member_id], base_quota=10,
         experiment_seed=args.seed)
+    buffer = FoldSqrtReplayBuffer(**buffer_kwargs)
     seeds = resolve_seed_configuration(args.seed, args.member_id)
     device = engine.resolve_device(args.device)
     stop = 7 if args.stop_after_task is None else args.stop_after_task
@@ -189,29 +198,68 @@ def run_fold_training(args, *, engine):
         "loss_scope": "focal_and_old_column_KL_T2_and_latent_MSE_on_all_current_plus_replay_draws",
         "early_stopping": "held_out_all_seen_macro_f1", "validation_only": args.validation_only,
         "test_policy": "integrity_hash_and_pair_IDs_only" if args.validation_only else "report_only_after_best_validation",
-        "checkpoint_policy": "best_model_only_not_resumable_until_prompt10",
+        "checkpoint_policy": "immutable_frozen_fold_task_boundary_v1",
         "model": paper_member_manifest(dropout=args.dropout, activation=args.activation), "device": device,
         "implementation_sha256": {name: fold_file_sha256(Path(__file__).parents[1] / name) for name in (
             "training/fold_pilot_training.py", "training/train_cil.py", "data/ddi_dataset.py",
             "data/fold_preprocessing.py", "data/fold_replay_buffer.py", "data/fold_replay_sampler.py")},
     }
-    run_id = uuid.uuid4().hex
-    root.mkdir(parents=True, exist_ok=False)  # claim namespace, also protects concurrent starts
-    _publish_json(root / "run_config.json", {"run_id": run_id, "arguments": arguments, "resolved": resolved,
-        "config_sha256": _digest({"arguments": arguments, "resolved": resolved}),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(), "git": engine._git_state(engine.PROJECT_ROOT)})
+    # Scope/path relocation may change; learning/provenance contract may not.
+    contract = {k: v for k, v in resolved.items() if k != "stop_after_task"}
+    contract["hyperparameters"] = {k: getattr(args, k) for k in (
+        "epochs", "patience", "lr", "weight_decay", "dropout", "activation", "norm", "focal_gamma",
+        "distill_alpha", "temperature", "feature_distill_weight")}
+    contract["sampler"] = {"policy": SAMPLER_POLICY, "schema_version": 1, "rng_derivation": RNG_DERIVATION,
+                           "replay_fraction": 0.125, "repeat_cap": 3, "task_boundary_epoch_reset": 0}
+    contract = json.loads(_json(contract))
+    loaded = None
+    if resume_path:
+        loaded, buffer = load_fold_replay_checkpoint(resume_path, root=root, expected_contract=contract,
+            tasks=tasks, context=context, buffer_kwargs=buffer_kwargs)
+        run_id = loaded["run_id"]
+    else:
+        run_id = uuid.uuid4().hex
+        root.mkdir(parents=True, exist_ok=False)  # claim namespace, also protects concurrent starts
+        _publish_json(root / "run_config.json", {"run_id": run_id, "arguments": arguments, "resolved": resolved,
+            "checkpoint_contract": contract,
+            "config_sha256": _digest({"arguments": arguments, "resolved": resolved}),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(), "git": engine._git_state(engine.PROJECT_ROOT)})
+    config_hash = fold_file_sha256(root / "run_config.json")
+    if loaded and loaded["completed_task_id"] >= stop:
+        print(f"Verified requested scope 0..{stop} already complete; full trajectory complete={loaded['full_trajectory_complete']}", flush=True)
+        return loaded["progress"]["task_summaries"][:stop + 1]
     logger = RunLogger(root / "train.log", root / "events.csv", root / "stdout.log", run_id)
     logger.log(f"Frozen-fold training started policy={TRAINING_POLICY} member={args.member_id} stop_after_task={stop}")
     set_configured_seeds(seeds)
     previous, previous_map = None, {}
     all_metrics, all_epochs, task_summaries = [], [], []
-    for task in tasks[:stop + 1]:
+    artifact_hashes, start_task = {}, 0
+    if loaded:
+        previous_map = loaded["seen_class_map"]
+        previous = engine.expand_model_for_seen_classes(None, None, previous_map,
+            variant=args.variant, input_dim=len(columns), dropout=args.dropout,
+            activation=args.activation, norm=args.norm)
+        previous.load_state_dict(loaded["model_state"], strict=True)
+        previous.eval().requires_grad_(False)
+        all_metrics, all_epochs, task_summaries = (loaded["progress"][k] for k in
+                                                   ("metric_rows", "epoch_rows", "task_summaries"))
+        artifact_hashes, start_task = dict(loaded["artifact_hashes"]), loaded["next_task_id"]
+        # Reconstruction consumes initialization RNG. Restore AFTER it and before
+        # expansion of the next student, matching a continuous task boundary.
+        restore_rng_state(loaded["rng_state"])
+        del loaded
+        logger.log(f"Resumed task boundary; next_task={start_task}, preprocessing not refit")
+    for task in tasks[start_task:stop + 1]:
         task_id, new_classes = task["task_id"], task["classes"]
         started = time.perf_counter()
         if fold_file_sha256(args.task_file) != task_hash:
             raise ValueError("Task-file changed during run.")
         context.assert_unchanged()
         task_root = root / f"task_{task_id}"
+        if task_root.exists():
+            # Preserve any interrupted attempt, including all partial artifacts.
+            task_root = root / "attempts" / f"task_{task_id}_{uuid.uuid4().hex}"
+            task_root.parent.mkdir(exist_ok=True)
         task_root.mkdir(exist_ok=False)
         seen_map = build_seen_class_map(set(previous_map) | set(new_classes))
         logger.log(f"task={task_id} loading current/held-out seen_classes={len(seen_map)}")
@@ -229,7 +277,8 @@ def run_fold_training(args, *, engine):
         sampler = FoldReplayFractionSampler(current_sample_ids=_ids(current), replay_sample_ids=_ids(retained),
             replay_raw_labels=retained.labels, experiment_seed=args.seed, member_id=args.member_id, task_id=task_id)
         _publish_json(task_root / "input_audit.json", {"task_id": task_id, "current_ids": _ids(current),
-            "replay_ids_before": _ids(retained), "validation_ids": _ids(validation),
+            "replay_ids_before": _ids(retained), "replay_raw_labels_before": retained.labels.tolist(),
+            "validation_ids": _ids(validation),
             "current_raw_classes": new_classes, "seen_class_map": seen_map,
             "head_size": len(seen_map), "sampler": sampler.metadata,
             "assignment_sha256": manifest["assignment_sha256"], "preprocessing_sha256": prep_hash,
@@ -296,9 +345,9 @@ def run_fold_training(args, *, engine):
                     break
         model.load_state_dict(best_state)
         # Model-only inference snapshot, deliberately not a resumable checkpoint.
-        with (task_root / "best_model.pt").open("xb") as handle:
+        atomic_publish_fold_file(task_root / "best_model.pt", lambda handle:
             torch.save({"model_state": best_state, "seen_class_map": seen_map, "task_id": task_id,
-                        "run_id": run_id, "resumable": False, "policy": TRAINING_POLICY}, handle)
+                        "run_id": run_id, "resumable": False, "policy": TRAINING_POLICY}, handle))
         metrics = [{"task": task_id, "split": "validation", **m} for m in
                    _eval_groups(engine, model, val_inputs, validation.labels, seen_map, new_classes, criterion, device)]
         if not args.validation_only:
@@ -314,33 +363,46 @@ def run_fold_training(args, *, engine):
             raise RuntimeError("Retained quota/identity/source invariant failed.")
         _publish_json(task_root / "buffer_audit.json", {**buffer_audit, "retained_ids": _ids(after),
             "retained_raw_labels": after.labels.tolist(), "ranking": buffer.metadata["ranking"]})
-        pd.DataFrame(metrics).to_csv(task_root / "metrics.csv", index=False)
-        pd.DataFrame(epoch_rows).to_csv(task_root / "training_audit.csv", index=False)
+        _publish_json(task_root / "metrics.json", metrics)
+        _publish_csv(task_root / "metrics.csv", metrics)
+        _publish_csv(task_root / "training_audit.csv", epoch_rows)
         summary = {"task_id": task_id, "head_size": len(seen_map), "seen_class_map": seen_map,
             "best_epoch": best_epoch, "best_validation_macro_f1": best_score, "epochs_trained": len(epoch_rows),
             "memory_before": len(retained.labels), "memory_after": buffer.total_size,
             "runtime_seconds": time.perf_counter() - started,
             "peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if str(device).startswith("cuda") else None,
             "peak_reserved_bytes": torch.cuda.max_memory_reserved(device) if str(device).startswith("cuda") else None,
-            "checkpoint_size_bytes": (task_root / "best_model.pt").stat().st_size, "resumable": False}
+            "checkpoint_size_bytes": (task_root / "best_model.pt").stat().st_size,
+            "artifact_directory": task_root.relative_to(root).as_posix(),
+            "boundary_checkpoint": f"checkpoints/task_{task_id}.pt",
+            "completion_policy": "requires_valid_boundary_checkpoint_and_hashed_artifacts"}
+        summary = json.loads(_json(summary))
         _publish_json(task_root / "completed_task.json", summary)
         all_metrics.extend(metrics)
         all_epochs.extend(epoch_rows)
         task_summaries.append(summary)
-        logger.log(f"task={task_id} complete head={len(seen_map)} best_epoch={best_epoch} retained={buffer.total_size}")
+        artifact_hashes.update(fold_artifact_inventory(root, task_root))
+        boundary_path = save_fold_replay_checkpoint(root / "checkpoints" / f"task_{task_id}.pt", run_id=run_id,
+            completed_task_id=task_id, model_state=best_state, seen_class_map=seen_map, contract=contract,
+            buffer=buffer, sampler=sampler, run_config_sha256=config_hash, artifact_hashes=artifact_hashes,
+            progress={"metric_rows": all_metrics, "epoch_rows": all_epochs, "task_summaries": task_summaries})
+        logger.log(f"task={task_id} complete head={len(seen_map)} best_epoch={best_epoch} retained={buffer.total_size} "
+                   f"checkpoint={boundary_path} checkpoint_bytes={boundary_path.stat().st_size}")
         previous, previous_map = model.cpu(), seen_map
         del teacher, optimizer, model, best_state, current, validation, retained, after, training, loader, val_loader, val_inputs
-    pd.DataFrame(all_metrics).to_csv(root / "metrics.csv", index=False)
-    pd.DataFrame(all_epochs).to_csv(root / "training_audit.csv", index=False)
-    _publish_json(root / "run_summary.json", {"run_id": run_id, "completed_task_id": stop,
+    report_root = root if not resume_path else root / "reports" / f"through_task_{stop}_{uuid.uuid4().hex}"
+    report_root.mkdir(parents=True, exist_ok=True)
+    _publish_csv(report_root / "metrics.csv", all_metrics)
+    _publish_csv(report_root / "training_audit.csv", all_epochs)
+    _publish_json(report_root / "run_summary.json", {"run_id": run_id, "completed_task_id": stop,
         "full_protocol_complete": stop == 7, "task_file_sha256": task_hash, "tasks": task_summaries,
-        "validation_only": args.validation_only, "resumable": False})
-    with (root / "run_summary.md").open("x", encoding="utf-8") as handle:
+        "requested_scope_complete": True, "validation_only": args.validation_only, "resumable": True})
+    with (report_root / "run_summary.md").open("x", encoding="utf-8") as handle:
         handle.write(f"# Frozen-fold pilot\n\nPolicy: `{TRAINING_POLICY}`. Member {args.member_id}. "
                      f"Preprocessing: `{args.preprocessing_policy}`.\n\nCompleted tasks 0–{stop} of full P3 (8 tasks). "
-                     f"Validation-only: {args.validation_only}. This is not a legacy run or a resumable checkpoint.\n\n")
+                     f"Validation-only: {args.validation_only}. Resume via checkpoints/task_{stop}.pt; not a legacy checkpoint.\n\n")
         for s in task_summaries:
             handle.write(f"- Task {s['task_id']}: head {s['head_size']}, best epoch {s['best_epoch']}, "
                          f"validation Macro-F1 {s['best_validation_macro_f1']:.6f}.\n")
-    logger.log("Requested execution scope complete; no preprocessing winner selected.")
+    logger.log(f"Requested execution scope complete; report={report_root}; no preprocessing winner selected.")
     return task_summaries

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import uuid
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -402,3 +404,224 @@ def restore_replay_model(
 
     model.load_state_dict(checkpoint.model_state, strict=True)
     return model
+
+
+# Separate kind and entrypoints: do not weaken/change the legacy schema above.
+FOLD_REPLAY_CHECKPOINT_KIND = "ddi_cil_frozen_fold_replay_task_boundary"
+FOLD_REPLAY_CHECKPOINT_VERSION = 1
+
+
+def fold_state_digest(value: Any) -> str:
+    """Content integrity for nested CPU tensors/NumPy/RNG/JSON state, not pickle bytes."""
+    digest = hashlib.sha256()
+    def visit(item):
+        if isinstance(item, torch.Tensor):
+            visit(("tensor", str(item.dtype), tuple(item.shape)))
+            digest.update(item.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+        elif isinstance(item, np.ndarray):
+            visit(("array", item.dtype.str, tuple(item.shape)))
+            if item.dtype.kind in "OUS":
+                visit(item.tolist())
+            else:
+                digest.update(np.ascontiguousarray(item).tobytes())
+        elif isinstance(item, Mapping):
+            digest.update(b"mapping[")
+            for key in sorted(item, key=lambda k: (type(k).__name__, str(k))):
+                visit(key)
+                visit(item[key])
+            digest.update(b"]")
+        elif isinstance(item, (list, tuple)):
+            digest.update(type(item).__name__.encode() + b"[")
+            for child in item:
+                visit(child)
+            digest.update(b"]")
+        elif isinstance(item, np.generic):
+            visit(item.item())
+        else:
+            digest.update((type(item).__name__ + ":" + json.dumps(item, allow_nan=False) + ";").encode())
+    visit(value)
+    return digest.hexdigest()
+
+
+def atomic_publish_fold_file(path: str | Path, writer) -> Path:
+    """Fsync then publish by hard link (no replace), same convention as fold artifacts.
+
+    Only our private temporary file is removed. Existing user files are never
+    replaced; unsupported filesystems fail rather than falling back to overwrite.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            writer(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
+def fold_artifact_inventory(root: Path, directory: Path) -> dict[str, str]:
+    from src.data.stratified_folds import fold_file_sha256
+    return {p.relative_to(root).as_posix(): fold_file_sha256(p)
+            for p in sorted(directory.rglob("*")) if p.is_file()}
+
+
+def validate_fold_artifacts(root: Path, inventory: Mapping[str, str]) -> None:
+    from src.data.stratified_folds import fold_file_sha256
+    if not isinstance(inventory, Mapping) or not inventory:
+        raise ValueError("Frozen-fold checkpoint requires completed artifact inventory.")
+    root = root.resolve()
+    for relative, expected_hash in inventory.items():
+        path = (root / relative).resolve()
+        if path == root or not path.is_relative_to(root):
+            raise ValueError("Frozen-fold artifact path escapes run directory.")
+        if not path.is_file() or fold_file_sha256(path) != expected_hash:
+            raise ValueError(f"Frozen-fold completed artifact missing/hash mismatch: {relative}")
+
+
+def save_fold_replay_checkpoint(path: str | Path, *, run_id: str, completed_task_id: int,
+        model_state: Mapping[str, torch.Tensor], seen_class_map: Mapping[int, int],
+        contract: dict, buffer, sampler, progress: dict, artifact_hashes: dict,
+        run_config_sha256: str) -> Path:
+    """Commit a task AFTER best-model evaluation/buffer update and artifact publication."""
+    payload = {
+        "kind": FOLD_REPLAY_CHECKPOINT_KIND, "schema_version": FOLD_REPLAY_CHECKPOINT_VERSION,
+        "run_id": run_id, "completed_task_id": completed_task_id, "next_task_id": completed_task_id + 1,
+        "full_trajectory_complete": completed_task_id == 7,
+        "model_state": _cpu_tensor_mapping(model_state, name="fold model_state"),
+        "seen_class_map": dict(seen_class_map),
+        "raw_class_order": [raw for raw, _ in sorted(seen_class_map.items(), key=lambda p: p[1])],
+        "contract": contract, "buffer_state": buffer.state_dict(), "sampler_state": sampler.state_dict(),
+        "rng_state": capture_rng_state(), "progress": progress, "artifact_hashes": artifact_hashes,
+        "run_config_sha256": run_config_sha256,
+        "next_task_scheduling": {"task_id": completed_task_id + 1, "epoch": 0,
+            "policy": "reset_from_new_current_and_retained_IDs_with_member_task_key",
+            "loader_seed": contract["seeds"]["member_seed"] + completed_task_id + 1},
+    }
+    payload["state_sha256"] = fold_state_digest(payload)
+    return atomic_publish_fold_file(path, lambda handle: torch.save(payload, handle))
+
+
+def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contract: dict,
+        tasks: list[dict], context, buffer_kwargs: dict) -> tuple[dict, Any]:
+    """Validate against fresh sources/preprocessing; restore retained rows, never refit.
+
+    Local torch checkpoints must be trusted: like the legacy API they contain
+    NumPy/Python RNG state and are loaded with weights_only=False.
+    """
+    from src.data.fold_replay_buffer import FoldSqrtReplayBuffer
+    from src.data.fold_replay_sampler import FoldReplayFractionSampler
+    from src.data.stratified_folds import fold_file_sha256
+    path, root = Path(path).resolve(), Path(root).resolve()
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as error:
+        raise ValueError(f"Cannot read frozen-fold checkpoint: {path}") from error
+    if not isinstance(state, dict) or state.get("kind") != FOLD_REPLAY_CHECKPOINT_KIND:
+        raise ValueError("Not a frozen-fold task-boundary checkpoint (legacy/model-only not accepted).")
+    if state.get("schema_version") != FOLD_REPLAY_CHECKPOINT_VERSION:
+        raise ValueError("Unsupported frozen-fold checkpoint schema version.")
+    try:
+        required = {"kind", "schema_version", "run_id", "completed_task_id", "next_task_id",
+            "full_trajectory_complete", "model_state", "seen_class_map", "raw_class_order",
+            "contract", "buffer_state", "sampler_state", "rng_state", "progress", "artifact_hashes",
+            "run_config_sha256", "next_task_scheduling", "state_sha256"}
+        if set(state) != required:
+            raise ValueError("Unexpected/missing frozen-fold checkpoint fields.")
+        if state["state_sha256"] != fold_state_digest({k: v for k, v in state.items() if k != "state_sha256"}):
+            raise ValueError("Frozen-fold checkpoint state SHA256 mismatch.")
+        differences = _mapping_mismatches(expected_contract, state["contract"])
+        if differences:
+            raise ValueError(f"Frozen-fold contract mismatch: {differences}")
+        completed = state["completed_task_id"]
+        if (type(completed) is not int or not 0 <= completed < len(tasks)
+                or type(state["next_task_id"]) is not int or state["next_task_id"] != completed + 1
+                or state["full_trajectory_complete"] != (completed == 7)):
+            raise ValueError("Invalid frozen-fold completed/next task or full-trajectory metadata.")
+        if path != root / "checkpoints" / f"task_{completed}.pt":
+            raise ValueError("Checkpoint must belong to the requested run's checkpoints/task_N.pt.")
+        if any((root / "checkpoints" / f"task_{i}.pt").exists() for i in range(completed + 1, len(tasks))):
+            raise ValueError("A newer task checkpoint exists; resume the latest boundary, not an older task.")
+        classes = sorted({raw for task in tasks[:completed + 1] for raw in task["classes"]})
+        expected_map = {raw: i for i, raw in enumerate(classes)}
+        if (state["seen_class_map"] != expected_map or state["raw_class_order"] != classes
+                or any(type(k) is not int or type(v) is not int for k, v in state["seen_class_map"].items())):
+            raise ValueError("Frozen-fold class map/raw class order mismatch.")
+        model = state["model_state"]
+        if (model["head.weight"].ndim != 2 or model["head.weight"].shape[0] != len(classes)
+                or tuple(model["head.bias"].shape) != (len(classes),)
+                or not all(isinstance(v, torch.Tensor) and torch.isfinite(v).all() for v in model.values())):
+            raise ValueError("Frozen-fold model/head shape or finite-state mismatch.")
+        config_path = root / "run_config.json"
+        if fold_file_sha256(config_path) != state["run_config_sha256"]:
+            raise ValueError("Frozen-fold run_config hash mismatch.")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        if config["run_id"] != state["run_id"] or config["checkpoint_contract"] != expected_contract:
+            raise ValueError("Frozen-fold checkpoint run_id/config mismatch.")
+        validate_fold_artifacts(root, state["artifact_hashes"])
+        progress = state["progress"]
+        summaries = progress["task_summaries"]
+        if (set(progress) != {"task_summaries", "epoch_rows", "metric_rows"}
+                or any(r["task"] not in range(completed + 1) for r in progress["epoch_rows"] + progress["metric_rows"])):
+            raise ValueError("Frozen-fold progress contains unknown/future rows.")
+        if [s["task_id"] for s in summaries] != list(range(completed + 1)):
+            raise ValueError("Frozen-fold progress task coverage mismatch.")
+        for task_id, summary in enumerate(summaries):
+            task_dir = (root / summary["artifact_directory"]).resolve()
+            if not task_dir.is_relative_to(root):
+                raise ValueError("Task artifact directory escapes run root.")
+            epoch_count = summary["epochs_trained"]
+            if type(epoch_count) is not int or not 1 <= epoch_count <= expected_contract["hyperparameters"]["epochs"]:
+                raise ValueError("Invalid completed epoch count.")
+            required_files = {"completed_task.json", "best_model.pt", "input_audit.json", "buffer_audit.json",
+                              "metrics.json", "metrics.csv", "training_audit.csv"}
+            required_files.update(f"epoch_{e}_audit.json" for e in range(1, epoch_count + 1))
+            if any((task_dir / f).relative_to(root).as_posix() not in state["artifact_hashes"] for f in required_files):
+                raise ValueError("Missing task completion evidence in checkpoint inventory.")
+            disk_summary = json.loads((task_dir / "completed_task.json").read_text(encoding="utf-8"))
+            if disk_summary != summary:
+                raise ValueError("Task completion summary/progress mismatch.")
+            epoch_rows = [r for r in progress["epoch_rows"] if r["task"] == task_id]
+            if [r["epoch"] for r in epoch_rows] != list(range(1, summary["epochs_trained"] + 1)):
+                raise ValueError("Frozen-fold epoch progress mismatch.")
+            for row in epoch_rows:
+                disk_row = json.loads((task_dir / f"epoch_{row['epoch']}_audit.json").read_text(encoding="utf-8"))
+                if any(disk_row[k] != v for k, v in row.items()):
+                    raise ValueError("Frozen-fold training audit/progress mismatch.")
+            metric_rows = [r for r in progress["metric_rows"] if r["task"] == task_id]
+            if json.loads((task_dir / "metrics.json").read_text(encoding="utf-8")) != metric_rows:
+                raise ValueError("Frozen-fold metric progress mismatch.")
+        restored = FoldSqrtReplayBuffer.from_state_dict(state["buffer_state"], **buffer_kwargs)
+        if restored.next_task_id != completed + 1 or set(restored.observed_counts) != set(classes):
+            raise ValueError("Frozen-fold buffer task/classes mismatch.")
+        last_dir = root / summaries[-1]["artifact_directory"]
+        best = torch.load(last_dir / "best_model.pt", map_location="cpu", weights_only=True)
+        if (best["seen_class_map"] != expected_map or set(best["model_state"]) != set(model)
+                or any(not torch.equal(model[k], best["model_state"][k]) for k in model)):
+            raise ValueError("Boundary model must equal completed task's best model.")
+        # Validate completed scheduling from identity-only input audit; no old features.
+        audit = json.loads((last_dir / "input_audit.json").read_text(encoding="utf-8"))
+        kwargs = dict(current_sample_ids=audit["current_ids"], replay_sample_ids=audit["replay_ids_before"],
+            replay_raw_labels=audit["replay_raw_labels_before"], experiment_seed=expected_contract["seeds"]["experiment_seed"],
+            member_id=expected_contract["seeds"]["member_id"], task_id=completed)
+        sampler = FoldReplayFractionSampler.from_state_dict(state["sampler_state"], **kwargs)
+        if sampler.state_dict()["next_epoch"] != summaries[-1]["epochs_trained"]:
+            raise ValueError("Completed sampler epoch mismatch.")
+        expected_schedule = {"task_id": completed + 1, "epoch": 0,
+            "policy": "reset_from_new_current_and_retained_IDs_with_member_task_key",
+            "loader_seed": expected_contract["seeds"]["member_seed"] + completed + 1}
+        if state["next_task_scheduling"] != expected_schedule:
+            raise ValueError("Next-task scheduling mismatch.")
+        # Validate RNG without changing caller's streams or consuming randomness.
+        before = capture_rng_state()
+        try:
+            restore_rng_state(state["rng_state"])
+        finally:
+            restore_rng_state(before)
+        context.assert_unchanged()
+    except (KeyError, TypeError, AttributeError, OSError) as error:
+        raise ValueError(f"Malformed/incomplete frozen-fold checkpoint: {error}") from error
+    return state, restored

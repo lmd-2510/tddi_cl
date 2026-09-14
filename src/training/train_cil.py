@@ -246,6 +246,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fold-manifest", type=Path)
     parser.add_argument("--fold-preprocessing", type=Path,
                         help="Frozen artifact from Prompt 6; the trainer never fits it.")
+    parser.add_argument("--resume-fold-checkpoint", type=Path,
+                        help="Resume only the frozen-fold policy at a completed task boundary.")
     parser.add_argument("--preprocessing-policy", choices=["raw_identity", "task0_standard_frozen"])
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--stop-after-task", type=int,
@@ -265,7 +267,8 @@ def parse_args() -> argparse.Namespace:
         if args.scaler is None:
             parser.error("--scaler is required for legacy training.")
         if any((args.fold_assignments, args.fold_manifest, args.fold_preprocessing,
-                args.preprocessing_policy, args.validation_only, args.stop_after_task is not None)):
+                args.preprocessing_policy, args.validation_only, args.stop_after_task is not None,
+                args.resume_fold_checkpoint)):
             parser.error("New fold options require --fold-replay-policy stratified_fraction_v1.")
         if args.batch_size is None:
             args.batch_size = 1024

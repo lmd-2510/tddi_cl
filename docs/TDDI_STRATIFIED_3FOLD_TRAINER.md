@@ -51,8 +51,11 @@ Hiện contract pilot yêu cầu giữ bộ ba này. Không bỏ batch cuối; n
 cuối được chuẩn hóa theo **số mẫu thực có**, không chia cố định 1.024 khi thiếu mẫu.
 Các lệnh cũ vẫn giữ default microbatch 1.024, accumulation 1.
 
-Namespace output phải **chưa tồn tại**, kể cả thư mục rỗng. Không xóa/ghi đè để chạy lại.
-Nếu gián đoạn, giữ run cũ, dùng namespace khác khi muốn chạy lại từ task 0.
+Run mới cần namespace output **chưa tồn tại**, kể cả thư mục rỗng.
+Từ Prompt 10, dùng `--resume-fold-checkpoint PATH` để tiếp tục trong cùng output
+từ task boundary hợp lệ. Không xóa/ghi đè task cũ. Nếu task 0 chưa tạo checkpoint,
+giữ run dở và dùng namespace mới khi muốn chạy lại từ đầu.
+Xem [checkpoint/resume mới](TDDI_STRATIFIED_3FOLD_CHECKPOINT.md).
 
 ## Trình tự một task
 
@@ -98,15 +101,19 @@ Log ghi cả loss thô, loss đã nhân trọng số, các trọng số và temp
 - `task_t/training_audit.csv`: loss/steps/runtime/validation theo epoch.
 - `task_t/best_model.pt`: best weights + raw class map; **không phải resume checkpoint**.
 - `task_t/completed_task.json`: best epoch, head, số slot, runtime task, checkpoint size,
-  peak allocated/reserved VRAM (CPU ghi null).
+  peak allocated/reserved VRAM (CPU ghi null). Chỉ xác nhận hoàn tất khi có cả
+  `checkpoints/task_t.pt` hợp lệ và các artifact khớp hash.
+- `checkpoints/task_t.pt`: checkpoint task-boundary mới, chứa buffer/preprocessing/
+  RNG/scheduling/progress; không dùng cờ resume legacy để đọc.
 - `metrics.csv`, `training_audit.csv`, `run_summary.json`, `run_summary.md`: tổng hợp
   khi hoàn thành phạm vi yêu cầu. Task 0–1 hoàn tất không được ghi là xong full tám task.
 
-## Các bước cố ý chưa làm
+## Cập nhật Prompt 10 và các bước còn lại
 
-- Checkpoint/resume chứa preprocessing/buffer/sampler/RNG/progress mới: **Prompt 10**.
-  Trainer từ chối cả hai cờ resume legacy khi bật policy mới, không tạo checkpoint
-  trông giống resumable nhưng thiếu state.
+- Checkpoint/resume mới **đã triển khai ở Prompt 10**, chỉ tại task boundary.
+  Hai cờ resume legacy vẫn bị từ chối trong mode mới. Không hỗ trợ mid-epoch resume.
+- Sau resume, báo cáo tổng hợp mới nằm ở `reports/through_task_N_<token>/`; báo cáo
+  phạm vi cũ ở root được giữ nguyên. Không dùng root summary cũ để suy ra tiến độ mới.
 - Prediction export có fold/provenance mới và các bước OOF/ensemble/threshold:
   theo các prompt tiếp theo. Hiện từ chối `--export-member-predictions` trong mode mới.
 - Không chọn preprocessing thắng, không sửa hyper hoặc config study cũ, không chạy full.
