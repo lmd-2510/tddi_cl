@@ -127,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation", required=True, type=Path)
     parser.add_argument("--test", required=True, type=Path)
     parser.add_argument("--feature-cols", required=True, type=Path)
-    parser.add_argument("--scaler", required=True, type=Path)
+    parser.add_argument("--scaler", type=Path)
     parser.add_argument("--task-file", required=True, type=Path)
     parser.add_argument("--outdir", required=True, type=Path)
     parser.add_argument(
@@ -145,12 +145,12 @@ def parse_args() -> argparse.Namespace:
         choices=["tddi_paper_member"],
         default="tddi_paper_member",
     )
-    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument(
         "--effective-batch-size",
         type=int,
         default=None,
-        help="Gradient-accumulated batch size; defaults to --batch-size.",
+        help="Gradient-accumulated batch size; defaults to microbatch (legacy) or 1024 (frozen-fold policy).",
     )
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -241,7 +241,35 @@ def parse_args() -> argparse.Namespace:
         choices=["validation", "test"],
         default=["validation", "test"],
     )
-    return parser.parse_args()
+    parser.add_argument("--fold-replay-policy", choices=["stratified_fraction_v1"])
+    parser.add_argument("--fold-assignments", type=Path)
+    parser.add_argument("--fold-manifest", type=Path)
+    parser.add_argument("--fold-preprocessing", type=Path,
+                        help="Frozen artifact from Prompt 6; the trainer never fits it.")
+    parser.add_argument("--preprocessing-policy", choices=["raw_identity", "task0_standard_frozen"])
+    parser.add_argument("--validation-only", action="store_true")
+    parser.add_argument("--stop-after-task", type=int,
+                        help="Execution boundary; does not truncate/change the full task protocol.")
+    args = parser.parse_args()
+    if args.fold_replay_policy:
+        if any(token.split("=")[0] in {"--total-memory-budget", "--replay-draws-per-epoch"}
+               for token in sys.argv[1:]):
+            parser.error("Frozen-fold policy derives 4% slots and capped 12.5% replay; omit legacy budget flags.")
+        args.total_memory_budget = None
+        args.replay_draws_per_epoch = None
+        if args.batch_size is None:
+            args.batch_size = 64
+        if args.effective_batch_size is None:
+            args.effective_batch_size = 1024
+    else:
+        if args.scaler is None:
+            parser.error("--scaler is required for legacy training.")
+        if any((args.fold_assignments, args.fold_manifest, args.fold_preprocessing,
+                args.preprocessing_policy, args.validation_only, args.stop_after_task is not None)):
+            parser.error("New fold options require --fold-replay-policy stratified_fraction_v1.")
+        if args.batch_size is None:
+            args.batch_size = 1024
+    return args
 
 
 def require_torch() -> None:
@@ -1026,6 +1054,13 @@ class EpochLossComponents:
     raw_ewc_penalty: float
     scaled_ewc_penalty: float
     total_loss: float
+    logit_distillation_loss: float = 0.0
+    feature_distillation_loss: float = 0.0
+    scaled_logit_distillation_loss: float = 0.0
+    scaled_feature_distillation_loss: float = 0.0
+    optimizer_steps: int = 0
+    examples_seen: int = 0
+    tail_effective_batch: int = 0
 
 
 def classification_forward(
@@ -1214,6 +1249,8 @@ def train_one_epoch(
     total_classification_loss = 0.0
     total_raw_ewc_penalty = 0.0
     total_scaled_ewc_penalty = 0.0
+    total_logit_distillation = 0.0
+    total_feature_distillation = 0.0
     total_examples = 0
 
     student_old_indices: list[int] = []
@@ -1238,6 +1275,8 @@ def train_one_epoch(
             include_latent=teacher_model is not None and bool(student_old_indices),
         )
         loss = classification_loss
+        distill_loss = None
+        feature_distill_loss = None
 
         if teacher_model is not None and student_old_indices:
             with torch.no_grad():
@@ -1299,6 +1338,9 @@ def train_one_epoch(
         total_classification_loss += float(classification_loss.detach().item()) * batch_size
         total_raw_ewc_penalty += float(raw_ewc_penalty.detach().item()) * batch_size
         total_scaled_ewc_penalty += float(scaled_ewc_penalty.detach().item()) * batch_size
+        if distill_loss is not None:
+            total_logit_distillation += float(distill_loss.detach().item()) * batch_size
+            total_feature_distillation += float(feature_distill_loss.detach().item()) * batch_size
         total_examples += batch_size
 
     denominator = max(total_examples, 1)
@@ -1307,6 +1349,13 @@ def train_one_epoch(
         raw_ewc_penalty=total_raw_ewc_penalty / denominator,
         scaled_ewc_penalty=total_scaled_ewc_penalty / denominator,
         total_loss=total_loss / denominator,
+        logit_distillation_loss=total_logit_distillation / denominator,
+        feature_distillation_loss=total_feature_distillation / denominator,
+        scaled_logit_distillation_loss=distill_alpha * total_logit_distillation / denominator,
+        scaled_feature_distillation_loss=feature_distill_weight * total_feature_distillation / denominator,
+        optimizer_steps=optimizer_step,
+        examples_seen=total_examples,
+        tail_effective_batch=group_sample_count if total_examples else 0,
     )
     return components if return_loss_components else components.total_loss
 
@@ -1459,6 +1508,10 @@ def write_run_summary(
 def main() -> None:
     args = parse_args()
     require_torch()
+    if getattr(args, "fold_replay_policy", None):
+        from src.training.fold_pilot_training import run_fold_training
+        run_fold_training(args, engine=sys.modules[__name__])
+        return
     seed_configuration = resolve_seed_configuration(args.seed, args.member_id)
     args.experiment_seed = seed_configuration.experiment_seed
     args.member_seed = seed_configuration.member_seed
