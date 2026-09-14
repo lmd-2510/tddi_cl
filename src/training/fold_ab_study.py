@@ -79,7 +79,11 @@ def load_pilot_config(path, *, project_root=PROJECT_ROOT, overrides=None):
     for key in ("epochs", "patience", "batch_size", "effective_batch_size", "gradient_accumulation_steps"):
         if type(value["training"][key]) is not int:
             raise ValueError(f"training.{key} must be an integer.")
-    if {k: value["training"][k] for k in TRAINING} != TRAINING:
+    microbatch = value["training"]["batch_size"]
+    if microbatch not in (8, 16, 32, 64):
+        raise ValueError("microbatch must be 64, or explicit OOM fallback 32/16/8.")
+    expected_training = {**TRAINING, "batch_size": microbatch, "gradient_accumulation_steps": 1024 // microbatch}
+    if {k: value["training"][k] for k in TRAINING} != expected_training:
         raise ValueError("Keep the agreed training/loss/batch hyperparameters; no legacy 6800 budget flags.")
     if value["training"]["patience"] != 5 or (value["training"]["epochs"] not in (2, 3) if value["phase"] == "smoke"
                                                else value["training"]["epochs"] != 20):

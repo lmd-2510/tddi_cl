@@ -80,8 +80,8 @@ def validate_fold_options(args):
         raise ValueError("Frozen-fold policy requires complete current/validation rows; no row limits.")
     if args.total_memory_budget is not None or args.replay_draws_per_epoch is not None:
         raise ValueError("Legacy fixed 6800 budgets cannot be used in frozen-fold mode.")
-    if args.batch_size != 64 or args.effective_batch_size != 1024:
-        raise ValueError("This pilot contract uses microbatch 64, accumulation 16, effective target 1024.")
+    if args.batch_size not in (8, 16, 32, 64) or args.effective_batch_size != 1024:
+        raise ValueError("This pilot contract uses microbatch 64 (OOM: 32/16/8), effective target 1024.")
     if args.stop_after_task is not None and args.stop_after_task not in range(8):
         raise ValueError("--stop-after-task must be between 0 and 7.")
     if args.epochs <= 0 or args.patience <= 0:
@@ -127,7 +127,7 @@ def _ids(arrays):
     return arrays.metadata["sample_id"].tolist()
 
 
-def _eval_groups(engine, model, values, labels, seen_map, new_classes, criterion, device):
+def _eval_groups(engine, model, values, labels, seen_map, new_classes, criterion, device, batch_size=64):
     results = []
     old_classes = sorted(set(seen_map) - set(new_classes))
     for group, classes in (("seen_all", sorted(seen_map)), ("old", old_classes), ("current", new_classes)):
@@ -136,7 +136,7 @@ def _eval_groups(engine, model, values, labels, seen_map, new_classes, criterion
             results.append({"group": group, "sample_count": 0, "status": "empty"})
             continue
         loader = DataLoader(engine.build_tensor_dataset(values[keep], remap_labels(labels[keep], seen_map)),
-                            batch_size=64, shuffle=False, drop_last=False,
+                            batch_size=batch_size, shuffle=False, drop_last=False,
                             generator=torch.Generator().manual_seed(0))
         result = engine.evaluate_model(model, loader, criterion, device, invert_class_map(seen_map),
                                        evaluation_class_indices=[seen_map[c] for c in classes])
@@ -193,7 +193,7 @@ def prepare_fold_run(args, *, engine, context=None):
         "preprocessing": prep.metadata, "buffer": buffer.metadata,
         "member_budgets": budgets, "global_slot_budget": sum(budgets.values()),
         "ranking_seed_role": "no_rng_raw_LN_class_mean_sample_ID_tie",
-        "microbatch": 64, "gradient_accumulation": 16, "effective_batch_target": 1024,
+        "microbatch": args.batch_size, "gradient_accumulation": 1024 // args.batch_size, "effective_batch_target": 1024,
         "drop_last": False, "optimizer": "AdamW_new_each_task", "scheduler": None,
         "classification_weight": 1.0, "logit_distillation_weight": args.distill_alpha,
         "feature_distillation_weight": args.feature_distill_weight, "temperature": args.temperature,
@@ -310,10 +310,10 @@ def run_fold_training(args, *, engine):
         val_inputs = _model_values(validation.features, prep, columns, args.member_id)
         training = engine.build_tensor_dataset(np.concatenate((current_inputs, replay_inputs)),
             remap_labels(np.concatenate((current.labels, retained.labels)), seen_map))
-        loader = DataLoader(training, batch_size=64, sampler=sampler, drop_last=False,
+        loader = DataLoader(training, batch_size=args.batch_size, sampler=sampler, drop_last=False,
                             generator=torch.Generator().manual_seed(seeds.member_seed + task_id))
         val_loader = DataLoader(engine.build_tensor_dataset(val_inputs, remap_labels(validation.labels, seen_map)),
-                               batch_size=64, shuffle=False, drop_last=False,
+                               batch_size=args.batch_size, shuffle=False, drop_last=False,
                                generator=torch.Generator().manual_seed(seeds.member_seed + task_id))
         del current_inputs, replay_inputs
         model = engine.expand_model_for_seen_classes(previous, previous_map, seen_map,
@@ -331,7 +331,7 @@ def run_fold_training(args, *, engine):
             losses = engine.train_one_epoch(model, loader, optimizer, criterion, device,
                 teacher_model=teacher, teacher_raw_classes=engine.ordered_raw_classes(previous_map),
                 current_seen_map=seen_map, distill_alpha=args.distill_alpha, temperature=args.temperature,
-                feature_distill_weight=args.feature_distill_weight, gradient_accumulation_steps=16,
+                feature_distill_weight=args.feature_distill_weight, gradient_accumulation_steps=1024 // args.batch_size,
                 return_loss_components=True)
             audit = sampler.last_audit
             if (audit is None or audit["epoch"] != epoch or audit["current_draws"] != len(current.labels)
@@ -371,13 +371,13 @@ def run_fold_training(args, *, engine):
             torch.save({"model_state": best_state, "seen_class_map": seen_map, "task_id": task_id,
                         "run_id": run_id, "resumable": False, "policy": TRAINING_POLICY}, handle))
         metrics = [{"task": task_id, "split": "validation", **m} for m in
-                   _eval_groups(engine, model, val_inputs, validation.labels, seen_map, new_classes, criterion, device)]
+                   _eval_groups(engine, model, val_inputs, validation.labels, seen_map, new_classes, criterion, device, args.batch_size)]
         if not args.validation_only:
             context.assert_unchanged()
             frame = load_split_frame(args.test, columns, class_ids=list(seen_map))
             test_values = _model_values(frame[columns].to_numpy(dtype=np.float64), prep, columns, args.member_id)
             metrics.extend({"task": task_id, "split": "test", **m} for m in
-                _eval_groups(engine, model, test_values, frame["class"].to_numpy(), seen_map, new_classes, criterion, device))
+                _eval_groups(engine, model, test_values, frame["class"].to_numpy(), seen_map, new_classes, criterion, device, args.batch_size))
             del frame, test_values
         buffer_audit = buffer.update(current, task_id=task_id, feature_columns=columns)
         after = buffer.get_all()

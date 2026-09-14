@@ -3,7 +3,8 @@
 Cập nhật: 2026-09-14. Nguồn quyết định:
 [TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md).
 
-**Bước tiếp theo: Prompt 12.** Prompt 5–11 đã được triển khai; giữ nội dung bên dưới
+**Bước tiếp theo: chạy smoke/pilot trên server, rồi Prompt 13 khi có kết quả thật.**
+Prompt 5–12 đã được triển khai; giữ nội dung bên dưới
 để tra phạm vi và acceptance, không thực hiện lại. Các bước audit code, fold schema,
 build/audit và decision record trước đó đã hoàn thành. Giữ số prompt để nối lịch sử;
 từ Prompt 7 trở đi là thứ tự mới, không dùng nội dung của prompt cũ cùng số.
@@ -266,6 +267,11 @@ Acceptance: tên/path config và CLI thực tế được ghi rõ; test bảo v�
 biệt ẩn về hyper, data hoặc exemplar selection giữa A/B.
 
 ## Prompt 12 — Report validation A/B và runbook GPU
+
+Đã có `scripts/compare_preprocessing_pilots.py` (JSON/Markdown, report-only bundle).
+Lệnh chuẩn bị, dry-run, nohup, resume/OOM và thu thập:
+[Runbook GPU preprocessing A/B](TDDI_PREPROCESSING_AB_PILOT_RUNBOOK.md).
+Không tự thực hiện Prompt 13 khi chưa có kết quả thật của người dùng.
 
 ```text
 Đọc decision record và giới hạn chung. Tạo công cụ so sánh, ví dụ

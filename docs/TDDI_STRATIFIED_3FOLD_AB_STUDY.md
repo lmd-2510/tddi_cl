@@ -4,8 +4,8 @@ Ngày: 2026-09-14. Theo [decision record](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.
 
 Đây là công cụ **chuẩn bị/chạy có chủ đích hai đối chứng**, chưa phải full study.
 Mặc định chỉ member 0, task 0–1, validation-only. Không tự chọn phương án thắng,
-không chạy test evaluation, ensemble, OOF hoặc threshold. Prompt 12 sẽ bổ sung
-report so sánh và runbook GPU chi tiết. Không có training dữ liệu thật trong lượt
+không chạy test evaluation, ensemble, OOF hoặc threshold. Prompt 12 đã bổ sung
+[report so sánh và runbook GPU](TDDI_PREPROCESSING_AB_PILOT_RUNBOOK.md). Không có training dữ liệu thật trong lượt
 triển khai Prompt 11.
 
 ## 1. Những file liên quan
@@ -50,6 +50,8 @@ quy tắc legacy budget 6800, legacy checkpoint hoặc tự động ensemble c�
   repeat cap 3; giảm replay khi thiếu capacity. Task 0 không replay.
 - Microbatch 64, effective batch mục tiêu 1024, accumulation 16. Batch tích lũy
   cuối có thể nhỏ hơn; không bỏ current samples để ép đủ 1024.
+  Prompt 12 cho phép config OOM riêng 32/16/8 với accumulation 32/64/128;
+  effective vẫn 1024. Áp cùng điều kiện cho A/B, namespace mới, không auto fallback.
 - AdamW mới mỗi task, lr 0.001, weight decay 0.0001, patience 5, focal gamma 1,
   distillation alpha 1/temperature 2, feature MSE weight 0.5. Không thêm scheduler.
 
@@ -214,5 +216,5 @@ python -m pytest tests/test_fold_ab_study.py \
 
 Các test dùng runner giả và dữ liệu synthetic nhỏ; model trong integration test
 chỉ 2 → 8 → 4 trên CPU, không cấp phát model paper-size hoặc train dataset thật.
-Không dùng kết quả synthetic để đánh giá A tốt hơn B. Sau Prompt 11, tiếp tục
-**Prompt 12** để hoàn thiện report/runbook trước khi chạy hai pilot trên server.
+Không dùng kết quả synthetic để đánh giá A tốt hơn B. Prompt 12 đã có
+[runbook GPU](TDDI_PREPROCESSING_AB_PILOT_RUNBOOK.md); dừng chờ kết quả thật trước Prompt 13.
