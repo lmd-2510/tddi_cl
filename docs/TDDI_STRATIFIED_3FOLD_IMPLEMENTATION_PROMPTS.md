@@ -1,12 +1,12 @@
 # Các prompt tiếp theo — T-DDI stratified 3-fold và pilot A/B
 
-Cập nhật: 2026-09-13. Nguồn quyết định:
+Cập nhật: 2026-09-14. Nguồn quyết định:
 [TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md).
 
-**Bắt đầu ở Prompt 5 bên dưới.** Các prompt đã hoàn thành (audit code, fold schema,
-build/audit và decision record) đã được bỏ khỏi danh sách thực hiện. Không làm lại.
-Giữ số 5 để nối tiếp lịch sử; từ Prompt 7 trở đi là thứ tự mới, không dùng nội dung
-của prompt cũ cùng số.
+**Bước tiếp theo: Prompt 12.** Prompt 5–11 đã được triển khai; giữ nội dung bên dưới
+để tra phạm vi và acceptance, không thực hiện lại. Các bước audit code, fold schema,
+build/audit và decision record trước đó đã hoàn thành. Giữ số prompt để nối lịch sử;
+từ Prompt 7 trở đi là thứ tự mới, không dùng nội dung của prompt cũ cùng số.
 
 Đã có assignment fold seed 42, 694.455 development samples/178 class, audit 19 PASS.
 Giữ hai script riêng: `scripts/build_stratified_3fold_assignments.py` tạo assignment,
@@ -233,6 +233,11 @@ Acceptance: completion xác minh bằng metadata/artifacts, không chỉ directo
 scope prefix không khiến full run bị skip nhầm.
 
 ## Prompt 11 — Config/orchestrator smoke và pilot A/B
+
+Đã triển khai entrypoint riêng `src/training/fold_ab_study.py` và bốn config smoke/pilot.
+CLI, namespace, validation và giới hạn:
+[Config/orchestrator A/B](TDDI_STRATIFIED_3FOLD_AB_STUDY.md).
+Không tự chạy dữ liệu thật. Bước tiếp theo là Prompt 12 (report/runbook GPU).
 
 ```text
 Đọc decision record và giới hạn chung. Mở rộng src/training/tddi_ensemble3_study.py

@@ -119,7 +119,7 @@ class FocalLoss(nn.Module if nn is not None else object):
         return loss.mean()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train the numerical T-DDI paper-member continual-learning study."
     )
@@ -252,10 +252,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--stop-after-task", type=int,
                         help="Execution boundary; does not truncate/change the full task protocol.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.fold_replay_policy:
         if any(token.split("=")[0] in {"--total-memory-budget", "--replay-draws-per-epoch"}
-               for token in sys.argv[1:]):
+               for token in (sys.argv[1:] if argv is None else argv)):
             parser.error("Frozen-fold policy derives 4% slots and capped 12.5% replay; omit legacy budget flags.")
         args.total_memory_budget = None
         args.replay_draws_per_epoch = None

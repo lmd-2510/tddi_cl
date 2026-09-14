@@ -144,25 +144,27 @@ def _eval_groups(engine, model, values, labels, seen_map, new_classes, criterion
     return results
 
 
-def run_fold_training(args, *, engine):
-    """Execute one member, using a full protocol plus an optional execution stop.
+def prepare_fold_run(args, *, engine, context=None):
+    """Read-only shared trainer/orchestrator preflight: never create a model.
 
-    The caller supplies the existing engine module to avoid duplicate imports
-    when train_cil.py is launched as a script. Tests replace only its model factory.
+    A context may be shared within a single planning call. Each actual trainer
+    invocation/resume creates and validates its own fresh context.
     """
     validate_fold_options(args)
-    root = Path(args.outdir)
-    resume_path = getattr(args, "resume_fold_checkpoint", None)
-    if root.exists() and not resume_path:
-        raise FileExistsError(f"Frozen-fold run output already exists; never overwrite/restart: {root}")
     columns = load_feature_columns(args.feature_cols)
     if len(columns) != TDDI_PAPER_INPUT_DIM or len(set(columns)) != len(columns):
         raise ValueError("Paper member requires exactly 3780 distinct descriptors in recorded order.")
     task_hash = fold_file_sha256(args.task_file)
     spec = engine.load_task_spec(args.task_file)
     print("Frozen-fold preflight: validating assignment/source hashes and IDs; no model created yet.", flush=True)
-    context = prepare_development_fold_context(args.fold_assignments, args.fold_manifest,
-        source_paths={"train": args.train, "validation": args.validation, "test": args.test})
+    if context is None:
+        context = prepare_development_fold_context(args.fold_assignments, args.fold_manifest,
+            source_paths={"train": args.train, "validation": args.validation, "test": args.test})
+    else:
+        requested = (args.fold_assignments, args.fold_manifest, args.train, args.validation, args.test)
+        if tuple(Path(p).resolve() for p in requested) != tuple(p for p, _ in context._file_stamps):
+            raise ValueError("Cached fold context does not match requested source/assignment paths.")
+        context.assert_unchanged()
     tasks = validate_p3_spec(spec, context)
     manifest = context.manifest
     if manifest["fold_seed"] != 42:
@@ -212,6 +214,26 @@ def run_fold_training(args, *, engine):
     contract["sampler"] = {"policy": SAMPLER_POLICY, "schema_version": 1, "rng_derivation": RNG_DERIVATION,
                            "replay_fraction": 0.125, "repeat_cap": 3, "task_boundary_epoch_reset": 0}
     contract = json.loads(_json(contract))
+    return dict(columns=columns, tasks=tasks, task_hash=task_hash, context=context, manifest=manifest,
+                prep=prep, prep_hash=prep_hash, budgets=budgets, buffer_kwargs=buffer_kwargs, buffer=buffer,
+                seeds=seeds, device=device, stop=stop, arguments=arguments, resolved=resolved, contract=contract)
+
+
+def run_fold_training(args, *, engine):
+    """Execute one member with shared preflight and immutable task-boundary resume."""
+    validate_fold_options(args)
+    root = Path(args.outdir)
+    resume_path = getattr(args, "resume_fold_checkpoint", None)
+    if root.exists() and not resume_path:
+        raise FileExistsError(f"Frozen-fold run output already exists; never overwrite/restart: {root}")
+    prepared = prepare_fold_run(args, engine=engine)
+    columns, tasks, task_hash, context, manifest = (prepared[k] for k in
+        ("columns", "tasks", "task_hash", "context", "manifest"))
+    prep, prep_hash, budgets, buffer_kwargs, buffer = (prepared[k] for k in
+        ("prep", "prep_hash", "budgets", "buffer_kwargs", "buffer"))
+    seeds, device, stop, arguments, resolved, contract = (prepared[k] for k in
+        ("seeds", "device", "stop", "arguments", "resolved", "contract"))
+    del prepared
     loaded = None
     if resume_path:
         loaded, buffer = load_fold_replay_checkpoint(resume_path, root=root, expected_contract=contract,
