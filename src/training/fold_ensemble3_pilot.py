@@ -121,13 +121,16 @@ def _validate_template(value: object) -> str:
     return value
 
 
-def load_pilot_config(
+def _load_locked_config(
     path: str | Path,
     *,
+    expected_kind: str,
+    expected_phase: str,
+    expected_stop_after_task: int,
     project_root: str | Path = PROJECT_ROOT,
     overrides: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
-    """Load the locked approved pilot without requiring server-only inputs."""
+    """Load one locked fold-ensemble config without requiring server-only inputs."""
 
     path, root = Path(path).resolve(), Path(project_root).resolve()
     value = json.loads(path.read_text(encoding="utf-8"))
@@ -141,8 +144,12 @@ def load_pilot_config(
         },
         "fold ensemble pilot config",
     )
-    if value["schema_version"] != 1 or value["kind"] != CONFIG_KIND or value["phase"] != "pilot":
-        raise ValueError("Unsupported fold ensemble pilot kind/schema/phase.")
+    if (
+        value["schema_version"] != 1
+        or value["kind"] != expected_kind
+        or value["phase"] != expected_phase
+    ):
+        raise ValueError("Unsupported fold ensemble kind/schema/phase.")
     if value["experiment_seed"] != 0 or value["fold_seed"] != 42:
         raise ValueError("Pilot requires experiment seed 0 and fold seed 42.")
     if tuple(value["member_ids"]) != MEMBER_IDS:
@@ -181,8 +188,15 @@ def load_pilot_config(
     expected_training = {**TRAINING, "epochs": 20, "patience": 5}
     if value["training"] != expected_training:
         raise ValueError("Pilot training hyperparameters must match the approved baseline.")
-    if value["execution"] != EXECUTION:
-        raise ValueError("Pilot must stop at task 1, export validation/test, and run sequentially.")
+    expected_execution = {
+        **EXECUTION,
+        "stop_after_task": expected_stop_after_task,
+    }
+    if value["execution"] != expected_execution:
+        raise ValueError(
+            f"Study must stop at task {expected_stop_after_task}, export validation/test, "
+            "and run sequentially."
+        )
     namespace = value["evaluation"]["ensemble_namespace"]
     if not isinstance(namespace, str) or not namespace or Path(namespace).name != namespace:
         raise ValueError("evaluation.ensemble_namespace must be one directory name.")
@@ -239,6 +253,28 @@ def load_pilot_config(
     value["config_sha256"] = fold_file_sha256(path)
     value["tasks"] = tasks["tasks"]
     return value
+
+
+def load_pilot_config(
+    path: str | Path,
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+    overrides: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """Load the locked approved task-0--1 pilot."""
+
+    return _load_locked_config(
+        path,
+        expected_kind=CONFIG_KIND,
+        expected_phase="pilot",
+        expected_stop_after_task=STOP_AFTER_TASK,
+        project_root=project_root,
+        overrides=overrides,
+    )
+
+
+def _task_ids(config: Mapping[str, Any]) -> range:
+    return range(int(config["execution"]["stop_after_task"]) + 1)
 
 
 def _member_outdir(config: Mapping[str, Any], member_id: int) -> Path:
@@ -339,13 +375,13 @@ def build_pilot_plan(
     all_complete = all(member.status == "complete" for member in members)
     evaluations = tuple(
         _eval_plan(config, task_id, python, all_complete)
-        for task_id in range(STOP_AFTER_TASK + 1)
+        for task_id in _task_ids(config)
     )
     return FoldEnsemblePilotPlan(tuple(members), evaluations)
 
 
 def _validate_member_predictions(config: Mapping[str, Any], member_id: int) -> None:
-    for task_id in range(STOP_AFTER_TASK + 1):
+    for task_id in _task_ids(config):
         expected_classes = sorted(
             raw
             for task in config["tasks"][: task_id + 1]
@@ -451,7 +487,12 @@ def _run_thresholds(config: Mapping[str, Any], task_id: int, python: str, runner
     _load_report(test_report, task_id=task_id, split="test")
 
 
-def _manifest(config: Mapping[str, Any]) -> dict[str, Any]:
+def _manifest(
+    config: Mapping[str, Any],
+    *,
+    artifact_kind: str = "ddi_cil_frozen_fold_ensemble3_pilot_manifest",
+    limitations: Sequence[str] | None = None,
+) -> dict[str, Any]:
     members = []
     for member_id in MEMBER_IDS:
         run_config = _member_outdir(config, member_id) / "run_config.json"
@@ -470,12 +511,12 @@ def _manifest(config: Mapping[str, Any]) -> dict[str, Any]:
                         split: str(_prediction_path(config, member_id, task_id, split))
                         for split in ("validation", "test")
                     }
-                    for task_id in range(STOP_AFTER_TASK + 1)
+                    for task_id in _task_ids(config)
                 },
             }
         )
     evaluations = []
-    for task_id in range(STOP_AFTER_TASK + 1):
+    for task_id in _task_ids(config):
         root = _evaluation_root(config, task_id)
         paths = {
             "oof_ensemble": root / "oof.npz",
@@ -495,9 +536,12 @@ def _manifest(config: Mapping[str, Any]) -> dict[str, Any]:
         )
     return {
         "schema_version": 1,
-        "artifact_kind": "ddi_cil_frozen_fold_ensemble3_pilot_manifest",
+        "artifact_kind": artifact_kind,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "study_scope": {"completed_tasks": [0, 1], "full_protocol_task_count": 8},
+        "study_scope": {
+            "completed_tasks": list(_task_ids(config)),
+            "full_protocol_task_count": 8,
+        },
         "config_path": config["config_path"],
         "config_sha256": config["config_sha256"],
         "task_file_sha256": config["protocol"]["sha256"],
@@ -509,22 +553,29 @@ def _manifest(config: Mapping[str, Any]) -> dict[str, Any]:
         "ranking_policy": config["replay"]["ranking_policy"],
         "members": members,
         "evaluations": evaluations,
-        "limitations": [
-            "Task-0--1 pilot does not establish task-7 continual-learning performance.",
-            "OOF target accuracy does not guarantee the same selected test accuracy.",
-        ],
+        "limitations": list(
+            limitations
+            if limitations is not None
+            else (
+                "Task-0--1 pilot does not establish task-7 continual-learning performance.",
+                "OOF target accuracy does not guarantee the same selected test accuracy.",
+            )
+        ),
     }
 
 
-def execute_pilot(
+def execute_ensemble_study(
     config: Mapping[str, Any],
     *,
     member_ids: Sequence[int] | None = None,
     python: str = sys.executable,
     runner: Runner = _default_runner,
     inspector: Inspector = inspect_member,
+    manifest_name: str,
+    manifest_kind: str,
+    limitations: Sequence[str],
 ) -> Path | None:
-    """Run selected members serially; evaluate only when all three are complete."""
+    """Run selected members serially and evaluate only after all three complete."""
 
     selected = MEMBER_IDS if member_ids is None else tuple(member_ids)
     plan = build_pilot_plan(
@@ -536,24 +587,28 @@ def execute_pilot(
     for member in plan.members:
         if member.member_id not in selected or member.status == "complete":
             continue
-        # Recheck directly before every launch so two members cannot be started
-        # from one stale plan. The runner is synchronous by contract.
         command = member_command(config, member.member_id, python=python)
         current = inspector(config, member.member_id, command, require_inputs=True)
         if current["status"] == "complete":
             continue
         if current["status"] not in {"fresh", "resume"}:
-            raise RuntimeError(f"Member {member.member_id} is not safely runnable: {current['status']}.")
+            raise RuntimeError(
+                f"Member {member.member_id} is not safely runnable: {current['status']}."
+            )
         if current["status"] == "resume":
             command.extend(("--resume-fold-checkpoint", str(current["resume_checkpoint"])))
         runner(tuple(command), PROJECT_ROOT)
         after = inspector(
-            config, member.member_id,
+            config,
+            member.member_id,
             member_command(config, member.member_id, python=python),
             require_inputs=True,
         )
+        expected_boundary = config["execution"]["stop_after_task"]
         if after["status"] != "complete":
-            raise RuntimeError(f"Member {member.member_id} exited without a verified task-1 boundary.")
+            raise RuntimeError(
+                f"Member {member.member_id} exited without a verified task-{expected_boundary} boundary."
+            )
         _validate_member_predictions(config, member.member_id)
 
     final = build_pilot_plan(
@@ -563,23 +618,52 @@ def execute_pilot(
         return None
     for member_id in MEMBER_IDS:
         _validate_member_predictions(config, member_id)
-    for task_id in range(STOP_AFTER_TASK + 1):
+    for task_id in _task_ids(config):
         _run_ensemble(config, task_id, "validation", python, runner)
         _run_ensemble(config, task_id, "test", python, runner)
         _run_thresholds(config, task_id, python, runner)
 
-    manifest_path = Path(config["output_root"]) / "pilot_manifest.json"
+    manifest_path = Path(config["output_root"]) / manifest_name
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         if (
-            existing.get("artifact_kind")
-            != "ddi_cil_frozen_fold_ensemble3_pilot_manifest"
+            existing.get("artifact_kind") != manifest_kind
             or existing.get("config_sha256") != config["config_sha256"]
         ):
-            raise FileExistsError(f"Refusing to overwrite unrelated pilot manifest: {manifest_path}")
+            raise FileExistsError(
+                f"Refusing to overwrite unrelated study manifest: {manifest_path}"
+            )
         return manifest_path
-    _publish_json(manifest_path, _manifest(config))
+    _publish_json(
+        manifest_path,
+        _manifest(config, artifact_kind=manifest_kind, limitations=limitations),
+    )
     return manifest_path
+
+
+def execute_pilot(
+    config: Mapping[str, Any],
+    *,
+    member_ids: Sequence[int] | None = None,
+    python: str = sys.executable,
+    runner: Runner = _default_runner,
+    inspector: Inspector = inspect_member,
+) -> Path | None:
+    """Run the selected task-0--1 pilot members serially."""
+
+    return execute_ensemble_study(
+        config,
+        member_ids=member_ids,
+        python=python,
+        runner=runner,
+        inspector=inspector,
+        manifest_name="pilot_manifest.json",
+        manifest_kind="ddi_cil_frozen_fold_ensemble3_pilot_manifest",
+        limitations=(
+            "Task-0--1 pilot does not establish task-7 continual-learning performance.",
+            "OOF target accuracy does not guarantee the same selected test accuracy.",
+        ),
+    )
 
 
 def print_dry_run(plan: FoldEnsemblePilotPlan) -> None:

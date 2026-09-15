@@ -73,8 +73,8 @@ do
     --validation "$VALIDATION" \
     --test "$TEST" \
     --feature-cols "$FEATURES" \
-    --fold-assignments "$FOLD_ROOT/fold_assignments.parquet" \
-    --fold-manifest "$FOLD_ROOT/fold_manifest.json" \
+    --assignments "$FOLD_ROOT/fold_assignments.parquet" \
+    --manifest "$FOLD_ROOT/fold_manifest.json" \
     --task-file "$TASK_FILE" \
     --member-id "$MEMBER_ID" \
     --validation-fold "$MEMBER_ID" \
@@ -236,10 +236,30 @@ hạn, không OOM và bốn prediction artifact tồn tại mới chạy tiếp:
 
 ```bash
 launch_member 1 first
-# Đợi xong và thực hiện cùng acceptance check với member_1.
+export CURRENT_MEMBER=1
+export CURRENT_LOG="$MONITOR_ROOT/member_1_first"
+ps -fp "$(cat "$CURRENT_LOG/job.pid")"
+tail -f "$CURRENT_LOG/nohup.log"
+
+# Sau khi PID kết thúc: exit code phải là 0, rồi kiểm tra artifact member_1.
+cat "$CURRENT_LOG/exit_code.txt"
+for TASK_ID in 0 1; do
+  test -s "$PILOT_ROOT/member_${CURRENT_MEMBER}/checkpoints/task_${TASK_ID}.pt" || echo "[MISSING] checkpoint task $TASK_ID"
+  test -s "$PILOT_ROOT/member_${CURRENT_MEMBER}/task_${TASK_ID}/completed_task.json" || echo "[MISSING] completion task $TASK_ID"
+  test -s "$PILOT_ROOT/member_${CURRENT_MEMBER}/member_predictions/task_${TASK_ID}/validation.npz" || echo "[MISSING] validation task $TASK_ID"
+  test -s "$PILOT_ROOT/member_${CURRENT_MEMBER}/member_predictions/task_${TASK_ID}/test.npz" || echo "[MISSING] test task $TASK_ID"
+done
 
 launch_member 2 first
-# Đợi xong và thực hiện cùng acceptance check với member_2.
+export CURRENT_MEMBER=2
+export CURRENT_LOG="$MONITOR_ROOT/member_2_first"
+ps -fp "$(cat "$CURRENT_LOG/job.pid")"
+tail -f "$CURRENT_LOG/nohup.log"
+
+# Sau khi PID của member 2 kết thúc: exit code phải là 0. Job này còn chạy
+# ensemble/threshold sau task 1, nên phải đợi toàn bộ PID kết thúc.
+cat "$CURRENT_LOG/exit_code.txt"
+test -s "$PILOT_ROOT/pilot_manifest.json" && echo "[OK] pilot manifest"
 ```
 
 Không chạy hai lệnh `launch_member` cùng lúc. Lần member 2 hoàn thành sẽ tự chạy

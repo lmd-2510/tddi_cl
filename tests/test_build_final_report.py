@@ -8,8 +8,10 @@ import pandas as pd
 import pytest
 
 from src.eval.report import build_final_report
+from src.eval.evaluation import PredictionOutputs
 from src.eval.metrics import compute_classification_metrics
 from src.eval.predictions import MemberPredictionArtifact, MemberPredictionContext
+from src.eval.predictions import export_member_prediction_artifact
 from src.eval.ensemble_ue import (
     aggregate_member_predictions,
     export_offline_ensemble_artifact,
@@ -69,6 +71,21 @@ def _write_task_artifact(
     ensemble = aggregate_member_predictions(members)
     path = full_root / "offline_ensemble" / f"task_{task_id}" / "test.npz"
     export_offline_ensemble_artifact(ensemble, path)
+    for member_id, member in enumerate(members):
+        export_member_prediction_artifact(
+            PredictionOutputs(
+                logits=member.logits,
+                probabilities=member.probabilities,
+                predictions=member.raw_class_ids[member.probabilities.argmax(axis=1)],
+                labels=member.labels,
+                latent_features=np.zeros((member.labels.size, 1), dtype=np.float32),
+                class_ids=member.raw_class_ids,
+            ),
+            {"sample_id": member.sample_ids},
+            member.context,
+            full_root / f"member_{member_id}" / "member_predictions"
+            / f"task_{task_id}" / "test.npz",
+        )
 
     metrics = compute_classification_metrics(
         ensemble.labels,
@@ -259,3 +276,35 @@ def test_refuses_existing_outputs_without_explicit_overwrite(tmp_path: Path) -> 
         overwrite=True,
     )
     assert paths["report"].is_file()
+
+
+def test_supports_fold_ensemble_layout_and_derives_member_forgetting(
+    tmp_path: Path,
+) -> None:
+    full_root, task_file = _build_fixture(tmp_path)
+    evaluation_root = full_root / "offline_evaluation"
+    (full_root / "offline_ensemble").rename(evaluation_root)
+    for task_id in range(2):
+        legacy_report = full_root / "threshold" / f"task_{task_id}" / "test_report.json"
+        report = json.loads(legacy_report.read_text(encoding="utf-8"))
+        if task_id == 1:
+            report["selection_status"] = "no_selection"
+            report["threshold"].update(
+                {"value": None, "selection_applied": False, "selection_status": "no_selection"}
+            )
+        target = evaluation_root / f"task_{task_id}" / "test_threshold_report.json"
+        target.write_text(json.dumps(report), encoding="utf-8")
+        legacy_report.unlink()
+    for member_id in range(3):
+        (full_root / f"member_{member_id}" / "forgetting.csv").unlink()
+        (full_root / f"member_{member_id}" / "class_forgetting.csv").unlink()
+
+    paths = build_final_report(full_root=full_root, task_file=task_file)
+
+    summary = pd.read_csv(paths["task_summary"])
+    assert summary["task_id"].tolist() == [0, 1]
+    assert np.isnan(summary.loc[1, "threshold_value"])
+    assert summary.loc[1, "coverage"] == 1.0
+    members = pd.read_csv(paths["member_forgetting"])
+    assert members["member_id"].tolist() == [0, 1, 2]
+    assert (members["evaluated_classes_final"] == 3).all()

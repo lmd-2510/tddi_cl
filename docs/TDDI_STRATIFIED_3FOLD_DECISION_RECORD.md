@@ -277,8 +277,22 @@ Các output phải ở namespace mới, tách A/B và tách result cũ; tên/pat
 | Không gian exemplar cuối cùng | **Đã chốt `raw_sample_normalized_class_mean_control_v1`** |
 | Xếp hạng chung cho pilot A/B | Đã hoàn tất vai trò control; kết quả validation chọn sample-normalized |
 | Prediction provenance/OOF/common-test UE | **Prompt 15 đã triển khai; OOF one-prediction metrics được đánh dấu không khả dụng** |
-| Code/config hỗ trợ pilot task 0–1 | Prompt 5–17 đã triển khai; chưa chạy pilot ba member trên dataset thật |
-| Full 8-task chính thức | Chưa được phép chạy; chờ review bundle pilot và quyết định go/no-go |
+| Code/config hỗ trợ pilot task 0–1 | Prompt 5–17 và pilot thật ba member đã hoàn tất |
+| Full 8-task chính thức | **GO kỹ thuật ngày 2026-09-15; config/runbook đã chuẩn bị, chưa tự chạy** |
 
 Tài liệu liên quan: [Implementation prompts](TDDI_STRATIFIED_3FOLD_IMPLEMENTATION_PROMPTS.md),
 [fold artifact và runbook build/audit](TDDI_STRATIFIED_3FOLD_ARTIFACT.md).
+
+### Evidence GO từ pilot Ensemble3 task 0–1 — 2026-09-15
+
+Bundle `ensemble3_task01_review.tar.gz` xác nhận ba member hoàn thành task 0–1,
+checkpoint/prediction/OOF/test/threshold manifest đầy đủ, không có
+Traceback/OOM/NaN. Peak allocated task 1 xấp xỉ 1,95 GiB.
+
+Tại task 1, common-test ensemble đạt Accuracy `0.920139`, Macro-F1 `0.913513` và
+Balanced Accuracy `0.908477`. Threshold `entropy_confidence=0.83` được chọn chỉ từ
+OOF; trên test, tập được chọn đạt Accuracy `0.985149` tại coverage `0.701389`.
+
+Đây là GO về tính đúng/khả năng chạy pipeline, không phải bằng chứng rằng task 7 sẽ
+giữ cùng chất lượng. Full run phải dùng namespace mới, chạy lại từ task 0 và báo cáo
+forgetting cùng kết quả cuối 178 class.

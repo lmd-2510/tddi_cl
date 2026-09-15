@@ -3,8 +3,8 @@
 Cập nhật: 2026-09-15. Nguồn quyết định:
 [TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md).
 
-**Bước tiếp theo: chạy pilot Prompt 17 trên server GPU và gửi review bundle.**
-Prompt 5–17 đã được triển khai và các quyết định preprocessing/ranking đã được duyệt;
+**Bước tiếp theo: chạy full P3 theo Prompt 18 trên server GPU.**
+Prompt 5–18 đã được triển khai; pilot ba member đã đạt GO kỹ thuật và các quyết định preprocessing/ranking đã được duyệt;
 giữ nội dung bên dưới
 để tra phạm vi và acceptance, không thực hiện lại. Các bước audit code, fold schema,
 build/audit và decision record trước đó đã hoàn thành. Giữ số prompt để nối lịch sử;
@@ -58,6 +58,7 @@ hoặc phục hồi backup; không bắt buộc chạy lại trước từng pro
 | 15 | Prediction/OOF/ensemble UE và provenance |
 | 16 | Threshold chính/fallback/frozen evaluation |
 | 17 | Pilot ba member và điều kiện trước full tám task |
+| 18 | Full tám task ba member, ensemble/UE/threshold và final report |
 
 Prompt 5–12 triển khai hai phương án đã được phép thử, không cần chốt một
 preprocessing cuối. Không thực hiện phân tích kết quả giả ở Prompt 13 khi chưa
@@ -439,6 +440,18 @@ không auto launch/chaining. Nếu chuẩn bị template full8, mặc định dr
 layout178/hash P3, output tách pilot/cũ. Kết thúc bằng artifact cần gửi để go/no-go,
 không tự đổi method/hyper.
 ```
+
+## Prompt 18 — Full P3 ba member sau GO pilot
+
+Trạng thái: **đã triển khai config/entrypoint/runbook; chưa tự chạy dataset thật.**
+Dùng `src/training/fold_ensemble3_full.py`,
+`configs/full_tddi_p3_fold_ensemble3_seed0.json` và
+[runbook full GPU](TDDI_STRATIFIED_3FOLD_ENSEMBLE3_FULL_RUNBOOK.md).
+
+Full study chạy mới task 0–7 trong namespace riêng, member `0 → 1 → 2`, giữ nguyên
+fold/scaler B/ranking/budget/hyper đã duyệt. Resume chỉ ở task boundary. OOF,
+common-test ensemble/UE và threshold chỉ chạy sau khi đủ ba member; final report được
+dựng từ artifact, không train/inference lại. Không tự launch trên máy code.
 
 ## Kết thúc
 

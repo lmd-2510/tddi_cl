@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import f1_score
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -32,6 +33,7 @@ from src.eval.ensemble_ue import (  # noqa: E402
     OfflineEnsembleArtifact,
     load_offline_ensemble_artifact,
 )
+from src.eval.predictions import load_member_prediction_artifact  # noqa: E402
 
 
 DEFAULT_FULL_ROOT = Path(
@@ -88,11 +90,20 @@ def _load_task_groups(task_file: Path) -> tuple[list[list[int]], Mapping[str, An
 
 
 def _ensemble_path(full_root: Path, task_id: int) -> Path:
-    return full_root / "offline_ensemble" / f"task_{task_id}" / "test.npz"
+    candidates = (
+        full_root / "offline_ensemble" / f"task_{task_id}" / "test.npz",
+        full_root / "offline_evaluation" / f"task_{task_id}" / "test.npz",
+    )
+    return next((path for path in candidates if path.is_file()), candidates[0])
 
 
 def _threshold_report_path(full_root: Path, task_id: int) -> Path:
-    return full_root / "threshold" / f"task_{task_id}" / "test_report.json"
+    candidates = (
+        full_root / "threshold" / f"task_{task_id}" / "test_report.json",
+        full_root / "offline_evaluation" / f"task_{task_id}" / "test_threshold_report.json",
+        full_root / "offline_ensemble" / f"task_{task_id}" / "test_threshold_report.json",
+    )
+    return next((path for path in candidates if path.is_file()), candidates[0])
 
 
 def _validate_ensemble_context(
@@ -182,14 +193,22 @@ def _build_task_row(
         labels=labels,
     )
     score_name = str(threshold.get("score_name", ""))
-    threshold_value = float(threshold.get("value", np.nan))
-    if not np.isfinite(threshold_value):
-        raise ValueError(f"Task {task_id} threshold value is not finite.")
-    mask = _threshold_mask(
-        artifact,
-        score_name=score_name,
-        threshold_value=threshold_value,
-    )
+    selection_applied = bool(threshold.get("selection_applied", True))
+    raw_threshold_value = threshold.get("value")
+    if selection_applied:
+        threshold_value = float(raw_threshold_value)
+        if not np.isfinite(threshold_value):
+            raise ValueError(f"Task {task_id} threshold value is not finite.")
+        mask = _threshold_mask(
+            artifact,
+            score_name=score_name,
+            threshold_value=threshold_value,
+        )
+    else:
+        if raw_threshold_value is not None:
+            raise ValueError(f"Task {task_id} no-selection report invented a threshold.")
+        threshold_value = float("nan")
+        mask = np.ones(artifact.row_count, dtype=bool)
     threshold_metrics = compute_classification_metrics(
         artifact.labels[mask],
         artifact.predictions[mask],
@@ -272,7 +291,7 @@ def _load_member_forgetting(
     full_root: Path,
     *,
     member_ids: Sequence[int],
-    final_task_id: int,
+    task_groups: Sequence[Sequence[int]],
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for member_id in member_ids:
@@ -280,16 +299,21 @@ def _load_member_forgetting(
         forgetting_path = member_root / "forgetting.csv"
         class_path = member_root / "class_forgetting.csv"
         if not forgetting_path.is_file() or not class_path.is_file():
-            raise FileNotFoundError(
-                f"Member {member_id} is missing forgetting artifacts under {member_root}."
+            rows.append(
+                _derive_member_forgetting(
+                    member_root,
+                    member_id=member_id,
+                    task_groups=task_groups,
+                )
             )
+            continue
         forgetting = pd.read_csv(forgetting_path)
         summary = forgetting[forgetting["task_id"].astype(str) == "mean_old_tasks"]
         if len(summary) != 1:
             raise ValueError(f"Member {member_id} has no unique mean_old_tasks row.")
         class_forgetting = pd.read_csv(class_path)
         final_classes = class_forgetting[
-            class_forgetting["train_task"].astype(int) == final_task_id
+            class_forgetting["train_task"].astype(int) == len(task_groups) - 1
         ].copy()
         if final_classes.empty or final_classes["class_id"].duplicated().any():
             raise ValueError(f"Member {member_id} final class-forgetting rows are invalid.")
@@ -308,6 +332,80 @@ def _load_member_forgetting(
             }
         )
     return pd.DataFrame(rows)
+
+
+def _derive_member_forgetting(
+    member_root: Path,
+    *,
+    member_id: int,
+    task_groups: Sequence[Sequence[int]],
+) -> dict[str, Any]:
+    """Derive member forgetting from immutable per-boundary test predictions."""
+
+    task_count = len(task_groups)
+    matrix = np.full((task_count, task_count), np.nan, dtype=np.float64)
+    best_class_f1: dict[int, float] = {}
+    final_class_f1: dict[int, float] = {}
+    for train_task in range(task_count):
+        path = member_root / "member_predictions" / f"task_{train_task}" / "test.npz"
+        artifact = load_member_prediction_artifact(path)
+        expected_classes = sorted(
+            int(raw)
+            for group in task_groups[: train_task + 1]
+            for raw in group
+        )
+        if (
+            artifact.context.member_id != member_id
+            or artifact.context.task_id != train_task
+            or artifact.context.split.casefold() != "test"
+            or artifact.raw_class_ids.astype(int).tolist() != expected_classes
+        ):
+            raise ValueError(f"Member prediction context mismatch: {path}")
+        predictions = artifact.raw_class_ids[
+            np.asarray(artifact.probabilities).argmax(axis=1)
+        ].astype(np.int64, copy=False)
+        for eval_task in range(train_task + 1):
+            class_ids = [int(raw) for raw in task_groups[eval_task]]
+            mask = np.isin(artifact.labels, class_ids)
+            if not mask.any():
+                raise ValueError(
+                    f"Member {member_id} task {train_task} has no test rows for group {eval_task}."
+                )
+            matrix[train_task, eval_task] = compute_classification_metrics(
+                artifact.labels[mask], predictions[mask], labels=class_ids
+            )["macro_f1"]
+        per_class = f1_score(
+            artifact.labels,
+            predictions,
+            labels=expected_classes,
+            average=None,
+            zero_division=0,
+        )
+        for class_id, value in zip(expected_classes, per_class):
+            value = float(value)
+            best_class_f1[class_id] = max(best_class_f1.get(class_id, value), value)
+            if train_task == task_count - 1:
+                final_class_f1[class_id] = value
+
+    forgetting = compute_forgetting(matrix)
+    summary = forgetting[forgetting["task_id"].astype(str) == "mean_old_tasks"]
+    if len(summary) != 1 or len(final_class_f1) != len(best_class_f1):
+        raise ValueError(f"Could not derive complete forgetting for member {member_id}.")
+    class_forgetting = np.asarray(
+        [best_class_f1[raw] - final_class_f1[raw] for raw in sorted(final_class_f1)],
+        dtype=np.float64,
+    )
+    final_values = np.asarray(
+        [final_class_f1[raw] for raw in sorted(final_class_f1)], dtype=np.float64
+    )
+    return {
+        "member_id": member_id,
+        "task_forgetting_mean_old_tasks": float(summary.iloc[0]["forgetting"]),
+        "class_forgetting_mean_final": float(class_forgetting.mean()),
+        "class_forgetting_median_final": float(np.median(class_forgetting)),
+        "zero_f1_classes_final": int(np.sum(final_values == 0.0)),
+        "evaluated_classes_final": int(final_values.size),
+    }
 
 
 def _format_markdown_value(value: object) -> str:
@@ -566,7 +664,7 @@ def build_final_report(
     member_forgetting = _load_member_forgetting(
         full_root,
         member_ids=member_ids,
-        final_task_id=len(task_groups) - 1,
+        task_groups=task_groups,
     )
     markdown = _build_markdown(
         task_summary,

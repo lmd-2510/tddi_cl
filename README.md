@@ -50,9 +50,10 @@ training recipe là bản tái tạo chính xác paper T-DDI.
 
 Method chính là `replay_distill_fixed_budget_uniform`:
 
-- Replay buffer có tổng ngân sách cố định 6.800 exemplar.
+- Tổng ngân sách ba replay buffer là 4% development data: 27.778 slots.
+- Member 0/1/2 lần lượt có ngân sách 9.260/9.259/9.259 slots.
 - Exemplar cũ được trộn với dữ liệu task hiện tại từ task 1.
-- Mỗi epoch dùng 6.800 replay draws.
+- Replay mục tiêu chiếm 12,5% số draws mỗi epoch, repeat cap 3/exemplar.
 - Classification sử dụng Focal Loss với `gamma=1.0`.
 - Frozen teacher từ task trước cung cấp logit distillation với `alpha=1.0` và
   `temperature=2.0`.
@@ -73,9 +74,10 @@ Study huấn luyện ba member độc lập và tuần tự:
 | 1 | 215626784 |
 | 2 | 3041879697 |
 
-`experiment_seed=0` giữ protocol, task order, class map, preprocessing và exemplar
-identity dùng chung. `member_seed` chỉ tạo khác biệt ở initialization, dropout và
-sampler/DataLoader order.
+`experiment_seed=0` giữ protocol, task order, class map và cách dựng fold. Mỗi member
+giữ hai fold để train, fold còn lại để validation; vì tập train khác nhau nên scaler
+B và exemplar IDs cũng riêng theo member. `member_seed` điều khiển initialization,
+dropout và sampler/DataLoader order.
 
 Ba member không phải ba experiment seed. Chúng thuộc cùng một experiment seed và được
 dùng để tạo ensemble/uncertainty.
@@ -138,14 +140,18 @@ outputs/remote_preflight/      # kiểm tra máy GPU
 Các namespace output lớn được Git ignore. Không xóa `outputs/full` trên server nếu còn
 cần checkpoint, resume, member predictions hoặc báo cáo đã tạo.
 
-## Config pilot stratified 3-fold hiện tại
+## Config stratified 3-fold hiện tại
 
 ```text
 configs/pilot_tddi_p3_fold_ensemble3_seed0.json
 ```
 
 Config này chỉ chạy task 0–1 để kiểm chứng kỹ thuật. Full 8-task chưa được tự động
-khởi chạy và chỉ được chuẩn bị sau khi review pilot.
+khởi chạy. Sau khi pilot được duyệt, config full nằm tại:
+
+```text
+configs/full_tddi_p3_fold_ensemble3_seed0.json
+```
 
 Thông số chính:
 
@@ -183,14 +189,14 @@ Thông số chính:
 Các script này không chạy trong mỗi epoch. Với full run hiện tại, training đọc thẳng
 asset đã đóng băng trong `study_assets/`.
 
-## Dry-run
+## Dry-run full 8 task
 
 Dry-run kiểm tra config, seed, đường dẫn và command được lập kế hoạch. Nó không tạo
 model và không train:
 
 ```bash
-python src/training/fold_ensemble3_pilot.py \
-  --config configs/pilot_tddi_p3_fold_ensemble3_seed0.json \
+python src/training/fold_ensemble3_full.py \
+  --config configs/full_tddi_p3_fold_ensemble3_seed0.json \
   --member-id 0
 ```
 
@@ -224,14 +230,16 @@ mỗi seed gồm ba member riêng.
 
 1. `docs/TDDI_STRATIFIED_3FOLD_ENSEMBLE3_PILOT_RUNBOOK.md` — setup và lệnh pilot
    task 0–1 trên máy GPU.
-2. `docs/EVAL_PIPELINE.md` — hai chế độ ensemble, OOF, normalized entropy và threshold.
-3. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — kết quả P3 và giải thích metric.
+2. `docs/TDDI_STRATIFIED_3FOLD_ENSEMBLE3_FULL_RUNBOOK.md` — lệnh full task 0–7,
+   resume, ensemble/UE và review bundle.
+3. `docs/EVAL_PIPELINE.md` — hai chế độ ensemble, OOF, normalized entropy và threshold.
+4. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — kết quả P3 và giải thích metric.
 
 Final report mở rộng được dựng lại từ artifact đã có bằng:
 
 ```bash
 python src/eval/report.py \
-  --full-root outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_3fold_v2 \
+  --full-root outputs/stratified_ensemble3/full_p3_seed0_8tasks \
   --task-file study_assets/task_protocols/tail_to_head_tasks.json \
   --overwrite
 ```
