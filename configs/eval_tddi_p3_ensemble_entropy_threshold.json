@@ -2,6 +2,7 @@
   "schema_version": 1,
   "confidence_score": "entropy_confidence",
   "probability_source": "raw",
+  "selection_source": "oof",
   "low_threshold": 0.5,
   "candidate_grid": [
     0.50, 0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59,
@@ -13,6 +14,7 @@
   "selection_rule": {
     "name": "smallest_threshold_meeting_target_accuracy",
     "target_accuracy": 0.95,
+    "fallback_minimum_coverage": 0.50,
     "tie_breakers": ["lower_threshold"]
   }
 }

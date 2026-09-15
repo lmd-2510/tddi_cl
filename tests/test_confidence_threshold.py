@@ -85,6 +85,72 @@ def _write_config(
     return path
 
 
+def _write_paper_config(
+    path: Path,
+    *,
+    grid: list[float],
+    target_accuracy: float = 0.95,
+    fallback_minimum_coverage: float = 0.5,
+) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "confidence_score": "entropy_confidence",
+                "probability_source": "raw",
+                "low_threshold": 0.5,
+                "candidate_grid": grid,
+                "selection_rule": {
+                    "name": "smallest_threshold_meeting_target_accuracy",
+                    "target_accuracy": target_accuracy,
+                    "fallback_minimum_coverage": fallback_minimum_coverage,
+                    "tie_breakers": ["lower_threshold"],
+                },
+                "calibration_bins": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _with_entropy_confidence(values: list[float], *, split: str = "validation"):
+    ensemble = _ensemble(split)
+    confidence = np.asarray(values, dtype=np.float64)
+    return replace(
+        ensemble,
+        entropy_confidence=confidence,
+        normalized_entropy=1.0 - confidence,
+        confidence=confidence.copy(),
+    )
+
+
+def _select_paper(
+    tmp_path: Path,
+    *,
+    confidence: list[float],
+    grid: list[float],
+    target_accuracy: float = 0.95,
+    fallback_minimum_coverage: float = 0.5,
+):
+    config = load_threshold_selection_config(
+        _write_paper_config(
+            tmp_path / "paper_threshold_config.json",
+            grid=grid,
+            target_accuracy=target_accuracy,
+            fallback_minimum_coverage=fallback_minimum_coverage,
+        )
+    )
+    source = tmp_path / "synthetic_oof_source.npz"
+    source.write_bytes(b"synthetic selection source")
+    selected = select_confidence_threshold(
+        _with_entropy_confidence(confidence),
+        config,
+        source_ensemble_path=source,
+    )
+    return config, selected
+
+
 def _select_and_freeze(tmp_path: Path):
     config_path = _write_config(tmp_path / "threshold_config.json")
     config = load_threshold_selection_config(config_path)
@@ -117,10 +183,12 @@ def test_selection_uses_predeclared_grid_and_records_required_metadata(tmp_path:
 
     payload = json.loads(frozen_path.read_text(encoding="utf-8"))
     assert payload["candidate_grid"] == [0.0, 0.5, 0.8]
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["confidence_score"] == "entropy_confidence"
     assert payload["probability_source"] == "raw"
     assert payload["selection_rule"]["name"] == "max_macro_f1_subject_to_min_coverage"
+    assert payload["selection_status"] == "legacy_selected"
+    assert payload["target_met"] is False
     assert payload["selected_threshold"] == 0.5
     assert payload["validation_metrics"] == {
         "accuracy": 1.0,
@@ -155,10 +223,31 @@ def test_full_p3_primary_config_matches_paper_threshold_rule() -> None:
 
     assert primary.confidence_score == "entropy_confidence"
     assert primary.probability_source == "raw"
+    assert primary.selection_source == "oof"
     assert primary.selection_rule == "smallest_threshold_meeting_target_accuracy"
     assert primary.target_accuracy == 0.95
+    assert primary.fallback_minimum_coverage == 0.5
     assert primary.low_threshold == 0.5
     assert primary.candidate_grid == tuple(value / 100 for value in range(50, 100))
+
+
+def test_full_p3_config_rejects_seeded_validation_instead_of_oof(
+    tmp_path: Path,
+) -> None:
+    config = load_threshold_selection_config(
+        Path("configs/eval_tddi_p3_ensemble_entropy_threshold.json")
+    )
+    validation = _ensemble("validation")
+    source = export_offline_ensemble_artifact(
+        validation, tmp_path / "seeded_validation.npz"
+    )
+
+    with pytest.raises(ValueError, match="does not match config"):
+        select_confidence_threshold(
+            validation,
+            config,
+            source_ensemble_path=source,
+        )
 
 
 def test_explicit_max_probability_score_changes_threshold_selection(tmp_path: Path) -> None:
@@ -241,7 +330,7 @@ def test_test_evaluation_requires_frozen_artifact_loaded_from_disk(tmp_path: Pat
 
     report = evaluate_with_frozen_threshold(test_ensemble, frozen)
     assert report["evaluation_split"] == "test"
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["threshold_score_name"] == "entropy_confidence"
     assert report["threshold_value"] == 0.5
     assert report["threshold_probability_source"] == "raw"
@@ -259,9 +348,13 @@ def test_test_evaluation_requires_frozen_artifact_loaded_from_disk(tmp_path: Pat
     assert full["sample_count"] == 4
     assert full["accuracy"] == pytest.approx(0.5)
     assert full["macro_f1"] == pytest.approx(0.5)
-    assert "ece" not in full
-    assert "negative_log_likelihood" not in full
-    assert "brier_score" not in full
+    assert full["ece"] == pytest.approx(0.34)
+    assert full["negative_log_likelihood"] == pytest.approx(
+        -np.log(np.asarray([0.99, 0.30, 0.95, 0.40])).mean()
+    )
+    assert full["brier_score"] == pytest.approx(
+        np.mean([2 * 0.01**2, 2 * 0.70**2, 2 * 0.05**2, 2 * 0.60**2])
+    )
     assert report["entropy_confidence_selective_metrics"] == {
         "threshold_score_name": "entropy_confidence",
         "probability_source": "raw",
@@ -300,6 +393,12 @@ def test_legacy_frozen_threshold_load_defaults_to_entropy_confidence(tmp_path: P
     payload["schema_version"] = 1
     payload.pop("confidence_score")
     payload.pop("probability_source")
+    payload.pop("selection_status")
+    payload.pop("target_met")
+    payload["selection_rule"].pop("fallback_minimum_coverage")
+    payload["source"].pop("ensemble_mode")
+    payload["source"].pop("member_ids")
+    payload["source"].pop("study_provenance")
     for candidate in payload["candidate_results"]:
         candidate.pop("confidence_score")
     legacy_path = tmp_path / "legacy_frozen_threshold.json"
@@ -319,3 +418,117 @@ def test_frozen_threshold_rejects_mismatched_test_context(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match="experiment_seed"):
         evaluate_with_frozen_threshold(mismatched, frozen)
+
+
+def test_paper_rule_uses_smallest_target_threshold_without_primary_coverage_gate(
+    tmp_path: Path,
+) -> None:
+    _, selected = _select_paper(
+        tmp_path,
+        confidence=[0.8, 0.9, 0.7, 0.6],
+        grid=[0.6, 0.7, 0.8, 0.9],
+        target_accuracy=2 / 3,
+        # The selected primary candidate has coverage 0.75, proving this
+        # fallback-only constraint is not imposed on the primary rule.
+        fallback_minimum_coverage=0.99,
+    )
+
+    assert selected.selected_threshold == 0.7
+    assert selected.selection_status == "target_met"
+    assert selected.target_met is True
+    assert selected.validation_coverage == pytest.approx(0.75)
+
+
+def test_paper_rule_fallback_maximizes_accuracy_then_coverage(tmp_path: Path) -> None:
+    _, selected = _select_paper(
+        tmp_path,
+        confidence=[0.8, 0.9, 0.6, 0.7],
+        grid=[0.6, 0.7, 0.8, 0.9],
+    )
+
+    # Thresholds 0.6 and 0.8 both have accuracy 0.5; 0.6 wins on coverage.
+    assert selected.selected_threshold == 0.6
+    assert selected.validation_accuracy == pytest.approx(0.5)
+    assert selected.validation_coverage == pytest.approx(1.0)
+    assert selected.selection_status == "fallback"
+    assert selected.target_met is False
+
+
+def test_paper_rule_fallback_final_tie_prefers_lower_threshold(tmp_path: Path) -> None:
+    _, selected = _select_paper(
+        tmp_path,
+        confidence=[0.9, 0.9, 0.7, 0.7],
+        grid=[0.75, 0.8],
+    )
+
+    assert selected.selected_threshold == 0.75
+    assert selected.selection_status == "fallback"
+
+
+def test_zero_coverage_produces_frozen_no_selection_and_does_not_filter_test(
+    tmp_path: Path,
+) -> None:
+    config, selected = _select_paper(
+        tmp_path,
+        confidence=[0.8, 0.8, 0.8, 0.8],
+        grid=[0.99],
+    )
+    assert selected.selected_threshold is None
+    assert selected.selection_status == "no_selection"
+    assert selected.target_met is False
+    assert selected.validation_selected_count == 0
+    assert selected.validation_accuracy is None
+    assert selected.candidate_results[0]["selected_count"] == 0
+    assert selected.candidate_results[0]["accuracy"] is None
+
+    frozen_path = export_frozen_threshold_artifact(
+        selected, tmp_path / "no_selection.json"
+    )
+    loaded = load_frozen_threshold_artifact(
+        frozen_path, config_path=config.source_path
+    )
+    report = evaluate_with_frozen_threshold(_ensemble("test"), loaded)
+
+    assert report["selection_status"] == "no_selection"
+    assert report["threshold_value"] is None
+    assert report["threshold"]["selection_applied"] is False
+    assert report["high_confidence"]["selected_count"] == 4
+    assert report["high_confidence"]["coverage"] == pytest.approx(1.0)
+    assert report["threshold_score_selective_metrics"]["selection_applied"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("task_id", 99, "task_id"),
+        ("raw_class_ids", (10, 20), "raw_class_ids"),
+        ("source_ensemble_mode", "stratified_3fold", "ensemble_mode"),
+    ],
+)
+def test_frozen_threshold_rejects_task_class_and_partition_mismatch(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    _, _, _, _, frozen = _select_and_freeze(tmp_path)
+    mismatched = replace(frozen, **{field: value})
+
+    with pytest.raises(ValueError, match=error):
+        evaluate_with_frozen_threshold(_ensemble("test"), mismatched)
+
+
+def test_frozen_oof_provenance_requires_matching_test_study_contract(
+    tmp_path: Path,
+) -> None:
+    _, _, _, _, frozen = _select_and_freeze(tmp_path)
+    linked = replace(
+        frozen,
+        assignment_sha256="a" * 64,
+        fold_manifest_sha256="b" * 64,
+        task_file_sha256="c" * 64,
+        study_contract_sha256="d" * 64,
+    )
+
+    with pytest.raises(ValueError, match="study_provenance"):
+        evaluate_with_frozen_threshold(_ensemble("test"), linked)

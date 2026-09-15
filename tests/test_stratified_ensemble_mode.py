@@ -14,6 +14,9 @@ from src.data.stratified_folds import (
     select_development_fold,
 )
 from src.eval.threshold import (
+    evaluate_with_frozen_threshold,
+    export_frozen_threshold_artifact,
+    load_frozen_threshold_artifact,
     load_threshold_selection_config,
     select_confidence_threshold,
 )
@@ -147,6 +150,7 @@ def test_three_disjoint_validation_folds_become_one_oof_artifact(tmp_path: Path)
                 "schema_version": 1,
                 "confidence_score": "entropy_confidence",
                 "probability_source": "raw",
+                "selection_source": "oof",
                 "low_threshold": 0.5,
                 "candidate_grid": [0.5, 0.9, 0.99],
                 "selection_rule": {
@@ -252,3 +256,72 @@ def test_common_test_means_three_predictions_under_shared_study_contract() -> No
     np.testing.assert_array_equal(ensemble.prediction_count, 3)
     assert not ensemble.unavailable_metrics
     assert np.isfinite(ensemble.mutual_information).all()
+
+
+def test_frozen_oof_threshold_links_to_different_common_test_partition(
+    tmp_path: Path,
+) -> None:
+    members = _provenanced_fold_members()
+    oof = aggregate_member_predictions(members, ensemble_mode="stratified_3fold")
+    oof_path = export_offline_ensemble_artifact(oof, tmp_path / "oof.npz")
+    config_path = tmp_path / "threshold.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "confidence_score": "entropy_confidence",
+                "probability_source": "raw",
+                "selection_source": "oof",
+                "low_threshold": 0.5,
+                "candidate_grid": [0.5, 0.9, 0.99],
+                "selection_rule": {
+                    "name": "smallest_threshold_meeting_target_accuracy",
+                    "target_accuracy": 0.95,
+                    "fallback_minimum_coverage": 0.5,
+                    "tie_breakers": ["lower_threshold"],
+                },
+                "calibration_bins": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    selected = select_confidence_threshold(
+        oof,
+        load_threshold_selection_config(config_path),
+        source_ensemble_path=oof_path,
+    )
+    frozen_path = export_frozen_threshold_artifact(
+        selected, tmp_path / "frozen_threshold.json"
+    )
+    frozen = load_frozen_threshold_artifact(frozen_path, config_path=config_path)
+
+    test_ids = np.asarray(["test-a", "test-b"])
+    test_labels = np.zeros(2, dtype=np.int64)
+    test_folds = np.full(2, -1, dtype=np.int16)
+    test_digest = partition_identity_sha256(test_ids, test_labels, test_folds)
+    test_members = [
+        replace(
+            artifact,
+            context=replace(artifact.context, split="test"),
+            sample_ids=test_ids.copy(),
+            labels=test_labels.copy(),
+            fold_ids=test_folds.copy(),
+            provenance=replace(
+                artifact.provenance,
+                expected_partition_rows=2,
+                expected_partition_sha256=test_digest,
+                expected_oof_rows=None,
+                expected_oof_sha256=None,
+            ),
+        )
+        for artifact in members
+    ]
+    test_ensemble = aggregate_member_predictions(
+        test_members, ensemble_mode="stratified_3fold"
+    )
+
+    assert set(oof.sample_ids).isdisjoint(set(test_ensemble.sample_ids))
+    report = evaluate_with_frozen_threshold(test_ensemble, frozen)
+    assert report["evaluation_split"] == "test"
+    assert report["threshold"]["source_split"] == "oof"
+    assert report["selection_status"] == "target_met"

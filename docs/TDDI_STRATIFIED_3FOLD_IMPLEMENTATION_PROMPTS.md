@@ -3,8 +3,8 @@
 Cập nhật: 2026-09-15. Nguồn quyết định:
 [TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md).
 
-**Bước tiếp theo: Prompt 16 — threshold chính/fallback/frozen evaluation.**
-Prompt 5–15 đã được triển khai và các quyết định preprocessing/ranking đã được duyệt;
+**Bước tiếp theo: Prompt 17 — pilot ba member và điều kiện trước full P3.**
+Prompt 5–16 đã được triển khai và các quyết định preprocessing/ranking đã được duyệt;
 giữ nội dung bên dưới
 để tra phạm vi và acceptance, không thực hiện lại. Các bước audit code, fold schema,
 build/audit và decision record trước đó đã hoàn thành. Giữ số prompt để nối lịch sử;
@@ -385,6 +385,11 @@ load; không sửa artifact lịch sử hoặc tạo common calibration split.
 ```
 
 ## Prompt 16 — Threshold chính + fallback, freeze trước test
+
+Trạng thái: **đã triển khai bằng frozen-threshold schema v4 và report schema v3.**
+Policy chính/fallback/no-selection đã tách rõ; threshold được freeze từ OOF trước khi
+đọc test. Report dùng raw probabilities cho ECE/NLL/Brier, không fit temperature và
+không diễn giải entropy confidence như max probability.
 
 ```text
 Đọc decision record và giới hạn chung. Mở rộng src/eval/threshold.py với policy/config
