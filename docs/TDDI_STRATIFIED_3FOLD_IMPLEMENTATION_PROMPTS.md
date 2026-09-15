@@ -3,8 +3,8 @@
 Cập nhật: 2026-09-15. Nguồn quyết định:
 [TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md](TDDI_STRATIFIED_3FOLD_DECISION_RECORD.md).
 
-**Bước tiếp theo: Prompt 17 — pilot ba member và điều kiện trước full P3.**
-Prompt 5–16 đã được triển khai và các quyết định preprocessing/ranking đã được duyệt;
+**Bước tiếp theo: chạy pilot Prompt 17 trên server GPU và gửi review bundle.**
+Prompt 5–17 đã được triển khai và các quyết định preprocessing/ranking đã được duyệt;
 giữ nội dung bên dưới
 để tra phạm vi và acceptance, không thực hiện lại. Các bước audit code, fold schema,
 build/audit và decision record trước đó đã hoàn thành. Giữ số prompt để nối lịch sử;
@@ -414,6 +414,12 @@ frozen round-trip, mismatch task/class/partition và legacy compatibility.
 ```
 
 ## Prompt 17 — Pilot ba member và điều kiện trước full P3
+
+Trạng thái code/config: **đã triển khai; chưa chạy dataset thật.** Dùng
+`src/training/fold_ensemble3_pilot.py`, config
+`configs/pilot_tddi_p3_fold_ensemble3_seed0.json` và
+`docs/TDDI_STRATIFIED_3FOLD_ENSEMBLE3_PILOT_RUNBOOK.md`. Bước kế tiếp là chạy trên
+server rồi dừng để đánh giá go/no-go; chưa có quyền tự chạy full8.
 
 ```text
 Chỉ tạo config training chính thức khi người dùng duyệt preprocessing/ranking cuối.

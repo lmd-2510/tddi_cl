@@ -277,7 +277,8 @@ Các output phải ở namespace mới, tách A/B và tách result cũ; tên/pat
 | Không gian exemplar cuối cùng | **Đã chốt `raw_sample_normalized_class_mean_control_v1`** |
 | Xếp hạng chung cho pilot A/B | Đã hoàn tất vai trò control; kết quả validation chọn sample-normalized |
 | Prediction provenance/OOF/common-test UE | **Prompt 15 đã triển khai; OOF one-prediction metrics được đánh dấu không khả dụng** |
-| Code/config hỗ trợ toàn bộ thiết kế | Prompt 5–15 đã triển khai và duyệt; bước tiếp theo là Prompt 16 |
+| Code/config hỗ trợ pilot task 0–1 | Prompt 5–17 đã triển khai; chưa chạy pilot ba member trên dataset thật |
+| Full 8-task chính thức | Chưa được phép chạy; chờ review bundle pilot và quyết định go/no-go |
 
 Tài liệu liên quan: [Implementation prompts](TDDI_STRATIFIED_3FOLD_IMPLEMENTATION_PROMPTS.md),
 [fold artifact và runbook build/audit](TDDI_STRATIFIED_3FOLD_ARTIFACT.md).

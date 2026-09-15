@@ -138,11 +138,14 @@ outputs/remote_preflight/      # kiểm tra máy GPU
 Các namespace output lớn được Git ignore. Không xóa `outputs/full` trên server nếu còn
 cần checkpoint, resume, member predictions hoặc báo cáo đã tạo.
 
-## Config chính
+## Config pilot stratified 3-fold hiện tại
 
 ```text
-configs/train_tddi_p3_replay_distill_ensemble3_stratified_3fold_seed0.json
+configs/pilot_tddi_p3_fold_ensemble3_seed0.json
 ```
+
+Config này chỉ chạy task 0–1 để kiểm chứng kỹ thuật. Full 8-task chưa được tự động
+khởi chạy và chỉ được chuẩn bị sau khi review pilot.
 
 Thông số chính:
 
@@ -159,7 +162,10 @@ Thông số chính:
 | Dropout | 0.2 |
 | Activation | GELU |
 | Input normalization | LayerNorm |
-| Replay memory | 6.800 exemplars |
+| Replay memory | Tổng 4% development: 9.260 / 9.259 / 9.259 slots |
+| Replay mỗi epoch | Mục tiêu 12,5%, repeat cap 3 |
+| Preprocessing | StandardScaler riêng từng member, fit task 0 rồi freeze |
+| Exemplar ranking | Sample-normalized class mean |
 
 ## Scripts chuẩn bị dữ liệu
 
@@ -183,8 +189,8 @@ Dry-run kiểm tra config, seed, đường dẫn và command được lập kế
 model và không train:
 
 ```bash
-python src/training/tddi_ensemble3_study.py \
-  --config configs/train_tddi_p3_replay_distill_ensemble3_stratified_3fold_seed0.json \
+python src/training/fold_ensemble3_pilot.py \
+  --config configs/pilot_tddi_p3_fold_ensemble3_seed0.json \
   --member-id 0
 ```
 
@@ -216,8 +222,8 @@ mỗi seed gồm ba member riêng.
 
 ## Tài liệu chính
 
-1. `docs/TDDI_PAPER_REPLAY_DISTILL_P3_8TASK_GPU_RUNBOOK.md` — setup và lệnh chạy trên
-   máy GPU.
+1. `docs/TDDI_STRATIFIED_3FOLD_ENSEMBLE3_PILOT_RUNBOOK.md` — setup và lệnh pilot
+   task 0–1 trên máy GPU.
 2. `docs/EVAL_PIPELINE.md` — hai chế độ ensemble, OOF, normalized entropy và threshold.
 3. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — kết quả P3 và giải thích metric.
 

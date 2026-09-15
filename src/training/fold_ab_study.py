@@ -194,14 +194,21 @@ def member_command(config, member, *, python=sys.executable):
         "preprocessing_policy": config["preprocessing"]["policy"],
         "exemplar_ranking_policy": config["replay"]["ranking_policy"],
         "member_id": member, "seed": config["experiment_seed"], "fold_seed": config["fold_seed"],
-        "device": config["device"], "stop_after_task": 1,
+        "device": config["device"],
+        "stop_after_task": config["execution"]["stop_after_task"],
         "outdir": str(Path(config["output_root"]) / f"member_{member}")}
     args.update({k: v for k, v in config["training"].items() if k not in ("optimizer", "gradient_accumulation_steps")})
     args.update({k: v for k, v in config["model"].items() if k not in ("input_dim", "hidden_dims")})
     command = [str(python), str(PROJECT_ROOT / "src/training/train_cil.py")]
     for key, value in args.items():
         command.extend(["--" + key.replace("_", "-"), str(value)])
-    return command + ["--validation-only"]
+    if config["execution"]["validation_only"]:
+        command.append("--validation-only")
+    prediction_splits = config["execution"].get("export_member_predictions", [])
+    if prediction_splits:
+        command.extend(("--export-member-predictions", "--member-prediction-splits"))
+        command.extend(str(value) for value in prediction_splits)
+    return command
 
 
 def _order_proofs(root, state):
