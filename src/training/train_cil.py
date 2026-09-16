@@ -242,7 +242,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["validation", "test"],
         default=["validation", "test"],
     )
-    parser.add_argument("--fold-replay-policy", choices=["stratified_fraction_v1"])
+    parser.add_argument(
+        "--fold-replay-policy",
+        choices=["stratified_fraction_v1", "stratified_fraction_rotating_current_v2"],
+    )
     parser.add_argument("--fold-assignments", type=Path)
     parser.add_argument("--fold-manifest", type=Path)
     parser.add_argument("--fold-preprocessing", type=Path,
@@ -279,7 +282,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if any((args.fold_assignments, args.fold_manifest, args.fold_preprocessing,
                 args.preprocessing_policy, args.validation_only, args.stop_after_task is not None,
                 args.resume_fold_checkpoint)):
-            parser.error("New fold options require --fold-replay-policy stratified_fraction_v1.")
+            parser.error(
+                "New fold options require --fold-replay-policy "
+                "stratified_fraction_v1 or stratified_fraction_rotating_current_v2."
+            )
         if any(token.split("=")[0] == "--exemplar-ranking-policy"
                for token in (sys.argv[1:] if argv is None else argv)):
             parser.error("--exemplar-ranking-policy is only valid with the frozen-fold replay policy.")

@@ -35,13 +35,23 @@ THRESHOLD_REPORT_SCHEMA_VERSION = 3
 THRESHOLD_REPORT_KIND = "ddi_cil_confidence_threshold_report"
 PAPER_SELECTION_RULE = "smallest_threshold_meeting_target_accuracy"
 LEGACY_SELECTION_RULE = "max_macro_f1_subject_to_min_coverage"
-SUPPORTED_SELECTION_RULES = (PAPER_SELECTION_RULE, LEGACY_SELECTION_RULE)
+BALANCED_ACCURACY_SELECTION_RULE = "max_balanced_accuracy_subject_to_min_coverage"
+SUPPORTED_SELECTION_RULES = (
+    PAPER_SELECTION_RULE,
+    LEGACY_SELECTION_RULE,
+    BALANCED_ACCURACY_SELECTION_RULE,
+)
 SUPPORTED_TIE_BREAKERS = ("accuracy", "coverage", "lower_threshold")
+BALANCED_ACCURACY_TIE_BREAKERS = (
+    "macro_f1", "accuracy", "coverage", "lower_threshold"
+)
 SUPPORTED_CONFIDENCE_SCORES = ("entropy_confidence", "max_probability")
 LEGACY_CONFIDENCE_SCORE = "entropy_confidence"
 SUPPORTED_PROBABILITY_SOURCES = ("raw", "calibrated")
 LEGACY_PROBABILITY_SOURCE = "raw"
-SELECTION_STATUSES = ("target_met", "fallback", "no_selection", "legacy_selected")
+SELECTION_STATUSES = (
+    "target_met", "fallback", "no_selection", "legacy_selected", "balanced_selected"
+)
 DEFAULT_FALLBACK_MINIMUM_COVERAGE = 0.50
 
 
@@ -163,6 +173,14 @@ def load_threshold_selection_config(path: str | Path) -> ThresholdSelectionConfi
             "selection_rule.tie_breakers must be exactly "
             f"{list(SUPPORTED_TIE_BREAKERS)}."
         )
+    if (
+        rule_name == BALANCED_ACCURACY_SELECTION_RULE
+        and tie_breakers != BALANCED_ACCURACY_TIE_BREAKERS
+    ):
+        raise ValueError(
+            "Balanced-accuracy threshold tie_breakers must be exactly "
+            f"{list(BALANCED_ACCURACY_TIE_BREAKERS)}."
+        )
     if rule_name == PAPER_SELECTION_RULE and tie_breakers not in {(), ("lower_threshold",)}:
         raise ValueError("Paper threshold rule only permits the lower_threshold tie breaker.")
     target_accuracy_raw = rule_payload.get("target_accuracy")
@@ -252,6 +270,7 @@ def _selected_metrics(
     if count == 0:
         accuracy: float | None = None
         macro_f1: float | None = None
+        balanced_accuracy: float | None = None
     else:
         metrics = compute_classification_metrics(
             ensemble.labels[mask],
@@ -260,11 +279,13 @@ def _selected_metrics(
         )
         accuracy = metrics["accuracy"]
         macro_f1 = metrics["macro_f1"]
+        balanced_accuracy = metrics["balanced_accuracy"]
     return {
         "confidence_score": confidence_score,
         "threshold": float(threshold),
         "accuracy": accuracy,
         "macro_f1": macro_f1,
+        "balanced_accuracy": balanced_accuracy,
         "coverage": coverage,
         "selected_count": count,
         "total_count": total,
@@ -354,15 +375,28 @@ def select_confidence_threshold(
         if not eligible:
             # Preserve legacy behavior for old max-Macro-F1 configs.
             raise ValueError("No candidate threshold satisfies the configured selection target.")
-        selected = max(
-            eligible,
-            key=lambda candidate: (
-                float(candidate["macro_f1"]),
-                float(candidate["accuracy"]),
-                float(candidate["coverage"]),
-                -float(candidate["threshold"]),
-            ),
-        )
+        if config.selection_rule == BALANCED_ACCURACY_SELECTION_RULE:
+            selected = max(
+                eligible,
+                key=lambda candidate: (
+                    float(candidate["balanced_accuracy"]),
+                    float(candidate["macro_f1"]),
+                    float(candidate["accuracy"]),
+                    float(candidate["coverage"]),
+                    -float(candidate["threshold"]),
+                ),
+            )
+            selection_status = "balanced_selected"
+        else:
+            selected = max(
+                eligible,
+                key=lambda candidate: (
+                    float(candidate["macro_f1"]),
+                    float(candidate["accuracy"]),
+                    float(candidate["coverage"]),
+                    -float(candidate["threshold"]),
+                ),
+            )
     provenance = validation_ensemble.member_provenance
     shared = provenance[0] if provenance is not None else None
     return FrozenThresholdArtifact(
@@ -406,7 +440,7 @@ def select_confidence_threshold(
 
 
 def _frozen_threshold_to_dict(artifact: FrozenThresholdArtifact) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": FROZEN_THRESHOLD_SCHEMA_VERSION,
         "artifact_kind": FROZEN_THRESHOLD_KIND,
         "frozen": True,
@@ -453,6 +487,18 @@ def _frozen_threshold_to_dict(artifact: FrozenThresholdArtifact) -> dict[str, An
         "calibration_bins": artifact.calibration_bins,
         "candidate_results": [dict(candidate) for candidate in artifact.candidate_results],
     }
+    if artifact.selection_rule == BALANCED_ACCURACY_SELECTION_RULE:
+        selected = next(
+            (
+                candidate for candidate in artifact.candidate_results
+                if candidate["threshold"] == artifact.selected_threshold
+            ),
+            None,
+        )
+        payload["validation_metrics"]["balanced_accuracy"] = (
+            None if selected is None else selected["balanced_accuracy"]
+        )
+    return payload
 
 
 def _atomic_write_json(payload: Mapping[str, Any], path: str | Path) -> Path:
@@ -628,6 +674,11 @@ def _validate_frozen_threshold(artifact: FrozenThresholdArtifact) -> None:
         and artifact.tie_breakers != SUPPORTED_TIE_BREAKERS
     ):
         raise ValueError("Unsupported frozen threshold tie breakers.")
+    if (
+        artifact.selection_rule == BALANCED_ACCURACY_SELECTION_RULE
+        and artifact.tie_breakers != BALANCED_ACCURACY_TIE_BREAKERS
+    ):
+        raise ValueError("Unsupported balanced-accuracy threshold tie breakers.")
     if (
         artifact.selection_rule == PAPER_SELECTION_RULE
         and artifact.tie_breakers not in {(), ("lower_threshold",)}
@@ -913,6 +964,8 @@ def evaluate_with_frozen_threshold(
         "macro_f1": selected["macro_f1"],
         "coverage": selected["coverage"],
     }
+    if threshold.selection_rule == BALANCED_ACCURACY_SELECTION_RULE:
+        selected_metrics["balanced_accuracy"] = selected["balanced_accuracy"]
     selected_probability_metrics = _probability_metrics(
         ensemble,
         calibration_bins=threshold.calibration_bins,

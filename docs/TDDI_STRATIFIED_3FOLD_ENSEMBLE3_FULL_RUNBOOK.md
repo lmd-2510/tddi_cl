@@ -11,6 +11,9 @@ replay_distill_fixed_budget_uniform
 × task 0–7 / 178 class
 ```
 
+Full baseline dùng tối đa `25` epoch/task và `patience=5`. Các pilot lịch sử vẫn
+giữ số epoch ban đầu để có thể tái lập; thay đổi này chỉ áp dụng cho full config.
+
 Ba trajectory phải chạy tuần tự `member 0 → member 1 → member 2`. Mỗi member dùng
 scaler B riêng đã fit từ hai training folds và class task 0. Full run dùng namespace
 mới, không tiếp tục trong output pilot task 0–1.
@@ -29,10 +32,10 @@ export FEATURES="$REPO_ROOT/study_assets/data_schema/feature_columns.json"
 export TASK_FILE="$REPO_ROOT/study_assets/task_protocols/tail_to_head_tasks.json"
 export FOLD_ROOT="$REPO_ROOT/outputs/fold_preparation_seed42_20260912_161002/folds"
 export PREP_ROOT="$REPO_ROOT/study_assets/preprocessing_ab_seed0_fold42"
-export THRESHOLD_CONFIG="$REPO_ROOT/configs/eval_tddi_p3_ensemble_entropy_threshold.json"
-export FULL_CONFIG="$REPO_ROOT/configs/full_tddi_p3_fold_ensemble3_seed0.json"
-export FULL_ROOT="$REPO_ROOT/outputs/stratified_ensemble3/full_p3_seed0_8tasks"
-export MONITOR_ROOT="$REPO_ROOT/outputs/stratified_ensemble3_monitor/full_p3_seed0_8tasks"
+export THRESHOLD_CONFIG="$REPO_ROOT/configs/eval_tddi_p3_ensemble_entropy_balanced_accuracy_threshold.json"
+export FULL_CONFIG="$REPO_ROOT/configs/full_tddi_p3_fold_ensemble3_seed0_epochs25.json"
+export FULL_ROOT="$REPO_ROOT/outputs/stratified_ensemble3/full_p3_seed0_8tasks_epochs25"
+export MONITOR_ROOT="$REPO_ROOT/outputs/stratified_ensemble3_monitor/full_p3_seed0_8tasks_epochs25"
 
 mkdir -p "$MONITOR_ROOT"
 ```
@@ -125,6 +128,7 @@ Dry-run hợp lệ phải có:
 - ba member theo thứ tự `0 → 1 → 2`;
 - seed `409845317`, `215626784`, `3041879697`;
 - mỗi command có `--stop-after-task 7`;
+- mỗi command có `--epochs 25 --patience 5`;
 - `--fold-replay-policy stratified_fraction_v1` có dấu cách;
 - sample-normalized ranking, preprocessing B và export `validation test`;
 - không có traceback và chưa tạo model.
@@ -340,4 +344,3 @@ ls -lh ensemble3_full8_review.tar.gz
 
 Bundle review không chứa checkpoint, model weights, replay features hoặc `.npz` lớn.
 Giữ nguyên các artifact đó trên server để audit/resume.
-

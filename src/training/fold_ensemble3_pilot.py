@@ -30,6 +30,8 @@ from src.eval.ensemble_ue import (  # noqa: E402
 )
 from src.eval.predictions import load_member_prediction_artifact  # noqa: E402
 from src.eval.threshold import (  # noqa: E402
+    BALANCED_ACCURACY_SELECTION_RULE,
+    BALANCED_ACCURACY_TIE_BREAKERS,
     PAPER_SELECTION_RULE,
     load_frozen_threshold_artifact,
     load_threshold_selection_config,
@@ -185,7 +187,26 @@ def _load_locked_config(
         raise ValueError("Pilot model must be the locked tddi_paper_member configuration.")
     if value["replay"] != {**REPLAY, "ranking_policy": "raw_sample_normalized_class_mean_control_v1"}:
         raise ValueError("Pilot replay/ranking policy does not match the approved decision.")
-    expected_training = {**TRAINING, "epochs": 20, "patience": 5}
+    fold_policy = value["training"].get("fold_replay_policy")
+    if fold_policy not in {
+        "stratified_fraction_v1", "stratified_fraction_rotating_current_v2"
+    }:
+        raise ValueError("Unsupported fold replay sampler policy.")
+    configured_epochs = value["training"].get("epochs")
+    if fold_policy == "stratified_fraction_rotating_current_v2":
+        expected_epochs = 30
+    elif expected_phase == "full" and configured_epochs in (20, 25):
+        # 20 is the immutable historical baseline; 25 is its new convergence
+        # extension in a separate output namespace.
+        expected_epochs = configured_epochs
+    else:
+        expected_epochs = 20
+    expected_training = {
+        **TRAINING,
+        "fold_replay_policy": fold_policy,
+        "epochs": expected_epochs,
+        "patience": 5,
+    }
     if value["training"] != expected_training:
         raise ValueError("Pilot training hyperparameters must match the approved baseline.")
     expected_execution = {
@@ -235,15 +256,24 @@ def _load_locked_config(
         threshold_source, root, "evaluation.threshold_config"
     )
     threshold = load_threshold_selection_config(value["evaluation"]["threshold_config"])
-    if (
+    threshold_common_ok = (
         threshold.selection_source != "oof"
         or threshold.confidence_score != "entropy_confidence"
         or threshold.probability_source != "raw"
-        or threshold.selection_rule != PAPER_SELECTION_RULE
-        or threshold.target_accuracy != 0.95
-        or threshold.fallback_minimum_coverage != 0.5
         or threshold.candidate_grid != tuple(index / 100 for index in range(50, 100))
-    ):
+    )
+    paper_rule_ok = (
+        threshold.selection_rule == PAPER_SELECTION_RULE
+        and threshold.target_accuracy == 0.95
+        and threshold.fallback_minimum_coverage == 0.5
+    )
+    balanced_rule_ok = (
+        threshold.selection_rule == BALANCED_ACCURACY_SELECTION_RULE
+        and threshold.minimum_coverage == 0.5
+        and threshold.tie_breakers == BALANCED_ACCURACY_TIE_BREAKERS
+        and threshold.target_accuracy is None
+    )
+    if threshold_common_ok or not (paper_rule_ok or balanced_rule_ok):
         raise ValueError("Pilot threshold config does not match the approved OOF policy.")
 
     output_source = overrides.get("output_root") or value["output_root"]

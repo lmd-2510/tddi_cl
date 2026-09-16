@@ -69,6 +69,43 @@ def test_cap_saturation_redistribution_and_all_current_kept():
     assert plan.audit["actual_fraction"] == 9 / 149
 
 
+def test_capacity_limited_v2_rotates_current_and_restores_target_fraction():
+    cfg = config(
+        n=140,
+        sizes=(1, 2),
+        rotate_current_when_capacity_limited=True,
+    )
+    sampler = replay.FoldReplayFractionSampler(**cfg)
+    plans = [sampler.plan_epoch(epoch) for epoch in range(3)]
+
+    for epoch, plan in enumerate(plans):
+        current = [index for index in plan.indices if index < 140]
+        assert len(current) == len(set(current)) == 63
+        assert plan.audit["current_draws"] == 63
+        assert plan.audit["actual_replay_draws"] == 9
+        assert plan.audit["actual_fraction"] == pytest.approx(0.125)
+        assert plan.audit["current_rotation_start"] == (epoch * 63) % 140
+        assert plan.audit["policy"] == replay.ROTATING_CURRENT_SAMPLER_POLICY
+
+    assert set(index for plan in plans for index in plan.indices if index < 140) == set(range(140))
+    assert sampler.metadata["current_policy"].startswith("cyclic_ID_sorted_windows")
+
+
+def test_rotating_current_v2_task0_still_uses_every_current_row():
+    sampler = replay.FoldReplayFractionSampler(
+        **config(
+            n=140,
+            sizes=(),
+            task_id=0,
+            rotate_current_when_capacity_limited=True,
+        )
+    )
+    plan = sampler.plan_epoch(0)
+    assert Counter(plan.indices) == Counter(range(140))
+    assert plan.audit["current_draws"] == 140
+    assert plan.audit["actual_replay_draws"] == 0
+
+
 @pytest.mark.parametrize("kwargs", [{"task_id": 0}, {"task_id": 1}, {"task_id": 3}])
 def test_no_memory_and_task0(kwargs):
     sampler = replay.FoldReplayFractionSampler(**config(n=20, sizes=(), **kwargs))
@@ -235,6 +272,7 @@ def test_dataloader_tail_not_dropped_and_no_fixed_microbatch_ratio():
     {"task_id": 0}, {"member_id": 3}, {"experiment_seed": -1}, {"task_id": -1},
     {"repeat_cap": 0}, {"repeat_cap": 2.5}, {"replay_fraction": -0.1},
     {"replay_fraction": 1}, {"replay_fraction": float("nan")},
+    {"rotate_current_when_capacity_limited": "yes"},
 ])
 def test_invalid_inputs(change):
     with pytest.raises(ValueError):

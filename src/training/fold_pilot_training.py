@@ -34,7 +34,12 @@ from src.data.fold_replay_buffer import (
     FoldSqrtReplayBuffer,
     four_percent_member_budgets,
 )
-from src.data.fold_replay_sampler import FoldReplayFractionSampler, SAMPLER_POLICY, RNG_DERIVATION
+from src.data.fold_replay_sampler import (
+    FoldReplayFractionSampler,
+    RNG_DERIVATION,
+    ROTATING_CURRENT_SAMPLER_POLICY,
+    SAMPLER_POLICY,
+)
 from src.data.stratified_folds import fold_file_sha256
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, paper_member_manifest
 from src.eval.predictions import (
@@ -52,6 +57,7 @@ from src.training.replay_checkpoint import (
 
 TRAINING_POLICY = "frozen_fold_replay_distill_v1"
 P3_LAYOUT = [38, 20, 20, 20, 20, 20, 20, 20]
+ROTATING_CURRENT_POLICY = "stratified_fraction_rotating_current_v2"
 
 
 def _json(value):
@@ -74,6 +80,10 @@ def _publish_csv(path, rows):
 def validate_fold_options(args):
     if args.method != "replay_distill_fixed_budget_uniform":
         raise ValueError("Frozen-fold replay policy requires replay_distill_fixed_budget_uniform.")
+    if args.fold_replay_policy not in {
+        "stratified_fraction_v1", ROTATING_CURRENT_POLICY,
+    }:
+        raise ValueError("Unsupported frozen-fold replay sampler policy.")
     if args.variant != "tddi_paper_member" or args.norm != "layernorm":
         raise ValueError("Frozen-fold training requires tddi_paper_member with input LayerNorm.")
     if args.member_id not in (0, 1, 2) or args.seed != 0 or args.fold_seed != 42 or args.fold_count != 3:
@@ -333,8 +343,19 @@ def prepare_fold_run(args, *, engine, context=None):
     contract["hyperparameters"] = {k: getattr(args, k) for k in (
         "epochs", "patience", "lr", "weight_decay", "dropout", "activation", "norm", "focal_gamma",
         "distill_alpha", "temperature", "feature_distill_weight")}
-    contract["sampler"] = {"policy": SAMPLER_POLICY, "schema_version": 1, "rng_derivation": RNG_DERIVATION,
-                           "replay_fraction": 0.125, "repeat_cap": 3, "task_boundary_epoch_reset": 0}
+    rotating_current = args.fold_replay_policy == ROTATING_CURRENT_POLICY
+    contract["sampler"] = {
+        "policy": ROTATING_CURRENT_SAMPLER_POLICY if rotating_current else SAMPLER_POLICY,
+        "schema_version": 2 if rotating_current else 1,
+        "rng_derivation": RNG_DERIVATION,
+        "replay_fraction": 0.125,
+        "repeat_cap": 3,
+        "task_boundary_epoch_reset": 0,
+    }
+    if rotating_current:
+        contract["sampler"]["current_epoch_policy"] = (
+            "rotating_subset_when_replay_capacity_limited"
+        )
     contract = json.loads(_json(contract))
     return dict(columns=columns, tasks=tasks, task_hash=task_hash, context=context, manifest=manifest,
                 prep=prep, prep_hash=prep_hash, budgets=budgets, buffer_kwargs=buffer_kwargs, buffer=buffer,
@@ -417,8 +438,13 @@ def run_fold_training(args, *, engine):
             raise ValueError("Replay contains non-old classes.")
         if set(_ids(current) + _ids(retained)) & set(_ids(validation)):
             raise ValueError("Training/replay overlaps held-out validation IDs.")
-        sampler = FoldReplayFractionSampler(current_sample_ids=_ids(current), replay_sample_ids=_ids(retained),
-            replay_raw_labels=retained.labels, experiment_seed=args.seed, member_id=args.member_id, task_id=task_id)
+        rotating_current = args.fold_replay_policy == ROTATING_CURRENT_POLICY
+        sampler = FoldReplayFractionSampler(
+            current_sample_ids=_ids(current), replay_sample_ids=_ids(retained),
+            replay_raw_labels=retained.labels, experiment_seed=args.seed,
+            member_id=args.member_id, task_id=task_id,
+            rotate_current_when_capacity_limited=rotating_current,
+        )
         _publish_json(task_root / "input_audit.json", {"task_id": task_id, "current_ids": _ids(current),
             "replay_ids_before": _ids(retained), "replay_raw_labels_before": retained.labels.tolist(),
             "validation_ids": _ids(validation),
@@ -455,9 +481,15 @@ def run_fold_training(args, *, engine):
                 feature_distill_weight=args.feature_distill_weight, gradient_accumulation_steps=1024 // args.batch_size,
                 return_loss_components=True)
             audit = sampler.last_audit
-            if (audit is None or audit["epoch"] != epoch or audit["current_draws"] != len(current.labels)
+            expected_replay = (
+                0 if task_id == 0 else min(len(current.labels) // 7, 3 * len(retained.labels))
+            )
+            expected_current = len(current.labels)
+            if rotating_current and task_id > 0 and expected_replay < len(current.labels) // 7:
+                expected_current = min(len(current.labels), expected_replay * 7)
+            if (audit is None or audit["epoch"] != epoch or audit["current_draws"] != expected_current
                     or audit["max_repeat"] > 3 or audit["actual_replay_draws"] !=
-                    (0 if task_id == 0 else min(len(current.labels) // 7, 3 * len(retained.labels)))
+                    expected_replay
                     or losses.examples_seen != len(sampler)
                     or losses.optimizer_steps != math.ceil(len(sampler) / 1024)
                     or losses.tail_effective_batch != (len(sampler) - 1) % 1024 + 1):

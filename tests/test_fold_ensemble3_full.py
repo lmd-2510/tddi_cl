@@ -14,6 +14,12 @@ from src.training.fold_ensemble3_full import (
 
 
 CONFIG = Path("configs/full_tddi_p3_fold_ensemble3_seed0.json")
+BASELINE25_CONFIG = Path(
+    "configs/full_tddi_p3_fold_ensemble3_seed0_epochs25.json"
+)
+REPLAY12P5_CONFIG = Path(
+    "configs/full_tddi_p3_fold_ensemble3_seed0_replay12p5.json"
+)
 
 
 def _arg(command: Sequence[str], name: str) -> str:
@@ -45,6 +51,8 @@ def test_full_config_and_dry_run_are_locked_to_eight_tasks(tmp_path: Path) -> No
 
     assert config["phase"] == "full"
     assert config["execution"]["stop_after_task"] == 7
+    assert config["training"]["epochs"] == 20
+    assert config["training"]["patience"] == 5
     assert config["member_budgets"] == {"0": 9260, "1": 9259, "2": 9259}
     assert not Path(config["output_root"]).exists()
     assert len(plan.evaluations) == 8
@@ -54,10 +62,62 @@ def test_full_config_and_dry_run_are_locked_to_eight_tasks(tmp_path: Path) -> No
         assert _arg(member.command, "--stop-after-task") == "7"
         assert _arg(member.command, "--member-id") == str(member.member_id)
         assert _arg(member.command, "--fold-replay-policy") == "stratified_fraction_v1"
+        assert _arg(member.command, "--epochs") == "20"
         assert _arg(member.command, "--exemplar-ranking-policy") == (
             "raw_sample_normalized_class_mean_control_v1"
         )
         assert "--export-member-predictions" in member.command
+
+
+def test_replay12p5_full_config_selects_rotating_current_and_balanced_threshold(
+    tmp_path: Path,
+) -> None:
+    config = load_full_config(
+        REPLAY12P5_CONFIG,
+        overrides={"output_root": tmp_path / "replay12p5"},
+    )
+    plan = shared.build_pilot_plan(
+        config,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+
+    assert config["training"]["fold_replay_policy"] == (
+        "stratified_fraction_rotating_current_v2"
+    )
+    assert config["training"]["epochs"] == 30
+    assert config["training"]["patience"] == 5
+    assert config["evaluation"]["threshold_config"].endswith(
+        "eval_tddi_p3_ensemble_entropy_balanced_accuracy_threshold.json"
+    )
+    for member in plan.members:
+        assert _arg(member.command, "--fold-replay-policy") == (
+            "stratified_fraction_rotating_current_v2"
+        )
+
+
+def test_baseline25_uses_separate_namespace_and_keeps_original_sampler(
+    tmp_path: Path,
+) -> None:
+    config = load_full_config(
+        BASELINE25_CONFIG,
+        overrides={"output_root": tmp_path / "baseline25"},
+    )
+    plan = shared.build_pilot_plan(
+        config,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+
+    assert config["training"]["epochs"] == 25
+    assert config["training"]["patience"] == 5
+    assert config["training"]["fold_replay_policy"] == "stratified_fraction_v1"
+    assert config["evaluation"]["threshold_config"].endswith(
+        "eval_tddi_p3_ensemble_entropy_balanced_accuracy_threshold.json"
+    )
+    for member in plan.members:
+        assert _arg(member.command, "--epochs") == "25"
+        assert _arg(member.command, "--fold-replay-policy") == "stratified_fraction_v1"
 
 
 def test_full_selected_member_skip_and_resume(tmp_path: Path) -> None:
@@ -143,4 +203,3 @@ def test_full_members_are_sequential_then_all_eight_tasks_are_evaluated(
         "full_protocol_task_count": 8,
     }
     assert len(manifest["evaluations"]) == 8
-

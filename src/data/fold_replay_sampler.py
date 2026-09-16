@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover
 
 
 SAMPLER_POLICY = "fold_fraction_capped_rotating_v1"
+ROTATING_CURRENT_SAMPLER_POLICY = "fold_fraction_capped_rotating_current_v2"
 RNG_DERIVATION = "seedsequence_pcg64_member_task_epoch_stream_v1"
 
 
@@ -55,7 +56,7 @@ class ReplayEpochPlan:
 
 
 class FoldReplayFractionSampler(Sampler):
-    """Current-once, capped class-round-robin, cyclic per-class exemplar queues.
+    """Capped class-round-robin replay with full or rotating current rows.
 
     Default target R=floor(N/7), actual=min(R,cap*memory_size), task0 R=0.
     Task0 rejects a nonempty memory to catch stale/wrong task state. A zero-sized
@@ -69,7 +70,8 @@ class FoldReplayFractionSampler(Sampler):
 
     def __init__(self, *, current_sample_ids: Sequence[str], replay_sample_ids: Sequence[str],
                  replay_raw_labels: Sequence[int], experiment_seed: int, member_id: int,
-                 task_id: int, replay_fraction: float = 0.125, repeat_cap: int = 3) -> None:
+                 task_id: int, replay_fraction: float = 0.125, repeat_cap: int = 3,
+                 rotate_current_when_capacity_limited: bool = False) -> None:
         self._current = _ids(current_sample_ids, "current sample IDs")
         self._replay = _ids(replay_sample_ids, "replay sample IDs")
         if set(self._current) & set(self._replay):
@@ -93,10 +95,25 @@ class FoldReplayFractionSampler(Sampler):
             raise ValueError("replay_fraction must be finite and in [0,1).") from error
         if not 0 <= fraction < 1:
             raise ValueError("replay_fraction must be in [0,1).")
+        if not isinstance(rotate_current_when_capacity_limited, (bool, np.bool_)):
+            raise ValueError("rotate_current_when_capacity_limited must be boolean.")
+        rotate_current_when_capacity_limited = bool(rotate_current_when_capacity_limited)
         seeds = resolve_seed_configuration(_integer(experiment_seed, "experiment_seed"), member_id)
         self._seed, self._task_id, self._cap = seeds.member_seed, task_id, repeat_cap
         self._target = 0 if task_id == 0 else len(self._current) * fraction.numerator // (fraction.denominator - fraction.numerator)
         self._actual = min(self._target, repeat_cap * len(self._replay))
+        self._rotate_current = rotate_current_when_capacity_limited
+        if task_id == 0 or not rotate_current_when_capacity_limited or self._actual >= self._target:
+            self._current_draws = len(self._current)
+        elif self._actual == 0 or fraction.numerator == 0:
+            self._current_draws = len(self._current)
+        else:
+            # If replay capacity cannot support f of a full-current epoch, reduce
+            # current draws to R*(1-f)/f.  At f=1/8 this is seven current draws
+            # per replay draw.  Epoch windows rotate, so rows are deferred rather
+            # than discarded from the task trajectory.
+            matched = self._actual * (fraction.denominator - fraction.numerator) // fraction.numerator
+            self._current_draws = min(len(self._current), matched)
         classes = sorted(set(self._labels))
         self._class_order = tuple(classes[i] for i in self._rng(0, 0).permutation(len(classes)))
         self._queues = {}
@@ -106,8 +123,10 @@ class FoldReplayFractionSampler(Sampler):
             order = self._rng(1, 0, unsigned & 0xFFFFFFFF, unsigned >> 32).permutation(len(indices))
             self._queues[c] = tuple(indices[i] for i in order)
         self._canonical_current = np.asarray(sorted(range(len(self._current)), key=lambda i: self._current[i]), dtype=np.int64)
+        policy = ROTATING_CURRENT_SAMPLER_POLICY if rotate_current_when_capacity_limited else SAMPLER_POLICY
         self._metadata = {
-            "policy": SAMPLER_POLICY, "schema_version": 1, "seeds": asdict(seeds), "task_id": task_id,
+            "policy": policy, "schema_version": 2 if rotate_current_when_capacity_limited else 1,
+            "seeds": asdict(seeds), "task_id": task_id,
             "fraction_numerator": fraction.numerator, "fraction_denominator": fraction.denominator,
             "target_fraction": float(fraction), "rounding": "floor_N_times_f_over_1_minus_f",
             "repeat_cap": repeat_cap, "current_count": len(self._current), "memory_count": len(self._replay),
@@ -119,6 +138,12 @@ class FoldReplayFractionSampler(Sampler):
             "mix_policy": "random_positions_preserve_replay_relative_order", "drop_last": False,
             "state_boundary": "completed_epoch_only", "reset_policy": "new_instance_at_each_task_epoch0",
         }
+        if rotate_current_when_capacity_limited:
+            self._metadata.update({
+                "current_draws_per_epoch": self._current_draws,
+                "rotate_current_when_capacity_limited": True,
+                "current_policy": "cyclic_ID_sorted_windows_seeded_order_capacity_limited",
+            })
         self._next_epoch = 0
         self._class_cursor = 0
         self._cursors = {c: 0 for c in self._class_order}
@@ -143,7 +168,7 @@ class FoldReplayFractionSampler(Sampler):
         return deepcopy(self._last_audit)
 
     def __len__(self) -> int:
-        return len(self._current) + self._actual
+        return self._current_draws + self._actual
 
     def _advance(self, class_cursor: int, cursors: dict[int, int], *, collect: bool):
         """Round-robin one replay slot at a time; remove capped classes this epoch."""
@@ -175,7 +200,13 @@ class FoldReplayFractionSampler(Sampler):
 
     def _plan(self, epoch: int, class_cursor: int, cursors: dict[int, int]):
         replay_indices, next_class, next_cursors = self._advance(class_cursor, cursors, collect=True)
-        current = self._canonical_current[self._rng(2, epoch).permutation(len(self._current))]
+        if self._current_draws == len(self._current):
+            current = self._canonical_current[self._rng(2, epoch).permutation(len(self._current))]
+        else:
+            start = (epoch * self._current_draws) % len(self._current)
+            positions = (start + np.arange(self._current_draws, dtype=np.int64)) % len(self._current)
+            current = self._canonical_current[positions]
+            current = current[self._rng(2, epoch).permutation(self._current_draws)]
         # Preserve cyclic replay ordering: shuffling all indices would allow an
         # exemplar repeat to appear before other exemplars in its current cycle.
         positions = np.zeros(len(self), dtype=bool)
@@ -195,8 +226,8 @@ class FoldReplayFractionSampler(Sampler):
         unique = int(np.count_nonzero(repetitions))
         all_ids = self._current + self._replay
         audit = {
-            "policy": SAMPLER_POLICY, "task_id": self._task_id, "epoch": epoch,
-            "current_draws": len(self._current), "target_replay_draws": self._target,
+            "policy": self._metadata["policy"], "task_id": self._task_id, "epoch": epoch,
+            "current_draws": self._current_draws, "target_replay_draws": self._target,
             "actual_replay_draws": self._actual, "total_draws": len(self),
             "target_fraction": self._metadata["target_fraction"],
             "actual_fraction": self._actual / len(self) if len(self) else 0.0,
@@ -212,7 +243,15 @@ class FoldReplayFractionSampler(Sampler):
             "replay_ids_sha256": _digest([self._replay[i] for i in replay_indices]),
             "draw_order_ids_sha256": _digest([all_ids[i] for i in indices]),
         }
-        if audit["max_repeat"] > self._cap or len(indices[~positions]) != len(self._current):
+        if self._rotate_current:
+            audit.update({
+                "current_count": len(self._current),
+                "current_coverage": self._current_draws / len(self._current) if self._current else 0.0,
+                "current_rotation_start": (
+                    (epoch * self._current_draws) % len(self._current) if self._current else 0
+                ),
+            })
+        if audit["max_repeat"] > self._cap or len(indices[~positions]) != self._current_draws:
             raise RuntimeError("Sampler cap/current coverage invariant failed.")
         return ReplayEpochPlan(tuple(int(i) for i in indices), audit), next_class, next_cursors
 

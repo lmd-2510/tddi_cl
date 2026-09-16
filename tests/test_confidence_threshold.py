@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from src.eval.threshold import (
+    BALANCED_ACCURACY_SELECTION_RULE,
     export_frozen_threshold_artifact,
     export_threshold_report,
     evaluate_with_frozen_threshold,
@@ -105,6 +106,31 @@ def _write_paper_config(
                     "target_accuracy": target_accuracy,
                     "fallback_minimum_coverage": fallback_minimum_coverage,
                     "tie_breakers": ["lower_threshold"],
+                },
+                "calibration_bins": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_balanced_accuracy_config(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "confidence_score": "entropy_confidence",
+                "probability_source": "raw",
+                "selection_source": "validation",
+                "low_threshold": 0.4,
+                "candidate_grid": [0.4, 0.7],
+                "selection_rule": {
+                    "name": BALANCED_ACCURACY_SELECTION_RULE,
+                    "minimum_coverage": 0.25,
+                    "tie_breakers": [
+                        "macro_f1", "accuracy", "coverage", "lower_threshold"
+                    ],
                 },
                 "calibration_bins": 5,
             }
@@ -229,6 +255,35 @@ def test_full_p3_primary_config_matches_paper_threshold_rule() -> None:
     assert primary.fallback_minimum_coverage == 0.5
     assert primary.low_threshold == 0.5
     assert primary.candidate_grid == tuple(value / 100 for value in range(50, 100))
+
+
+def test_balanced_accuracy_rule_prefers_class_recall_over_selected_accuracy(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_balanced_accuracy_config(tmp_path / "balanced.json")
+    config = load_threshold_selection_config(config_path)
+    validation = _with_entropy_confidence([0.4, 0.5, 0.9, 0.6])
+    source = export_offline_ensemble_artifact(validation, tmp_path / "validation.npz")
+
+    selected = select_confidence_threshold(
+        validation, config, source_ensemble_path=source
+    )
+
+    # 0.7 selects one correct majority-class row (accuracy=1 but BA=1/6);
+    # 0.4 keeps all classes and wins on balanced accuracy (2/3).
+    assert selected.selection_rule == BALANCED_ACCURACY_SELECTION_RULE
+    assert selected.selected_threshold == 0.4
+    assert selected.selection_status == "balanced_selected"
+    by_threshold = {row["threshold"]: row for row in selected.candidate_results}
+    assert by_threshold[0.7]["accuracy"] == pytest.approx(1.0)
+    assert by_threshold[0.4]["balanced_accuracy"] == pytest.approx(2 / 3)
+
+    frozen_path = export_frozen_threshold_artifact(selected, tmp_path / "frozen.json")
+    payload = json.loads(frozen_path.read_text(encoding="utf-8"))
+    assert payload["validation_metrics"]["balanced_accuracy"] == pytest.approx(2 / 3)
+    loaded = load_frozen_threshold_artifact(frozen_path, config_path=config_path)
+    report = evaluate_with_frozen_threshold(_ensemble("test"), loaded)
+    assert report["threshold_score_selective_metrics"]["balanced_accuracy"] == pytest.approx(1.0)
 
 
 def test_full_p3_config_rejects_seeded_validation_instead_of_oof(
