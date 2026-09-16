@@ -61,6 +61,10 @@ EXECUTION = {
     "export_member_predictions": ["validation", "test"],
 }
 EVALUATION_KEYS = {"threshold_config", "ensemble_namespace"}
+SUPPORTED_PROTOCOLS = {
+    "P3": "tail_to_head",
+    "P4": "constrained_mass_balanced",
+}
 Runner = Callable[[Sequence[str], Path], None]
 Inspector = Callable[..., Mapping[str, Any]]
 
@@ -170,13 +174,18 @@ def _load_locked_config(
         {"id", "name", "task_file", "sha256", "layout", "class_count"},
         "protocol",
     )
+    protocol_id = protocol["id"]
+    protocol_name = SUPPORTED_PROTOCOLS.get(protocol_id)
     if (
-        protocol["id"] != "P3"
-        or protocol["name"] != "tail_to_head"
+        protocol_name is None
+        or protocol["name"] != protocol_name
         or protocol["layout"] != P3_LAYOUT
         or protocol["class_count"] != 178
     ):
-        raise ValueError("Pilot requires the full eight-task P3/178-class protocol file.")
+        raise ValueError(
+            "Study requires a supported full eight-task/178-class protocol "
+            f"({SUPPORTED_PROTOCOLS})."
+        )
     _keys(value["inputs"], INPUT_KEYS, "inputs")
     _keys(value["preprocessing"], {"policy", "artifact_template"}, "preprocessing")
     _keys(value["training"], {*TRAINING, "epochs", "patience"}, "training")
@@ -229,15 +238,24 @@ def _load_locked_config(
     task_source = overrides.get("task_file") or protocol["task_file"]
     protocol["task_file"] = _resolve(task_source, root, "protocol.task_file")
     if fold_file_sha256(Path(protocol["task_file"])) != protocol["sha256"]:
-        raise ValueError("P3 task-file SHA256 mismatch; path may move but contents may not.")
+        raise ValueError(
+            f"{protocol_id} task-file SHA256 mismatch; path may move but contents may not."
+        )
     tasks = engine.load_task_spec(Path(protocol["task_file"]))
     if (
-        tasks.get("protocol") != "tail_to_head"
+        tasks.get("protocol") != protocol_name
         or [task["task_id"] for task in tasks["tasks"]] != list(range(8))
         or [len(task["classes"]) for task in tasks["tasks"]] != P3_LAYOUT
         or len({raw for task in tasks["tasks"] for raw in task["classes"]}) != 178
     ):
-        raise ValueError("P3 task file does not contain the locked 8-task/178-class map.")
+        raise ValueError(
+            f"{protocol_id} task file does not contain the locked 8-task/178-class map."
+        )
+    expected_protocol_seed = 0 if protocol_id == "P4" else None
+    if tasks.get("seed") != expected_protocol_seed:
+        raise ValueError(
+            f"{protocol_id} task file seed must be {expected_protocol_seed!r}."
+        )
 
     template = _validate_template(value["preprocessing"]["artifact_template"])
     if overrides.get("preprocessing_root"):

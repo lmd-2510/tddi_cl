@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import shlex
 from string import Formatter
+import subprocess
 import sys
 import uuid
 
@@ -31,7 +32,6 @@ from src.data.stratified_folds import fold_file_sha256
 from src.training import train_cil as engine
 from src.training.fold_pilot_training import P3_LAYOUT, _digest, _publish_json, prepare_fold_run
 from src.training.replay_checkpoint import load_fold_replay_checkpoint
-from src.training.tddi_ensemble3_study import _default_runner
 from src.utils.seed import resolve_seed_configuration
 
 KIND = "tddi_frozen_fold_preprocessing_pilot"
@@ -52,6 +52,11 @@ REPLAY = dict(buffer_policy=BUFFER_POLICY, ranking_policy=RANKING_POLICY,
 EXECUTION = dict(stop_after_task=1, validation_only=True, sequential=True,
                  checkpoint_resume_policy="immutable_frozen_fold_task_boundary_v1")
 INPUT_KEYS = {"train", "validation", "test", "feature_cols", "fold_assignments", "fold_manifest"}
+
+
+def _default_runner(command, cwd: Path) -> None:
+    """Run one member command synchronously; callers enforce sequential execution."""
+    subprocess.run(list(command), cwd=cwd, check=True)
 
 
 def _keys(value, expected, name):

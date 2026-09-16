@@ -20,6 +20,7 @@ BASELINE25_CONFIG = Path(
 REPLAY12P5_CONFIG = Path(
     "configs/full_tddi_p3_fold_ensemble3_seed0_replay12p5.json"
 )
+P4_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0.json")
 
 
 def _arg(command: Sequence[str], name: str) -> str:
@@ -118,6 +119,41 @@ def test_baseline25_uses_separate_namespace_and_keeps_original_sampler(
     for member in plan.members:
         assert _arg(member.command, "--epochs") == "25"
         assert _arg(member.command, "--fold-replay-policy") == "stratified_fraction_v1"
+
+
+def test_p4_config_changes_only_protocol_preprocessing_namespace_and_threshold(
+    tmp_path: Path,
+) -> None:
+    p3 = load_full_config(
+        CONFIG,
+        overrides={"output_root": tmp_path / "p3"},
+    )
+    p4 = load_full_config(
+        P4_CONFIG,
+        overrides={"output_root": tmp_path / "p4"},
+    )
+    plan = shared.build_pilot_plan(
+        p4,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+
+    assert p4["protocol"]["id"] == "P4"
+    assert p4["protocol"]["name"] == "constrained_mass_balanced"
+    assert p4["training"] == p3["training"]
+    assert p4["replay"] == p3["replay"]
+    assert p4["model"] == p3["model"]
+    assert p4["training"]["epochs"] == 20
+    assert "preprocessing_p4_seed0_fold42" in p4["preprocessing"]["artifact_template"]
+    assert p4["evaluation"]["threshold_config"].endswith(
+        "eval_tddi_p4_ensemble_entropy_balanced_accuracy_threshold.json"
+    )
+    for member in plan.members:
+        assert member.command is not None
+        assert _arg(member.command, "--task-file").endswith(
+            "constrained_mass_balanced_seed0_tasks.json"
+        )
+        assert _arg(member.command, "--epochs") == "20"
 
 
 def test_full_selected_member_skip_and_resume(tmp_path: Path) -> None:

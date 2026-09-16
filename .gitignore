@@ -12,5 +12,6 @@ outputs/remote_data/
 dist/
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 reference/

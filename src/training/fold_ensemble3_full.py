@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sequential full P3 frozen-fold ensemble study orchestration.
+"""Sequential full frozen-fold ensemble study orchestration.
 
 The command is a read-only dry run unless ``--execute`` is supplied. Training is
 delegated to ``train_cil.py`` one member at a time. Offline OOF/test ensemble,
@@ -65,6 +65,17 @@ def execute_full(
 ) -> Path | None:
     """Run selected full trajectories sequentially and evaluate when all finish."""
 
+    protocol_id = str(config["protocol"]["id"])
+    protocol_name = str(config["protocol"]["name"])
+    protocol_limitation = (
+        "P3 tail-to-head results must be reported with per-task/old-class forgetting, "
+        "not final accuracy alone."
+        if protocol_id == "P3"
+        else (
+            f"{protocol_id} {protocol_name} results are a protocol-controlled comparison; "
+            "report per-task/old-class forgetting as well as final metrics."
+        )
+    )
     return execute_ensemble_study(
         config,
         member_ids=member_ids,
@@ -75,7 +86,7 @@ def execute_full(
         manifest_kind=MANIFEST_KIND,
         limitations=(
             "This is one experiment seed; three ensemble members are not three independent experiment seeds.",
-            "P3 tail-to-head results must be reported with per-task/old-class forgetting, not final accuracy alone.",
+            protocol_limitation,
             "OOF target accuracy does not guarantee the same selected test accuracy.",
         ),
     )

@@ -142,16 +142,18 @@ cần checkpoint, resume, member predictions hoặc báo cáo đã tạo.
 
 ## Config stratified 3-fold hiện tại
 
-```text
-configs/pilot_tddi_p3_fold_ensemble3_seed0.json
-```
-
-Config này chỉ chạy task 0–1 để kiểm chứng kỹ thuật. Full 8-task chưa được tự động
-khởi chạy. Sau khi pilot được duyệt, config full nằm tại:
+Repo chỉ giữ các config full gắn với kết quả P3 và run P4 kế tiếp:
 
 ```text
 configs/full_tddi_p3_fold_ensemble3_seed0.json
+configs/full_tddi_p3_fold_ensemble3_seed0_epochs25.json
+configs/full_tddi_p3_fold_ensemble3_seed0_replay12p5.json
+configs/full_tddi_p4_fold_ensemble3_seed0.json
 ```
+
+Các config smoke/pilot đã hoàn thành vai trò kiểm chứng kỹ thuật và đã được loại bỏ.
+Hướng dẫn chạy P4 hiện tại nằm tại
+`docs/TDDI_P4_EPOCH20_MEMBER0_RUNBOOK.md`.
 
 Thông số chính:
 
@@ -183,7 +185,7 @@ Thông số chính:
 | `inspect_splits.py` | Khi cần audit schema/tạo lại feature list |
 | `preprocess_features.py` | Khi cần fit lại scaler từ train split |
 | `analyze_class_distribution.py` | Khi cần tính lại tần suất class |
-| `build_cil_tasks.py` | Khi cần tạo lại P3 task schedule |
+| `build_cil_tasks.py` | Khi cần tạo lại P3/P4 task schedule |
 | `check_leakage.py` | Khi cần kiểm tra overlap/leakage giữa các split |
 
 Các script này không chạy trong mỗi epoch. Với full run hiện tại, training đọc thẳng
@@ -217,10 +219,9 @@ Các metric chính gồm Accuracy, Macro-F1, Weighted F1 và forgetting.
 Mean metric qua tám training stage chỉ mô tả trajectory, không được gọi là final model
 performance.
 
-Config chính dùng stratified 3-fold: threshold được chọn từ prediction OOF; chế độ
-`seeded` vẫn có thể chọn từ validation. Cả hai đều dùng normalized-entropy confidence,
-đóng băng threshold trước khi áp dụng lên test và luôn báo cáo coverage. Xem
-`docs/EVAL_PIPELINE.md` để biết contract hiện hành.
+Config chính dùng stratified 3-fold: threshold được chọn từ prediction OOF, dùng
+normalized-entropy confidence, đóng băng trước khi áp dụng lên test và luôn báo cáo
+coverage. Các config threshold còn lại nằm trực tiếp trong `configs/`.
 
 Ba ensemble member không được dùng thay cho nhiều experiment seed. Muốn báo cáo
 `mean ± sample standard deviation` qua năm seed, cần chạy đầy đủ experiment seed 0–4,
@@ -228,12 +229,10 @@ mỗi seed gồm ba member riêng.
 
 ## Tài liệu chính
 
-1. `docs/TDDI_STRATIFIED_3FOLD_ENSEMBLE3_PILOT_RUNBOOK.md` — setup và lệnh pilot
-   task 0–1 trên máy GPU.
-2. `docs/TDDI_STRATIFIED_3FOLD_ENSEMBLE3_FULL_RUNBOOK.md` — lệnh full task 0–7,
-   resume, ensemble/UE và review bundle.
-3. `docs/EVAL_PIPELINE.md` — hai chế độ ensemble, OOF, normalized entropy và threshold.
-4. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — kết quả P3 và giải thích metric.
+1. `docs/TDDI_P4_EPOCH20_MEMBER0_RUNBOOK.md` — P4: chạy riêng từng member hoặc một lệnh nohup chạy 0 → 1 → 2 tuần tự rồi ensemble/UE.
+2. `docs/ensemble3_p3_final_report.md` — báo cáo P3 baseline.
+3. `docs/ensemble3_p3_12,5%_final_report.md` — báo cáo P3 được giữ để đối chiếu.
+4. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — tổng hợp kết quả P3 và giải thích metric.
 
 Final report mở rộng được dựng lại từ artifact đã có bằng:
 
