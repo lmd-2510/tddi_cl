@@ -44,7 +44,7 @@ RANKING_CASES = {
 TRAINING = dict(method="replay_distill_fixed_budget_uniform", fold_replay_policy="stratified_fraction_v1",
     optimizer="adamw", batch_size=64, effective_batch_size=1024, gradient_accumulation_steps=16,
     lr=0.001, weight_decay=0.0001, focal_gamma=1.0, distill_alpha=1.0, temperature=2.0,
-    feature_distill_weight=0.5)
+    feature_distill_weight=0.5, weight_alignment="none")
 MODEL = dict(variant="tddi_paper_member", input_dim=3780, hidden_dims=[7560, 7560],
              activation="gelu", dropout=0.2, norm="layernorm")
 REPLAY = dict(buffer_policy=BUFFER_POLICY, ranking_policy=RANKING_POLICY,

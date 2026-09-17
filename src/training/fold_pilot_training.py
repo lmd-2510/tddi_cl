@@ -42,6 +42,10 @@ from src.data.fold_replay_sampler import (
 )
 from src.data.stratified_folds import fold_file_sha256
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, paper_member_manifest
+from src.methods.weight_alignment import (
+    WEIGHT_ALIGNMENT_POLICIES,
+    align_new_class_weights_,
+)
 from src.eval.predictions import (
     MemberPredictionContext,
     PredictionProvenance,
@@ -58,6 +62,10 @@ from src.training.replay_checkpoint import (
 TRAINING_POLICY = "frozen_fold_replay_distill_v1"
 P3_LAYOUT = [38, 20, 20, 20, 20, 20, 20, 20]
 ROTATING_CURRENT_POLICY = "stratified_fraction_rotating_current_v2"
+SUPPORTED_TASK_PROTOCOLS = {
+    "tail_to_head": "P3",
+    "constrained_mass_balanced": "P4",
+}
 
 
 def _json(value):
@@ -111,6 +119,8 @@ def validate_fold_options(args):
         raise ValueError("Epochs and patience must be positive.")
     if args.exemplar_ranking_policy not in RANKING_POLICIES:
         raise ValueError(f"Unsupported exemplar ranking policy: {args.exemplar_ranking_policy}.")
+    if args.weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
+        raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
     if (args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY
             and args.preprocessing_policy != "task0_standard_frozen"):
         raise ValueError("Pipeline-input exemplar ranking requires task0_standard_frozen preprocessing.")
@@ -123,22 +133,29 @@ def validate_fold_options(args):
 
 
 def validate_p3_spec(spec, context):
+    """Validate the locked full P3/P4 task map (legacy name retained for API compatibility)."""
     tasks = spec.get("tasks", [])
-    if spec.get("protocol") != "tail_to_head" or len(tasks) != 8:
-        raise ValueError("Use the full P3 tail_to_head file, not a two-task smoke protocol.")
+    protocol = spec.get("protocol")
+    if protocol not in SUPPORTED_TASK_PROTOCOLS or len(tasks) != 8:
+        raise ValueError("Use a full P3/P4 supported file, not a two-task smoke protocol.")
+    expected_seed = 0 if protocol == "constrained_mass_balanced" else None
+    if spec.get("seed") != expected_seed:
+        raise ValueError(
+            f"{SUPPORTED_TASK_PROTOCOLS[protocol]} task-file seed must be {expected_seed!r}."
+        )
     classes = []
     for task_id, (task, width) in enumerate(zip(tasks, P3_LAYOUT, strict=True)):
         raw = task.get("classes", [])
         if type(task.get("task_id")) is not int or task["task_id"] != task_id or len(raw) != width:
-            raise ValueError("P3 task IDs/layout must be 0..7 and [38,20,20,20,20,20,20,20].")
+            raise ValueError("P3/P4 task IDs/layout must be 0..7 and [38,20,20,20,20,20,20,20].")
         if any(type(c) is not int for c in raw):
-            raise ValueError("P3 requires integer raw class IDs.")
+            raise ValueError("P3/P4 requires integer raw class IDs.")
         classes.extend(raw)
     # Identity-only tables already validated against both source labels. No old
     # descriptors or future features are read for this protocol integrity check.
     assigned = {int(c) for table in context._rows for c in table["raw_class_id"].to_pylist()}
     if len(set(classes)) != 178 or set(classes) != assigned:
-        raise ValueError("P3 must cover exactly the 178 assignment raw classes without duplicates.")
+        raise ValueError("P3/P4 must cover exactly the 178 assignment raw classes without duplicates.")
     return tasks
 
 
@@ -308,7 +325,9 @@ def prepare_fold_run(args, *, engine, context=None):
         "training_policy": TRAINING_POLICY, "schema_version": 1, "method": args.method,
         "method_protocol": TRAINING_POLICY, "ensemble_mode": "frozen_stratified_3fold",
         "seeds": asdict(seeds), "validation_fold": args.member_id, "fold_seed": 42,
-        "task_protocol": "tail_to_head", "task_file_sha256": task_hash,
+        "task_protocol": spec["protocol"],
+        "task_protocol_id": SUPPORTED_TASK_PROTOCOLS[spec["protocol"]],
+        "task_file_sha256": task_hash,
         "task_layout": P3_LAYOUT, "protocol_task_count": 8, "stop_after_task": stop,
         "assignment_sha256": manifest["assignment_sha256"], "fold_manifest_sha256": context.manifest_sha256,
         "sources": buffer.metadata["sources"], "preprocessing_sha256": prep_hash,
@@ -324,6 +343,12 @@ def prepare_fold_run(args, *, engine, context=None):
         "classification_weight": 1.0, "logit_distillation_weight": args.distill_alpha,
         "feature_distillation_weight": args.feature_distill_weight, "temperature": args.temperature,
         "loss_scope": "focal_and_old_column_KL_T2_and_latent_MSE_on_all_current_plus_replay_draws",
+        "weight_alignment": {
+            "policy": args.weight_alignment,
+            "timing": "after_best_epoch_before_evaluation_teacher_and_boundary_checkpoint",
+            "classifier_parameter": "head.weight",
+            "bias_scaled": False,
+        },
         "early_stopping": "held_out_all_seen_macro_f1", "validation_only": args.validation_only,
         "test_policy": "integrity_hash_and_pair_IDs_only" if args.validation_only else "report_only_after_best_validation",
         "prediction_export": {
@@ -336,13 +361,14 @@ def prepare_fold_run(args, *, engine, context=None):
         "model": paper_member_manifest(dropout=args.dropout, activation=args.activation), "device": device,
         "implementation_sha256": {name: fold_file_sha256(Path(__file__).parents[1] / name) for name in (
             "training/fold_pilot_training.py", "training/train_cil.py", "data/ddi_dataset.py",
-            "data/fold_preprocessing.py", "data/fold_replay_buffer.py", "data/fold_replay_sampler.py")},
+            "data/fold_preprocessing.py", "data/fold_replay_buffer.py", "data/fold_replay_sampler.py",
+            "methods/weight_alignment.py")},
     }
     # Scope/path relocation may change; learning/provenance contract may not.
     contract = {k: v for k, v in resolved.items() if k != "stop_after_task"}
     contract["hyperparameters"] = {k: getattr(args, k) for k in (
         "epochs", "patience", "lr", "weight_decay", "dropout", "activation", "norm", "focal_gamma",
-        "distill_alpha", "temperature", "feature_distill_weight")}
+        "distill_alpha", "temperature", "feature_distill_weight", "weight_alignment")}
     rotating_current = args.fold_replay_policy == ROTATING_CURRENT_POLICY
     contract["sampler"] = {
         "policy": ROTATING_CURRENT_SAMPLER_POLICY if rotating_current else SAMPLER_POLICY,
@@ -469,7 +495,9 @@ def run_fold_training(args, *, engine):
         teacher = previous.to(device).eval().requires_grad_(False) if previous is not None else None
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         criterion = engine.FocalLoss(args.focal_gamma)
-        best_score, best_state, best_epoch, stale = -float("inf"), None, None, 0
+        best_score, best_state, best_epoch, best_validation_metrics, stale = (
+            -float("inf"), None, None, None, 0
+        )
         epoch_rows = []
         if str(device).startswith("cuda"):
             torch.cuda.reset_peak_memory_stats(device)
@@ -514,17 +542,44 @@ def run_fold_training(args, *, engine):
             if score > best_score:
                 best_score, best_epoch, stale = score, epoch + 1, 0
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_validation_metrics = dict(result.metrics)
             else:
                 stale += 1
                 if stale >= args.patience:
                     break
+        if best_state is None or best_validation_metrics is None:
+            raise RuntimeError(f"Task {task_id} did not produce a finite best checkpoint.")
         model.load_state_dict(best_state)
+        weight_alignment = align_new_class_weights_(
+            model,
+            previous_map,
+            seen_map,
+            policy=args.weight_alignment,
+        )
+        # From this point on, evaluation, prediction export, the next teacher,
+        # and the task-boundary checkpoint all use the same aligned state.
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        metrics = [{"task": task_id, "split": "validation", **m} for m in
+                   _eval_groups(engine, model, val_inputs, validation.labels, seen_map, new_classes, criterion, device, args.batch_size)]
+        post_alignment_seen = next(row for row in metrics if row["group"] == "seen_all")
+        weight_alignment.update({
+            "selection_validation_macro_f1_before": best_validation_metrics["macro_f1"],
+            "selection_validation_balanced_accuracy_before": best_validation_metrics["balanced_accuracy"],
+            "validation_macro_f1_after": post_alignment_seen["macro_f1"],
+            "validation_balanced_accuracy_after": post_alignment_seen["balanced_accuracy"],
+        })
+        _publish_json(task_root / "weight_alignment.json", weight_alignment)
+        logger.log(
+            f"task={task_id} weight_alignment={args.weight_alignment} "
+            f"applied={weight_alignment['applied']} gamma={weight_alignment['gamma']} "
+            f"val_macro_f1_before={best_validation_metrics['macro_f1']:.6f} "
+            f"val_macro_f1_after={post_alignment_seen['macro_f1']:.6f}"
+        )
         # Model-only inference snapshot, deliberately not a resumable checkpoint.
         atomic_publish_fold_file(task_root / "best_model.pt", lambda handle:
             torch.save({"model_state": best_state, "seen_class_map": seen_map, "task_id": task_id,
-                        "run_id": run_id, "resumable": False, "policy": TRAINING_POLICY}, handle))
-        metrics = [{"task": task_id, "split": "validation", **m} for m in
-                   _eval_groups(engine, model, val_inputs, validation.labels, seen_map, new_classes, criterion, device, args.batch_size)]
+                        "run_id": run_id, "resumable": False, "policy": TRAINING_POLICY,
+                        "weight_alignment": weight_alignment}, handle))
         prediction_paths = []
         if args.export_member_predictions and "validation" in args.member_prediction_splits:
             all_oof = load_development_fold_identity(
@@ -574,6 +629,11 @@ def run_fold_training(args, *, engine):
         _publish_csv(task_root / "training_audit.csv", epoch_rows)
         summary = {"task_id": task_id, "head_size": len(seen_map), "seen_class_map": seen_map,
             "best_epoch": best_epoch, "best_validation_macro_f1": best_score, "epochs_trained": len(epoch_rows),
+            "selection_validation_macro_f1_before_weight_alignment": best_validation_metrics["macro_f1"],
+            "selection_validation_balanced_accuracy_before_weight_alignment": best_validation_metrics["balanced_accuracy"],
+            "validation_macro_f1_after_weight_alignment": post_alignment_seen["macro_f1"],
+            "validation_balanced_accuracy_after_weight_alignment": post_alignment_seen["balanced_accuracy"],
+            "weight_alignment": weight_alignment,
             "memory_before": len(retained.labels), "memory_after": buffer.total_size,
             "runtime_seconds": time.perf_counter() - started,
             "peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if str(device).startswith("cuda") else None,
@@ -607,11 +667,14 @@ def run_fold_training(args, *, engine):
         "full_protocol_complete": stop == 7, "task_file_sha256": task_hash, "tasks": task_summaries,
         "requested_scope_complete": True, "validation_only": args.validation_only, "resumable": True})
     with (report_root / "run_summary.md").open("x", encoding="utf-8") as handle:
-        handle.write(f"# Frozen-fold pilot\n\nPolicy: `{TRAINING_POLICY}`. Member {args.member_id}. "
-                     f"Preprocessing: `{args.preprocessing_policy}`.\n\nCompleted tasks 0–{stop} of full P3 (8 tasks). "
+        handle.write(f"# Frozen-fold study\n\nPolicy: `{TRAINING_POLICY}`. Member {args.member_id}. "
+                     f"Preprocessing: `{args.preprocessing_policy}`. Weight alignment: "
+                     f"`{args.weight_alignment}`.\n\nCompleted tasks 0–{stop} of full "
+                     f"{resolved['task_protocol_id']} (8 tasks). "
                      f"Validation-only: {args.validation_only}. Resume via checkpoints/task_{stop}.pt; not a legacy checkpoint.\n\n")
         for s in task_summaries:
             handle.write(f"- Task {s['task_id']}: head {s['head_size']}, best epoch {s['best_epoch']}, "
-                         f"validation Macro-F1 {s['best_validation_macro_f1']:.6f}.\n")
+                         f"selection validation Macro-F1 {s['best_validation_macro_f1']:.6f}, "
+                         f"post-WA validation Macro-F1 {s['validation_macro_f1_after_weight_alignment']:.6f}.\n")
     logger.log(f"Requested execution scope complete; report={report_root}; no preprocessing winner selected.")
     return task_summaries

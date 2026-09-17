@@ -29,6 +29,7 @@ from src.eval.ensemble_ue import (  # noqa: E402
     load_offline_ensemble_artifact,
 )
 from src.eval.predictions import load_member_prediction_artifact  # noqa: E402
+from src.methods.weight_alignment import WEIGHT_ALIGNMENT_POLICIES  # noqa: E402
 from src.eval.threshold import (  # noqa: E402
     BALANCED_ACCURACY_SELECTION_RULE,
     BALANCED_ACCURACY_TIE_BREAKERS,
@@ -188,6 +189,9 @@ def _load_locked_config(
         )
     _keys(value["inputs"], INPUT_KEYS, "inputs")
     _keys(value["preprocessing"], {"policy", "artifact_template"}, "preprocessing")
+    # Schema-v1 configs created before WA remain valid and mean no alignment.
+    if isinstance(value.get("training"), dict) and "weight_alignment" not in value["training"]:
+        value["training"]["weight_alignment"] = "none"
     _keys(value["training"], {*TRAINING, "epochs", "patience"}, "training")
     _keys(value["evaluation"], EVALUATION_KEYS, "evaluation")
     if value["preprocessing"]["policy"] != "task0_standard_frozen":
@@ -201,6 +205,9 @@ def _load_locked_config(
         "stratified_fraction_v1", "stratified_fraction_rotating_current_v2"
     }:
         raise ValueError("Unsupported fold replay sampler policy.")
+    weight_alignment = value["training"].get("weight_alignment")
+    if weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
+        raise ValueError("Unsupported classifier weight-alignment policy.")
     configured_epochs = value["training"].get("epochs")
     if fold_policy == "stratified_fraction_rotating_current_v2":
         expected_epochs = 30
@@ -213,6 +220,7 @@ def _load_locked_config(
     expected_training = {
         **TRAINING,
         "fold_replay_policy": fold_policy,
+        "weight_alignment": weight_alignment,
         "epochs": expected_epochs,
         "patience": 5,
     }

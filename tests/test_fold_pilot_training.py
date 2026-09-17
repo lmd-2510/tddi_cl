@@ -171,6 +171,31 @@ def test_fold_training_exports_assignment_bound_validation_predictions(data, mon
         np.testing.assert_array_equal(artifact.fold_ids, 0)
 
 
+def test_fold_training_applies_weight_alignment_before_checkpoint(data, monkeypatch, tiny):
+    command = cli(
+        data,
+        suffix="_wa",
+        extra=["--weight-alignment", "new_class_mean_norm_v1"],
+    )
+    monkeypatch.setattr(sys, "argv", command)
+    engine.main()
+    root = data["root"] / "run_raw_identity_wa"
+
+    task0 = json.loads((root / "task_0/weight_alignment.json").read_text())
+    task1 = json.loads((root / "task_1/weight_alignment.json").read_text())
+    assert not task0["applied"] and task0["skip_reason"] == "no_old_classes_at_task_0"
+    assert task1["applied"] and task1["bias_scaled"] is False
+    assert task1["new_mean_weight_norm_after"] == pytest.approx(
+        task1["old_mean_weight_norm"], rel=1e-5
+    )
+    checkpoint = torch.load(root / "checkpoints/task_1.pt", weights_only=False)
+    assert checkpoint["contract"]["hyperparameters"]["weight_alignment"] == (
+        "new_class_mean_norm_v1"
+    )
+    summary = json.loads((root / "task_1/completed_task.json").read_text())
+    assert summary["weight_alignment"]["applied"] is True
+
+
 @pytest.mark.parametrize("extra,match", [
     (["--method", "ewc"], "requires replay"), (["--seed", "1"], "seed 0"),
     (["--fold-id", "1"], "member=held-out"), (["--scaler", "old.pkl"], "legacy --scaler"),

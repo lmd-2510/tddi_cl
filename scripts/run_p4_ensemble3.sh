@@ -15,10 +15,11 @@ TEST="$REPO_ROOT/test_extracted.parquet"
 FEATURES="$REPO_ROOT/study_assets/data_schema/feature_columns.json"
 TASK_FILE="$REPO_ROOT/study_assets/task_protocols/constrained_mass_balanced_seed0_tasks.json"
 PREP_ROOT="$REPO_ROOT/study_assets/preprocessing_p4_seed0_fold42"
-FULL_CONFIG="$REPO_ROOT/configs/full_tddi_p4_fold_ensemble3_seed0.json"
-THRESHOLD_CONFIG="$REPO_ROOT/configs/eval_tddi_p4_ensemble_entropy_balanced_accuracy_threshold.json"
-FULL_ROOT="$REPO_ROOT/outputs/stratified_ensemble3/full_p4_seed0_8tasks"
-MONITOR_ROOT="$REPO_ROOT/outputs/stratified_ensemble3_monitor/full_p4_seed0_8tasks"
+FULL_CONFIG="${P4_FULL_CONFIG:-$REPO_ROOT/configs/full_tddi_p4_fold_ensemble3_seed0.json}"
+THRESHOLD_CONFIG="${P4_THRESHOLD_CONFIG:-$REPO_ROOT/configs/eval_tddi_p4_ensemble_entropy_balanced_accuracy_threshold.json}"
+FULL_ROOT="${P4_FULL_ROOT:-$REPO_ROOT/outputs/stratified_ensemble3/full_p4_seed0_8tasks}"
+MONITOR_ROOT="${P4_MONITOR_ROOT:-$REPO_ROOT/outputs/stratified_ensemble3_monitor/full_p4_seed0_8tasks}"
+CONTROLLER_SCRIPT="${P4_CONTROLLER_SCRIPT:-scripts/run_p4_ensemble3.sh}"
 
 die() { echo "[STOP] $*" >&2; exit 1; }
 
@@ -197,7 +198,7 @@ start_run() {
   printf '%s\n' "$pid" > "$log_dir/job.pid"
   echo "[STARTED] PID=$pid"
   echo "[LOG] $log_dir/nohup.log"
-  echo "Theo dõi: bash scripts/run_p4_ensemble3.sh follow"
+  echo "Theo dõi: bash $CONTROLLER_SCRIPT follow"
 }
 
 show_status() {
@@ -278,6 +279,7 @@ Usage: bash scripts/run_p4_ensemble3.sh ACTION
   report     Tạo lại bảng CSV và báo cáo Markdown cuối từ artifacts.
 
 Optional: P4_GPU_ID=0, P4_PYTHON=python, P4_FOLD_ROOT=/absolute/path/to/folds
+Advanced namespace overrides: P4_FULL_CONFIG, P4_FULL_ROOT, P4_MONITOR_ROOT.
 EOF
 }
 

@@ -1,4 +1,4 @@
-# Chạy P4 Ensemble3 bằng một lệnh
+# Chạy P4 Ensemble3 và P4 + WA bằng một lệnh
 
 Study dùng P4 `constrained_mass_balanced`, 20 epoch/task và baseline
 `replay_distill_fixed_budget_uniform × tddi_paper_member`.
@@ -13,6 +13,41 @@ member 0 (task 0–7)
 
 Mỗi thời điểm chỉ có một member trên GPU. Nếu job bị ngắt, gọi lại `start`: controller
 skip member đã xong và resume member dở từ task boundary gần nhất.
+
+## Thử nghiệm WA mới
+
+WA (Weight Aligning) **không thay Focal Loss**. Training vẫn giữ nguyên Focal Loss,
+replay và distillation của baseline; sau khi chọn best epoch ở mỗi task, WA chỉ scale
+các hàng classifier của class mới để mean L2 norm bằng class cũ. Task 0 không có class
+cũ nên tự skip. Bias không bị scale.
+
+Toàn bộ WA study chạy bằng đúng một lệnh:
+
+```bash
+bash scripts/run_p4_wa_ensemble3.sh
+```
+
+Lệnh này tự prepare/skip scaler, rồi chạy tuần tự member 0 → 1 → 2 → ensemble/UE →
+threshold → final report. WA dùng namespace riêng nên không ghi đè baseline:
+
+```text
+outputs/stratified_ensemble3/full_p4_seed0_8tasks_wa/
+```
+
+Theo dõi, resume, kiểm tra và tạo lại report:
+
+```bash
+bash scripts/run_p4_wa_ensemble3.sh status
+bash scripts/run_p4_wa_ensemble3.sh follow
+bash scripts/run_p4_wa_ensemble3.sh          # gọi lại để resume sau interruption
+bash scripts/run_p4_wa_ensemble3.sh verify
+bash scripts/run_p4_wa_ensemble3.sh report
+```
+
+Audit WA của mỗi task nằm tại
+`member_N/task_T/weight_alignment.json`, gồm norm class cũ/mới, hệ số `gamma`, và
+validation Macro-F1/Balanced Accuracy trước/sau WA. So sánh WA với baseline chỉ hợp lệ
+khi giữ nguyên toàn bộ thiết lập khác như config hiện tại.
 
 ## 1. Cập nhật repo
 

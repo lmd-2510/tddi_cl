@@ -65,6 +65,7 @@ from src.eval.predictions import (
     export_member_prediction_artifact,
 )
 from src.methods.ewc import compute_fisher, ewc_penalty, grow_head_state
+from src.methods.weight_alignment import WEIGHT_ALIGNMENT_POLICIES
 from src.methods.agem import project_agem_gradient
 from src.methods.gem import (
     TaskEpisodicMemory,
@@ -228,6 +229,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--focal-gamma", type=float, default=1.0)
+    parser.add_argument(
+        "--weight-alignment",
+        choices=WEIGHT_ALIGNMENT_POLICIES,
+        default="none",
+        help=(
+            "Optional post-task classifier Weight Aligning. This does not replace "
+            "Focal Loss; it rescales only newly introduced classifier weight rows."
+        ),
+    )
     parser.add_argument("--max-train-rows-per-task", type=int, default=None)
     parser.add_argument("--max-validation-rows-per-task", type=int, default=None)
     parser.add_argument("--max-test-rows-per-task", type=int, default=None)

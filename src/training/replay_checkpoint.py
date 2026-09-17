@@ -577,7 +577,7 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             if type(epoch_count) is not int or not 1 <= epoch_count <= expected_contract["hyperparameters"]["epochs"]:
                 raise ValueError("Invalid completed epoch count.")
             required_files = {"completed_task.json", "best_model.pt", "input_audit.json", "buffer_audit.json",
-                              "metrics.json", "metrics.csv", "training_audit.csv"}
+                              "weight_alignment.json", "metrics.json", "metrics.csv", "training_audit.csv"}
             required_files.update(f"epoch_{e}_audit.json" for e in range(1, epoch_count + 1))
             if any((task_dir / f).relative_to(root).as_posix() not in state["artifact_hashes"] for f in required_files):
                 raise ValueError("Missing task completion evidence in checkpoint inventory.")

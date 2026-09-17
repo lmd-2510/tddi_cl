@@ -21,6 +21,7 @@ REPLAY12P5_CONFIG = Path(
     "configs/full_tddi_p3_fold_ensemble3_seed0_replay12p5.json"
 )
 P4_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0.json")
+P4_WA_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0_wa.json")
 
 
 def _arg(command: Sequence[str], name: str) -> str:
@@ -154,6 +155,34 @@ def test_p4_config_changes_only_protocol_preprocessing_namespace_and_threshold(
             "constrained_mass_balanced_seed0_tasks.json"
         )
         assert _arg(member.command, "--epochs") == "20"
+
+
+def test_p4_wa_config_changes_only_alignment_and_output_namespace(tmp_path: Path) -> None:
+    baseline = load_full_config(
+        P4_CONFIG,
+        overrides={"output_root": tmp_path / "baseline"},
+    )
+    wa = load_full_config(
+        P4_WA_CONFIG,
+        overrides={"output_root": tmp_path / "wa"},
+    )
+    plan = shared.build_pilot_plan(
+        wa,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+
+    assert baseline["training"]["weight_alignment"] == "none"
+    assert wa["training"]["weight_alignment"] == "new_class_mean_norm_v1"
+    baseline_training = dict(baseline["training"])
+    wa_training = dict(wa["training"])
+    baseline_training.pop("weight_alignment")
+    wa_training.pop("weight_alignment")
+    assert wa_training == baseline_training
+    assert Path(wa["output_root"]).name == "wa"
+    for member in plan.members:
+        assert member.command is not None
+        assert _arg(member.command, "--weight-alignment") == "new_class_mean_norm_v1"
 
 
 def test_full_selected_member_skip_and_resume(tmp_path: Path) -> None:
