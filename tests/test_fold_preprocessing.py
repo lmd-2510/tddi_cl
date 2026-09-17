@@ -85,6 +85,21 @@ def test_raw_identity_no_fake_fit_and_same_ab_rows(data):
     assert x[0, 0] == 3  # transform does not return a mutable view of input
 
 
+def test_p4_task_file_fits_and_loads_with_p4_provenance(data, tmp_path):
+    payload = json.loads(data[2].read_text())
+    payload["protocol"] = "constrained_mass_balanced"
+    payload["seed"] = 0
+    p4_task = tmp_path / "p4_tasks.json"
+    p4_task.write_text(json.dumps(payload))
+    p4_data = data[0], data[1], p4_task
+
+    artifact = prep.prepare_fold_preprocessing(**args(p4_data))
+    assert artifact.metadata["provenance"]["protocol"] == "constrained_mass_balanced"
+    path = prep.save_fold_preprocessing(artifact, tmp_path / "p4_preprocessing")
+    loaded = prep.load_fold_preprocessing(path, **args(p4_data))
+    assert loaded.metadata == artifact.metadata
+
+
 @pytest.mark.parametrize("kwargs,match", [
     ({"member_id": 2}, "member"), ({"policy": "raw_identity"}, "policy"),
     ({"feature_columns": ["constant", "x"]}, "feature order"),

@@ -40,11 +40,21 @@ def _digest(value) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
-def _task0(path: str | Path) -> tuple[str, list[int]]:
+SUPPORTED_PROTOCOLS = {
+    "tail_to_head": None,
+    "constrained_mass_balanced": 0,
+}
+
+
+def _task0(path: str | Path) -> tuple[str, str, list[int]]:
     content = Path(path).read_bytes()
     payload = json.loads(content)
-    if not isinstance(payload, dict) or payload.get("protocol") != "tail_to_head":
-        raise ValueError("Expected P3 task-file protocol=tail_to_head.")
+    protocol = payload.get("protocol") if isinstance(payload, dict) else None
+    if protocol not in SUPPORTED_PROTOCOLS:
+        raise ValueError("Expected a supported P3 tail_to_head or P4 constrained_mass_balanced task file.")
+    expected_seed = SUPPORTED_PROTOCOLS[protocol]
+    if payload.get("seed") != expected_seed:
+        raise ValueError(f"Task-file protocol={protocol} requires seed={expected_seed!r}.")
     tasks = payload.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("Task file must contain tasks starting at task 0.")
@@ -60,9 +70,9 @@ def _task0(path: str | Path) -> tuple[str, list[int]]:
         all_classes.extend(classes)
     if len(all_classes) != len(set(all_classes)):
         raise ValueError("Duplicate class IDs in task file.")
-    # Small synthetic/P3-prefix files are supported here; full-study layout guards
+    # Small synthetic P3/P4-prefix files are supported here; full-study layout guards
     # belong to the later study config, not this general preprocessing primitive.
-    return hashlib.sha256(content).hexdigest(), tasks[0]["classes"]
+    return hashlib.sha256(content).hexdigest(), protocol, tasks[0]["classes"]
 
 
 def _provenance(
@@ -80,7 +90,7 @@ def _provenance(
     if (not feature_columns or not all(isinstance(c, str) and c for c in feature_columns)
             or len(set(feature_columns)) != len(feature_columns)):
         raise ValueError("feature_columns must be an ordered list of unique names.")
-    task_hash, classes = _task0(task_file)
+    task_hash, protocol, classes = _task0(task_file)
     records = []
     for rows in context._rows:
         mask = ((rows["fold_id"].to_numpy() != validation_fold)
@@ -98,7 +108,7 @@ def _provenance(
         # Physical paths are deliberately not part of compatibility checks.
         "sources": {s: {k: v[k] for k in ("sha256", "row_count")}
                     for s, v in manifest["sources"].items()},
-        "task_file_sha256": task_hash, "protocol": "tail_to_head",
+        "task_file_sha256": task_hash, "protocol": protocol,
         "label_col": context.label_col,
         "feature_columns": list(feature_columns), "feature_order_sha256": _digest(feature_columns),
         "reference_selection": {

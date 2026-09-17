@@ -14,7 +14,6 @@ VALIDATION="$REPO_ROOT/validation_extracted.parquet"
 TEST="$REPO_ROOT/test_extracted.parquet"
 FEATURES="$REPO_ROOT/study_assets/data_schema/feature_columns.json"
 TASK_FILE="$REPO_ROOT/study_assets/task_protocols/constrained_mass_balanced_seed0_tasks.json"
-PREP_ROOT="$REPO_ROOT/study_assets/preprocessing_p4_seed0_fold42"
 FULL_CONFIG="${P4_FULL_CONFIG:-$REPO_ROOT/configs/full_tddi_p4_fold_ensemble3_seed0.json}"
 THRESHOLD_CONFIG="${P4_THRESHOLD_CONFIG:-$REPO_ROOT/configs/eval_tddi_p4_ensemble_entropy_balanced_accuracy_threshold.json}"
 FULL_ROOT="${P4_FULL_ROOT:-$REPO_ROOT/outputs/stratified_ensemble3/full_p4_seed0_8tasks}"
@@ -22,6 +21,41 @@ MONITOR_ROOT="${P4_MONITOR_ROOT:-$REPO_ROOT/outputs/stratified_ensemble3_monitor
 CONTROLLER_SCRIPT="${P4_CONTROLLER_SCRIPT:-scripts/run_p4_ensemble3.sh}"
 
 die() { echo "[STOP] $*" >&2; exit 1; }
+
+resolve_preprocessing_root() {
+  if [[ -n "${P4_PREP_ROOT:-}" ]]; then
+    printf '%s\n' "$P4_PREP_ROOT"
+    return
+  fi
+  local preferred="$REPO_ROOT/study_assets/preprocessing_p4_seed0_fold42"
+  if [[ -s "$preferred/member_0/B/fold_preprocessing.json" \
+     && -s "$preferred/member_1/B/fold_preprocessing.json" \
+     && -s "$preferred/member_2/B/fold_preprocessing.json" ]]; then
+    printf '%s\n' "$preferred"
+    return
+  fi
+  local candidates=() candidate member_id valid
+  shopt -s nullglob
+  for candidate in "$REPO_ROOT"/study_assets/preprocessing_p4_seed0_fold42*; do
+    [[ -d "$candidate" ]] || continue
+    valid=1
+    for member_id in 0 1 2; do
+      [[ -s "$candidate/member_${member_id}/B/fold_preprocessing.json" ]] \
+        || valid=0
+    done
+    (( valid == 1 )) && candidates+=("$candidate")
+  done
+  shopt -u nullglob
+  if (( ${#candidates[@]} == 1 )); then
+    printf '%s\n' "${candidates[0]}"
+    return
+  fi
+  if (( ${#candidates[@]} > 1 )); then
+    die "Có nhiều preprocessing root P4; hãy export P4_PREP_ROOT=/duong/dan/chinh-xac"
+  fi
+  # No existing artifact: prepare action will create the canonical namespace.
+  printf '%s\n' "$preferred"
+}
 
 resolve_fold_root() {
   if [[ -n "${P4_FOLD_ROOT:-}" ]]; then
@@ -46,6 +80,7 @@ resolve_fold_root() {
   printf '%s\n' "${candidates[0]}"
 }
 
+PREP_ROOT="$(resolve_preprocessing_root)"
 FOLD_ROOT="$(resolve_fold_root)"
 ASSIGNMENTS="$FOLD_ROOT/fold_assignments.parquet"
 FOLD_MANIFEST="$FOLD_ROOT/fold_manifest.json"
@@ -278,7 +313,8 @@ Usage: bash scripts/run_p4_ensemble3.sh ACTION
   verify     Kiểm tra artifacts sau khi toàn bộ run hoàn tất.
   report     Tạo lại bảng CSV và báo cáo Markdown cuối từ artifacts.
 
-Optional: P4_GPU_ID=0, P4_PYTHON=python, P4_FOLD_ROOT=/absolute/path/to/folds
+Optional: P4_GPU_ID=0, P4_PYTHON=python, P4_FOLD_ROOT=/absolute/path/to/folds,
+          P4_PREP_ROOT=/absolute/path/to/preprocessing
 Advanced namespace overrides: P4_FULL_CONFIG, P4_FULL_ROOT, P4_MONITOR_ROOT.
 EOF
 }

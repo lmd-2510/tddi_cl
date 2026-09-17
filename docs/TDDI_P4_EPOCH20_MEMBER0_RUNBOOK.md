@@ -72,6 +72,13 @@ thấy nhiều fold root, chỉ định đúng thư mục:
 export P4_FOLD_ROOT="$PWD/outputs/fold_preparation_seed42_20260912_161002/folds"
 ```
 
+Nếu preprocessing P4 hiện có dùng tên thư mục kèm timestamp/hậu tố, controller tự nhận
+khi chỉ có một candidate đủ ba member. Nếu có nhiều candidate, chọn rõ thư mục đúng:
+
+```bash
+export P4_PREP_ROOT="$PWD/study_assets/TEN_THU_MUC_PREPROCESSING_P4"
+```
+
 ## 3. Dry-run và bắt đầu
 
 ```bash

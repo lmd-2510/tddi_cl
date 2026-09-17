@@ -17,7 +17,7 @@ import numpy as np
 
 from src.data.ddi_dataset import DEFAULT_META_COLS, DDIBatchArrays, DevelopmentFoldContext
 from src.data.fixed_budget_replay import max_min_uniform_allocation
-from src.data.fold_preprocessing import FoldPreprocessing
+from src.data.fold_preprocessing import FoldPreprocessing, SUPPORTED_PROTOCOLS
 from src.data.sample_identity import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN, build_stable_sample_ids
 from src.utils.seed import resolve_seed_configuration
 
@@ -243,8 +243,11 @@ class FoldSqrtReplayBuffer:
         self._task_path = Path(task_file)
         content = self._task_path.read_bytes()
         spec = json.loads(content)
-        if not isinstance(spec, dict) or spec.get("protocol") != "tail_to_head" or not isinstance(spec.get("tasks"), list) or not spec["tasks"]:
-            raise ValueError("Expected a P3 tail_to_head task file.")
+        protocol = spec.get("protocol") if isinstance(spec, dict) else None
+        if (protocol not in SUPPORTED_PROTOCOLS
+                or spec.get("seed") != SUPPORTED_PROTOCOLS.get(protocol)
+                or not isinstance(spec.get("tasks"), list) or not spec["tasks"]):
+            raise ValueError("Expected a supported P3 tail_to_head or P4 constrained_mass_balanced task file.")
         self._tasks = []
         for i, task in enumerate(spec["tasks"]):
             if not isinstance(task, dict) or type(task.get("task_id")) is not int or task["task_id"] != i or not isinstance(task.get("classes"), list) or not task["classes"]:

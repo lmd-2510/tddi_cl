@@ -128,6 +128,22 @@ def settings(data, member=0, budget=5):
     return dict(context=ctx, task_file=data[2], feature_columns=["x", "y"], member_id=member, total_memory_budget=budget)
 
 
+def test_p4_task_file_is_supported_by_fold_buffer(data, tmp_path):
+    payload = json.loads(data[2].read_text())
+    payload["protocol"] = "constrained_mass_balanced"
+    payload["seed"] = 0
+    p4_task = tmp_path / "p4_tasks.json"
+    p4_task.write_text(json.dumps(payload))
+    kw = settings(data)
+    kw["task_file"] = p4_task
+
+    buffer = replay.FoldSqrtReplayBuffer(**kw)
+    assert buffer.total_size == 0
+    assert buffer.metadata["task_file_sha256"] == replay.hashlib.sha256(
+        p4_task.read_bytes()
+    ).hexdigest()
+
+
 def current(kwargs, task, role="train"):
     return load_development_fold_arrays(kwargs["context"], ["x", "y"], member_id=kwargs["member_id"],
         validation_fold=kwargs["member_id"], role=role, class_ids=[[10], [57], [901]][task])
