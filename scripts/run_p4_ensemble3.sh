@@ -170,7 +170,8 @@ start_run() {
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     bash -c '
       set -uo pipefail
-      log_dir="$1"; repo_root="$2"; gpu_id="$3"; shift 3
+      log_dir="$1"; repo_root="$2"; gpu_id="$3"
+      python_bin="$4"; full_root="$5"; task_file="$6"; shift 6
       cd "$repo_root" || exit 1
       nvidia-smi --id="$gpu_id" \
         --query-gpu=timestamp,index,memory.used,memory.free,utilization.gpu,power.draw \
@@ -179,9 +180,15 @@ start_run() {
       trap "kill ${monitor_pid} 2>/dev/null || true; wait ${monitor_pid} 2>/dev/null || true" EXIT
       /usr/bin/time -v "$@"
       status=$?
+      if (( status == 0 )); then
+        "$python_bin" src/eval/report.py \
+          --full-root "$full_root" --task-file "$task_file" --overwrite
+        status=$?
+      fi
       printf "%s\n" "$status" > "$log_dir/exit_code.txt"
       exit "$status"
     ' p4-job "$log_dir" "$REPO_ROOT" "$GPU_ID" \
+      "$PYTHON_BIN" "$FULL_ROOT" "$TASK_FILE" \
       "$PYTHON_BIN" src/training/fold_ensemble3_full.py \
       --config "$FULL_CONFIG" "${COMMON_P4[@]}" \
       --member-id 0 --member-id 1 --member-id 2 --execute \
@@ -248,6 +255,15 @@ verify_results() {
   echo "[OK] P4 ensemble3 hoàn tất và artifacts đầy đủ"
 }
 
+build_final_report() {
+  verify_results
+  "$PYTHON_BIN" src/eval/report.py \
+    --full-root "$FULL_ROOT" \
+    --task-file "$TASK_FILE" \
+    --overwrite
+  echo "[OK] $FULL_ROOT/final_results/ensemble3_p4_final_report.md"
+}
+
 usage() {
   cat <<'EOF'
 Usage: bash scripts/run_p4_ensemble3.sh ACTION
@@ -259,6 +275,7 @@ Usage: bash scripts/run_p4_ensemble3.sh ACTION
   status     Xem PID, exit code và log cuối.
   follow     Theo dõi log; Ctrl+C chỉ thoát tail.
   verify     Kiểm tra artifacts sau khi toàn bộ run hoàn tất.
+  report     Tạo lại bảng CSV và báo cáo Markdown cuối từ artifacts.
 
 Optional: P4_GPU_ID=0, P4_PYTHON=python, P4_FOLD_ROOT=/absolute/path/to/folds
 EOF
@@ -273,6 +290,7 @@ case "$action" in
   status) show_status ;;
   follow) follow_log ;;
   verify) verify_results ;;
+  report) build_final_report ;;
   help|-h|--help|"") usage ;;
   *) usage; die "Action không hợp lệ: $action" ;;
 esac

@@ -161,13 +161,17 @@ def _write_member_forgetting(full_root: Path) -> None:
         ).to_csv(root / "class_forgetting.csv", index=False)
 
 
-def _build_fixture(tmp_path: Path) -> tuple[Path, Path]:
+def _build_fixture(
+    tmp_path: Path,
+    *,
+    protocol: str = "tail_to_head",
+) -> tuple[Path, Path]:
     full_root = tmp_path / "full"
     task_file = tmp_path / "tasks.json"
     task_file.write_text(
         json.dumps(
             {
-                "protocol": "tail_to_head",
+                "protocol": protocol,
                 "seed": None,
                 "num_classes": 3,
                 "tasks": [
@@ -261,6 +265,21 @@ def test_builds_extended_report_without_training(tmp_path: Path) -> None:
     assert "Forgettting" not in report
     assert "Ensemble diversity" in report
     assert "no training or inference" not in report.casefold()
+
+
+def test_builds_p4_report_with_protocol_specific_names(tmp_path: Path) -> None:
+    full_root, task_file = _build_fixture(
+        tmp_path,
+        protocol="constrained_mass_balanced",
+    )
+
+    paths = build_final_report(full_root=full_root, task_file=task_file)
+
+    assert paths["report"].name == "ensemble3_p4_final_report.md"
+    assert paths["task_summary"].name == "ensemble3_p4_task_summary.csv"
+    report = paths["report"].read_text(encoding="utf-8")
+    assert "Replay-Distill P4 Final Report" in report
+    assert "Protocol: P4 `constrained_mass_balanced`" in report
 
 
 def test_refuses_existing_outputs_without_explicit_overwrite(tmp_path: Path) -> None:

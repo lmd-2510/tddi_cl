@@ -229,7 +229,7 @@ mỗi seed gồm ba member riêng.
 
 ## Tài liệu chính
 
-1. `docs/TDDI_P4_EPOCH20_MEMBER0_RUNBOOK.md` — P4: chạy riêng từng member hoặc một lệnh nohup chạy 0 → 1 → 2 tuần tự rồi ensemble/UE.
+1. `docs/TDDI_P4_EPOCH20_MEMBER0_RUNBOOK.md` — P4: một controller ngắn để prepare, nohup 0 → 1 → 2, ensemble/UE và final report.
 2. `docs/ensemble3_p3_final_report.md` — báo cáo P3 baseline.
 3. `docs/ensemble3_p3_12,5%_final_report.md` — báo cáo P3 được giữ để đối chiếu.
 4. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — tổng hợp kết quả P3 và giải thích metric.

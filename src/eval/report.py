@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the final P3 ensemble report from completed offline artifacts.
+"""Build a final P3/P4 ensemble report from completed offline artifacts.
 
 This entrypoint is report-only: it never loads a model checkpoint and never trains or
 runs inference. It derives classification, continual-learning, and ensemble-diversity
@@ -40,16 +40,11 @@ DEFAULT_FULL_ROOT = Path(
     "outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_v1"
 )
 DEFAULT_TASK_FILE = Path("study_assets/task_protocols/tail_to_head_tasks.json")
-EXPECTED_PROTOCOL = "tail_to_head"
+SUPPORTED_PROTOCOLS = {
+    "tail_to_head": ("P3", "ensemble3_p3"),
+    "constrained_mass_balanced": ("P4", "ensemble3_p4"),
+}
 EXPECTED_MEMBER_IDS = (0, 1, 2)
-
-TASK_SUMMARY_NAME = "ensemble3_p3_task_summary.csv"
-PAPER_TABLE_NAME = "ensemble3_p3_paper_table.csv"
-ENSEMBLE_MATRIX_NAME = "ensemble3_p3_task_matrix.csv"
-ENSEMBLE_FORGETTING_NAME = "ensemble3_p3_forgetting_summary.csv"
-MEMBER_FORGETTING_NAME = "ensemble3_p3_member_forgetting_summary.csv"
-DIVERSITY_NAME = "ensemble3_p3_diversity_summary.csv"
-REPORT_NAME = "ensemble3_p3_final_report.md"
 
 
 def _read_json(path: Path) -> Mapping[str, Any]:
@@ -66,9 +61,11 @@ def _read_json(path: Path) -> Mapping[str, Any]:
 
 def _load_task_groups(task_file: Path) -> tuple[list[list[int]], Mapping[str, Any]]:
     payload = _read_json(task_file)
-    if payload.get("protocol") != EXPECTED_PROTOCOL:
+    protocol = payload.get("protocol")
+    if protocol not in SUPPORTED_PROTOCOLS:
         raise ValueError(
-            f"Final P3 report requires protocol={EXPECTED_PROTOCOL!r}: {task_file}"
+            f"Unsupported final-report protocol {protocol!r}: {task_file}. "
+            f"Expected one of {sorted(SUPPORTED_PROTOCOLS)}."
         )
     raw_tasks = payload.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
@@ -122,7 +119,7 @@ def _validate_ensemble_context(
     if tuple(context.member_ids) != EXPECTED_MEMBER_IDS or context.member_count != 3:
         raise ValueError(f"Task {task_id} is not an aligned three-member ensemble.")
     if set(artifact.raw_class_ids.astype(int).tolist()) != expected_seen_classes:
-        raise ValueError(f"Task {task_id} raw class IDs do not match the P3 schedule.")
+        raise ValueError(f"Task {task_id} raw class IDs do not match the task schedule.")
     current = {
         "method": context.method,
         "method_protocol": context.method_protocol,
@@ -435,6 +432,8 @@ def _build_markdown(
     diversity: pd.DataFrame,
     *,
     shared_context: Mapping[str, Any],
+    protocol_id: str,
+    protocol_name: str,
 ) -> str:
     metric_columns = {
         "Full Accuracy": "full_accuracy",
@@ -473,11 +472,11 @@ def _build_markdown(
 
     return "\n".join(
         [
-            "# Ensemble3 Replay-Distill P3 Final Report",
+            f"# Ensemble3 Replay-Distill {protocol_id} Final Report",
             "",
             "## Experiment",
             "",
-            f"- Protocol: P3 `{EXPECTED_PROTOCOL}`",
+            f"- Protocol: {protocol_id} `{protocol_name}`",
             f"- Method: `{shared_context['method']}`",
             "- Backbone: `tddi_paper_member`",
             f"- Experiment seed: `{shared_context['experiment_seed']}`",
@@ -545,15 +544,20 @@ def _build_markdown(
     )
 
 
-def _prepare_outputs(outdir: Path, *, overwrite: bool) -> dict[str, Path]:
+def _prepare_outputs(
+    outdir: Path,
+    *,
+    output_prefix: str,
+    overwrite: bool,
+) -> dict[str, Path]:
     paths = {
-        "task_summary": outdir / TASK_SUMMARY_NAME,
-        "paper_table": outdir / PAPER_TABLE_NAME,
-        "ensemble_matrix": outdir / ENSEMBLE_MATRIX_NAME,
-        "ensemble_forgetting": outdir / ENSEMBLE_FORGETTING_NAME,
-        "member_forgetting": outdir / MEMBER_FORGETTING_NAME,
-        "diversity": outdir / DIVERSITY_NAME,
-        "report": outdir / REPORT_NAME,
+        "task_summary": outdir / f"{output_prefix}_task_summary.csv",
+        "paper_table": outdir / f"{output_prefix}_paper_table.csv",
+        "ensemble_matrix": outdir / f"{output_prefix}_task_matrix.csv",
+        "ensemble_forgetting": outdir / f"{output_prefix}_forgetting_summary.csv",
+        "member_forgetting": outdir / f"{output_prefix}_member_forgetting_summary.csv",
+        "diversity": outdir / f"{output_prefix}_diversity_summary.csv",
+        "report": outdir / f"{output_prefix}_final_report.md",
     }
     existing = [path for path in paths.values() if path.exists()]
     if existing and not overwrite:
@@ -602,8 +606,14 @@ def build_final_report(
     outdir = full_root / "final_results" if outdir is None else Path(outdir)
     if tuple(member_ids) != EXPECTED_MEMBER_IDS:
         raise ValueError("This Ensemble3 report requires member IDs exactly [0, 1, 2].")
-    task_groups, _ = _load_task_groups(task_file)
-    paths = _prepare_outputs(outdir, overwrite=overwrite)
+    task_groups, task_metadata = _load_task_groups(task_file)
+    protocol_name = str(task_metadata["protocol"])
+    protocol_id, output_prefix = SUPPORTED_PROTOCOLS[protocol_name]
+    paths = _prepare_outputs(
+        outdir,
+        output_prefix=output_prefix,
+        overwrite=overwrite,
+    )
 
     artifacts: list[OfflineEnsembleArtifact] = []
     rows: list[dict[str, Any]] = []
@@ -673,6 +683,8 @@ def build_final_report(
         member_forgetting,
         diversity,
         shared_context=shared_context,
+        protocol_id=protocol_id,
+        protocol_name=protocol_name,
     )
 
     _atomic_write_csv(task_summary, paths["task_summary"])
@@ -688,7 +700,7 @@ def build_final_report(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Build an expanded P3 final report from existing ensemble/threshold/"
+            "Build an expanded P3/P4 final report from existing ensemble/threshold/"
             "forgetting artifacts; no training or inference is performed."
         )
     )
