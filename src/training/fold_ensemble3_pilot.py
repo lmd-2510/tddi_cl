@@ -210,7 +210,7 @@ def _load_locked_config(
     weight_alignment = value["training"].get("weight_alignment")
     if weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
         raise ValueError("Unsupported classifier weight-alignment policy.")
-    if value["training"].get("loss_variant") not in {"baseline", "er", "hybrid"}:
+    if value["training"].get("loss_variant") not in {"baseline", "er", "hybrid", "hybrid_distill"}:
         raise ValueError("Unsupported replay loss variant.")
     configured_epochs = value["training"].get("epochs")
     if fold_policy == "stratified_fraction_rotating_current_v2":

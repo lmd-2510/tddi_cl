@@ -121,7 +121,7 @@ def validate_fold_options(args):
         raise ValueError(f"Unsupported exemplar ranking policy: {args.exemplar_ranking_policy}.")
     if args.weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
         raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
-    if args.loss_variant not in {"baseline", "er", "hybrid"}:
+    if args.loss_variant not in {"baseline", "er", "hybrid", "hybrid_distill"}:
         raise ValueError(f"Unsupported replay loss variant: {args.loss_variant}.")
     if (args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY
             and args.preprocessing_policy != "task0_standard_frozen"):
@@ -348,6 +348,8 @@ def prepare_fold_run(args, *, engine, context=None):
         "loss_scope": (
             "focal_and_old_column_KL_T2_and_latent_MSE_on_all_current_plus_replay_draws"
             if args.loss_variant == "baseline" else
+            "focal_current_cross_entropy_replay_plus_old_column_KL_T2_and_latent_MSE"
+            if args.loss_variant == "hybrid_distill" else
             "cross_entropy_on_current_plus_replay_no_distillation"
             if args.loss_variant == "er" else
             "focal_current_cross_entropy_replay_no_distillation"
@@ -504,7 +506,7 @@ def run_fold_training(args, *, engine):
             activation=args.activation, norm=args.norm).to(device)
         teacher = (
             previous.to(device).eval().requires_grad_(False)
-            if previous is not None and args.loss_variant == "baseline"
+            if previous is not None and args.loss_variant in {"baseline", "hybrid_distill"}
             else None
         )
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -576,19 +578,19 @@ def run_fold_training(args, *, engine):
         best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         metrics = [{"task": task_id, "split": "validation", **m} for m in
                    _eval_groups(engine, model, val_inputs, validation.labels, seen_map, new_classes, criterion, device, args.batch_size)]
-        post_alignment_seen = next(row for row in metrics if row["group"] == "seen_all")
+        selected_seen_metrics = next(row for row in metrics if row["group"] == "seen_all")
         weight_alignment.update({
-            "selection_validation_macro_f1_before": best_validation_metrics["macro_f1"],
-            "selection_validation_balanced_accuracy_before": best_validation_metrics["balanced_accuracy"],
-            "validation_macro_f1_after": post_alignment_seen["macro_f1"],
-            "validation_balanced_accuracy_after": post_alignment_seen["balanced_accuracy"],
+            "selection_validation_macro_f1": best_validation_metrics["macro_f1"],
+            "selection_validation_balanced_accuracy": best_validation_metrics["balanced_accuracy"],
+            "validation_macro_f1": selected_seen_metrics["macro_f1"],
+            "validation_balanced_accuracy": selected_seen_metrics["balanced_accuracy"],
         })
         _publish_json(task_root / "weight_alignment.json", weight_alignment)
         logger.log(
             f"task={task_id} weight_alignment={args.weight_alignment} "
             f"applied={weight_alignment['applied']} gamma={weight_alignment['gamma']} "
-            f"val_macro_f1_before={best_validation_metrics['macro_f1']:.6f} "
-            f"val_macro_f1_after={post_alignment_seen['macro_f1']:.6f}"
+            f"selection_val_macro_f1={best_validation_metrics['macro_f1']:.6f} "
+            f"validation_macro_f1={selected_seen_metrics['macro_f1']:.6f}"
         )
         # Model-only inference snapshot, deliberately not a resumable checkpoint.
         atomic_publish_fold_file(task_root / "best_model.pt", lambda handle:
@@ -644,10 +646,10 @@ def run_fold_training(args, *, engine):
         _publish_csv(task_root / "training_audit.csv", epoch_rows)
         summary = {"task_id": task_id, "head_size": len(seen_map), "seen_class_map": seen_map,
             "best_epoch": best_epoch, "best_validation_macro_f1": best_score, "epochs_trained": len(epoch_rows),
-            "selection_validation_macro_f1_before_weight_alignment": best_validation_metrics["macro_f1"],
-            "selection_validation_balanced_accuracy_before_weight_alignment": best_validation_metrics["balanced_accuracy"],
-            "validation_macro_f1_after_weight_alignment": post_alignment_seen["macro_f1"],
-            "validation_balanced_accuracy_after_weight_alignment": post_alignment_seen["balanced_accuracy"],
+            "selection_validation_macro_f1": best_validation_metrics["macro_f1"],
+            "selection_validation_balanced_accuracy": best_validation_metrics["balanced_accuracy"],
+            "validation_macro_f1": selected_seen_metrics["macro_f1"],
+            "validation_balanced_accuracy": selected_seen_metrics["balanced_accuracy"],
             "weight_alignment": weight_alignment,
             "memory_before": len(retained.labels), "memory_after": buffer.total_size,
             "runtime_seconds": time.perf_counter() - started,
@@ -683,13 +685,12 @@ def run_fold_training(args, *, engine):
         "requested_scope_complete": True, "validation_only": args.validation_only, "resumable": True})
     with (report_root / "run_summary.md").open("x", encoding="utf-8") as handle:
         handle.write(f"# Frozen-fold study\n\nPolicy: `{TRAINING_POLICY}`. Member {args.member_id}. "
-                     f"Preprocessing: `{args.preprocessing_policy}`. Weight alignment: "
-                     f"`{args.weight_alignment}`.\n\nCompleted tasks 0–{stop} of full "
+                     f"Preprocessing: `{args.preprocessing_policy}`.\n\nCompleted tasks 0–{stop} of full "
                      f"{resolved['task_protocol_id']} (8 tasks). "
                      f"Validation-only: {args.validation_only}. Resume via checkpoints/task_{stop}.pt; not a legacy checkpoint.\n\n")
         for s in task_summaries:
             handle.write(f"- Task {s['task_id']}: head {s['head_size']}, best epoch {s['best_epoch']}, "
-                         f"selection validation Macro-F1 {s['best_validation_macro_f1']:.6f}, "
-                         f"post-WA validation Macro-F1 {s['validation_macro_f1_after_weight_alignment']:.6f}.\n")
+                         f"selection validation Macro-F1 {s['selection_validation_macro_f1']:.6f}, "
+                         f"validation Macro-F1 {s['validation_macro_f1']:.6f}.\n")
     logger.log(f"Requested execution scope complete; report={report_root}; no preprocessing winner selected.")
     return task_summaries

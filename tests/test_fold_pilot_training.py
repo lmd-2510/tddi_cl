@@ -150,6 +150,37 @@ def test_ab_two_task_full_protocol_alignment_and_losses(data, monkeypatch, tiny)
     assert (roots[-1] / "run_summary.json").read_bytes() == before
 
 
+def test_hybrid_distill_activates_both_distillation_losses(data, monkeypatch, tiny):
+    command = cli(
+        data,
+        suffix="_hybrid_distill",
+        extra=["--loss-variant", "hybrid_distill"],
+    )
+    monkeypatch.setattr(sys, "argv", command)
+    engine.main()
+
+    root = data["root"] / "run_raw_identity_hybrid_distill"
+    losses = pd.read_csv(root / "training_audit.csv")
+    task0 = losses[losses.task == 0]
+    task1 = losses[losses.task == 1]
+    assert (task0.logit_distillation_loss == 0).all()
+    assert (task0.feature_distillation_loss == 0).all()
+    assert (task1.logit_distillation_loss > 0).any()
+    assert (task1.feature_distillation_loss > 0).any()
+    np.testing.assert_allclose(
+        losses.total_loss,
+        losses.classification_loss
+        + losses.scaled_logit_distillation_loss
+        + losses.scaled_feature_distillation_loss,
+        rtol=1e-6,
+    )
+    resolved = json.loads((root / "run_config.json").read_text())["resolved"]
+    assert resolved["loss_variant"] == "hybrid_distill"
+    assert resolved["loss_scope"] == (
+        "focal_current_cross_entropy_replay_plus_old_column_KL_T2_and_latent_MSE"
+    )
+
+
 def test_fold_training_exports_assignment_bound_validation_predictions(data, monkeypatch, tiny):
     command = cli(
         data, suffix="_predictions",

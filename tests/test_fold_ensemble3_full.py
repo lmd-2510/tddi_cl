@@ -22,6 +22,7 @@ REPLAY12P5_CONFIG = Path(
 )
 P4_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0.json")
 P4_WA_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0_wa.json")
+P3_HYBRID_DISTILL_CONFIG = Path("configs/p3_hybrid_distill_full8.json")
 
 
 def _arg(command: Sequence[str], name: str) -> str:
@@ -120,6 +121,30 @@ def test_baseline25_uses_separate_namespace_and_keeps_original_sampler(
     for member in plan.members:
         assert _arg(member.command, "--epochs") == "25"
         assert _arg(member.command, "--fold-replay-policy") == "stratified_fraction_v1"
+
+
+def test_p3_hybrid_distill_config_enables_requested_loss_and_separate_output(
+    tmp_path: Path,
+) -> None:
+    config = load_full_config(
+        P3_HYBRID_DISTILL_CONFIG,
+        overrides={"output_root": tmp_path / "hybrid_distill"},
+    )
+    plan = shared.build_pilot_plan(
+        config,
+        member_ids=[0],
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+
+    assert config["training"]["loss_variant"] == "hybrid_distill"
+    assert config["training"]["distill_alpha"] == 1.0
+    assert config["training"]["feature_distill_weight"] == 0.5
+    assert Path(config["output_root"]).name == "hybrid_distill"
+    assert plan.members[0].command is not None
+    assert _arg(plan.members[0].command, "--loss-variant") == "hybrid_distill"
+    assert plan.members[1].command is None
+    assert plan.members[2].command is None
 
 
 def test_p4_config_changes_only_protocol_preprocessing_namespace_and_threshold(

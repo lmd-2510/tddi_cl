@@ -211,12 +211,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
     parser.add_argument(
         "--loss-variant",
-        choices=["baseline", "er", "hybrid"],
+        choices=["baseline", "er", "hybrid", "hybrid_distill"],
         default="baseline",
         help=(
             "Frozen-fold replay loss: baseline keeps Focal+distillation; "
             "er uses Cross-Entropy on current+replay; hybrid uses Focal on "
-            "current and Cross-Entropy on replay, without distillation."
+            "current and Cross-Entropy on replay, without distillation; "
+            "hybrid_distill keeps that split and adds logit/feature distillation."
         ),
     )
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
@@ -1288,7 +1289,7 @@ def train_one_epoch(
 ) -> float | EpochLossComponents:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
-    if loss_variant not in {"baseline", "er", "hybrid"}:
+    if loss_variant not in {"baseline", "er", "hybrid", "hybrid_distill"}:
         raise ValueError(f"Unsupported loss_variant: {loss_variant!r}")
     model.train()
     total_loss = 0.0
@@ -1319,14 +1320,14 @@ def train_one_epoch(
             labels,
             criterion,
             include_latent=(
-                loss_variant == "baseline"
+                loss_variant in {"baseline", "hybrid_distill"}
                 and teacher_model is not None
                 and bool(student_old_indices)
             ),
         )
         if loss_variant == "er":
             classification_loss = F.cross_entropy(logits, labels)
-        elif loss_variant == "hybrid" and student_old_indices:
+        elif loss_variant in {"hybrid", "hybrid_distill"} and student_old_indices:
             old_index_tensor = torch.as_tensor(student_old_indices, device=labels.device)
             replay_mask = torch.isin(labels, old_index_tensor)
             current_mask = ~replay_mask
@@ -1342,7 +1343,7 @@ def train_one_epoch(
             if bool(replay_mask.any()):
                 terms.append(ce_values[replay_mask])
             classification_loss = torch.cat(terms).mean()
-        elif loss_variant == "hybrid":
+        elif loss_variant in {"hybrid", "hybrid_distill"}:
             classification_loss = _baseline_classification_loss
         else:
             classification_loss = _baseline_classification_loss
@@ -1350,7 +1351,7 @@ def train_one_epoch(
         distill_loss = None
         feature_distill_loss = None
 
-        if loss_variant == "baseline" and teacher_model is not None and student_old_indices:
+        if loss_variant in {"baseline", "hybrid_distill"} and teacher_model is not None and student_old_indices:
             with torch.no_grad():
                 teacher_logits, teacher_features = teacher_model.forward_with_latent(features)
             if teacher_logits.shape[1] != len(student_old_indices):
