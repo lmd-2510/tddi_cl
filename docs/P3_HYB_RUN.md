@@ -11,9 +11,14 @@ On the GPU server, from the repository root:
 ```bash
 conda activate ai_env
 
-# If assets are timestamped, set these once to the real locations.
-export P3_FOLD_ROOT="$PWD/outputs/fold_preparation_seed42_YYYYMMDD_HHMMSS/folds"
-export P3_PREP_ROOT="$PWD/study_assets/preprocessing_ab_seed0_fold42"
+# The script auto-discovers a unique fold/preprocessing root. Do not type a
+# placeholder timestamp. Only set these variables when more than one candidate
+# exists, using the exact paths printed by find.
+unset P3_FOLD_ROOT P3_PREP_ROOT
+
+# Optional explicit form:
+# export P3_FOLD_ROOT="$PWD/outputs/<real-fold-preparation-dir>"
+# export P3_PREP_ROOT="$PWD/study_assets/<real-p3-preprocessing-dir>"
 
 bash scripts/run_p3_hyb.sh check
 bash scripts/run_p3_hyb.sh dry-run

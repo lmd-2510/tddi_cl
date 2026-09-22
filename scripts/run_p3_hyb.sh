@@ -60,6 +60,8 @@ check() {
   done
   for m in 0 1 2; do [[ -s "$PREP_ROOT/member_${m}/B/fold_preprocessing.json" ]] || die "Missing preprocessing member $m"; done
   [[ "$(sha256sum "$TASK" | awk '{print $1}')" == "0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79" ]] || die "P3 task hash mismatch"
+  echo "[OK] fold root: $FOLD_ROOT"
+  echo "[OK] preprocessing root: $PREP_ROOT"
   echo "[OK] P3 Hybrid inputs; buffer=4% (27778 slots); member budgets=9260/9259/9259"
 }
 
