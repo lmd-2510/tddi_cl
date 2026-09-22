@@ -219,9 +219,10 @@ Các metric chính gồm Accuracy, Macro-F1, Weighted F1 và forgetting.
 Mean metric qua tám training stage chỉ mô tả trajectory, không được gọi là final model
 performance.
 
-Config chính dùng stratified 3-fold: threshold được chọn từ prediction OOF, dùng
+Config threshold chính thức duy nhất dùng stratified 3-fold: chọn threshold trên
+prediction OOF bằng Macro-F1 cao nhất với coverage tối thiểu 50%, dùng
 normalized-entropy confidence, đóng băng trước khi áp dụng lên test và luôn báo cáo
-coverage. Các config threshold còn lại nằm trực tiếp trong `configs/`.
+coverage. Không còn policy threshold Accuracy/Balanced Accuracy riêng.
 
 Ba ensemble member không được dùng thay cho nhiều experiment seed. Muốn báo cáo
 `mean ± sample standard deviation` qua năm seed, cần chạy đầy đủ experiment seed 0–4,

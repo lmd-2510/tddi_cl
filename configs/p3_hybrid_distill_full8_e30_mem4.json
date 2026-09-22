@@ -71,7 +71,7 @@
     "export_member_predictions": ["validation", "test"]
   },
   "evaluation": {
-    "threshold_config": "configs/eval_tddi_p3_ensemble_entropy_balanced_accuracy_threshold.json",
+    "threshold_config": "configs/eval_tddi_p3_ensemble_entropy_threshold.json",
     "ensemble_namespace": "offline_evaluation"
   },
   "device": "cuda",

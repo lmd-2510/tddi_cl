@@ -91,7 +91,7 @@ def test_replay12p5_full_config_selects_rotating_current_and_balanced_threshold(
     assert config["training"]["epochs"] == 30
     assert config["training"]["patience"] == 5
     assert config["evaluation"]["threshold_config"].endswith(
-        "eval_tddi_p3_ensemble_entropy_balanced_accuracy_threshold.json"
+        "eval_tddi_p3_ensemble_entropy_threshold.json"
     )
     for member in plan.members:
         assert _arg(member.command, "--fold-replay-policy") == (
@@ -116,7 +116,7 @@ def test_baseline25_uses_separate_namespace_and_keeps_original_sampler(
     assert config["training"]["patience"] == 5
     assert config["training"]["fold_replay_policy"] == "stratified_fraction_v1"
     assert config["evaluation"]["threshold_config"].endswith(
-        "eval_tddi_p3_ensemble_entropy_balanced_accuracy_threshold.json"
+        "eval_tddi_p3_ensemble_entropy_threshold.json"
     )
     for member in plan.members:
         assert _arg(member.command, "--epochs") == "25"
@@ -172,7 +172,7 @@ def test_p4_config_changes_only_protocol_preprocessing_namespace_and_threshold(
     assert p4["training"]["epochs"] == 20
     assert "preprocessing_p4_seed0_fold42" in p4["preprocessing"]["artifact_template"]
     assert p4["evaluation"]["threshold_config"].endswith(
-        "eval_tddi_p4_ensemble_entropy_balanced_accuracy_threshold.json"
+        "eval_tddi_p3_ensemble_entropy_threshold.json"
     )
     for member in plan.members:
         assert member.command is not None

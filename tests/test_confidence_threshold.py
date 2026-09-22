@@ -213,7 +213,7 @@ def test_selection_uses_predeclared_grid_and_records_required_metadata(tmp_path:
     assert payload["confidence_score"] == "entropy_confidence"
     assert payload["probability_source"] == "raw"
     assert payload["selection_rule"]["name"] == "max_macro_f1_subject_to_min_coverage"
-    assert payload["selection_status"] == "legacy_selected"
+    assert payload["selection_status"] == "macro_f1_selected"
     assert payload["target_met"] is False
     assert payload["selected_threshold"] == 0.5
     assert payload["validation_metrics"] == {
@@ -241,7 +241,7 @@ def test_legacy_config_defaults_to_entropy_confidence(tmp_path: Path) -> None:
     assert config.probability_source == "raw"
 
 
-def test_full_p3_primary_config_matches_paper_threshold_rule() -> None:
+def test_full_p3_primary_config_matches_macro_f1_threshold_rule() -> None:
     primary_path = Path(
         "configs/eval_tddi_p3_ensemble_entropy_threshold.json"
     )
@@ -250,9 +250,9 @@ def test_full_p3_primary_config_matches_paper_threshold_rule() -> None:
     assert primary.confidence_score == "entropy_confidence"
     assert primary.probability_source == "raw"
     assert primary.selection_source == "oof"
-    assert primary.selection_rule == "smallest_threshold_meeting_target_accuracy"
-    assert primary.target_accuracy == 0.95
-    assert primary.fallback_minimum_coverage == 0.5
+    assert primary.selection_rule == "max_macro_f1_subject_to_min_coverage"
+    assert primary.minimum_coverage == 0.5
+    assert primary.target_accuracy is None
     assert primary.low_threshold == 0.5
     assert primary.candidate_grid == tuple(value / 100 for value in range(50, 100))
 

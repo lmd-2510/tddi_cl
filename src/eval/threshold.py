@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paper-style entropy threshold selection from OOF or seeded validation."""
+"""OOF entropy threshold selection with Macro-F1 as the official objective."""
 
 from __future__ import annotations
 
@@ -33,12 +33,15 @@ LEGACY_FROZEN_THRESHOLD_SCHEMA_VERSIONS = (1, 2, 3)
 FROZEN_THRESHOLD_KIND = "ddi_cil_frozen_confidence_threshold"
 THRESHOLD_REPORT_SCHEMA_VERSION = 3
 THRESHOLD_REPORT_KIND = "ddi_cil_confidence_threshold_report"
+MACRO_F1_SELECTION_RULE = "max_macro_f1_subject_to_min_coverage"
+# Historical names remain importable so old artifact readers do not crash.  The
+# repository's only official config uses MACRO_F1_SELECTION_RULE.
 PAPER_SELECTION_RULE = "smallest_threshold_meeting_target_accuracy"
-LEGACY_SELECTION_RULE = "max_macro_f1_subject_to_min_coverage"
+LEGACY_SELECTION_RULE = MACRO_F1_SELECTION_RULE
 BALANCED_ACCURACY_SELECTION_RULE = "max_balanced_accuracy_subject_to_min_coverage"
 SUPPORTED_SELECTION_RULES = (
+    MACRO_F1_SELECTION_RULE,
     PAPER_SELECTION_RULE,
-    LEGACY_SELECTION_RULE,
     BALANCED_ACCURACY_SELECTION_RULE,
 )
 SUPPORTED_TIE_BREAKERS = ("accuracy", "coverage", "lower_threshold")
@@ -50,7 +53,8 @@ LEGACY_CONFIDENCE_SCORE = "entropy_confidence"
 SUPPORTED_PROBABILITY_SOURCES = ("raw", "calibrated")
 LEGACY_PROBABILITY_SOURCE = "raw"
 SELECTION_STATUSES = (
-    "target_met", "fallback", "no_selection", "legacy_selected", "balanced_selected"
+    "target_met", "fallback", "no_selection", "legacy_selected", "balanced_selected",
+    "macro_f1_selected",
 )
 DEFAULT_FALLBACK_MINIMUM_COVERAGE = 0.50
 
@@ -340,8 +344,7 @@ def select_confidence_threshold(
     selected: Mapping[str, Any] | None
     if config.selection_rule == PAPER_SELECTION_RULE:
         primary = [
-            candidate
-            for candidate in nonempty
+            candidate for candidate in nonempty
             if float(candidate["accuracy"]) >= float(config.target_accuracy)
         ]
         if primary:
@@ -368,14 +371,13 @@ def select_confidence_threshold(
                 selection_status = "no_selection"
     else:
         eligible = [
-            candidate
-            for candidate in nonempty
+            candidate for candidate in nonempty
             if candidate["coverage"] >= config.minimum_coverage
         ]
         if not eligible:
-            # Preserve legacy behavior for old max-Macro-F1 configs.
-            raise ValueError("No candidate threshold satisfies the configured selection target.")
-        if config.selection_rule == BALANCED_ACCURACY_SELECTION_RULE:
+            selected = None
+            selection_status = "no_selection"
+        elif config.selection_rule == BALANCED_ACCURACY_SELECTION_RULE:
             selected = max(
                 eligible,
                 key=lambda candidate: (
@@ -388,6 +390,8 @@ def select_confidence_threshold(
             )
             selection_status = "balanced_selected"
         else:
+            # Official policy: maximize Macro-F1, then accuracy, coverage and
+            # finally choose the lower threshold deterministically.
             selected = max(
                 eligible,
                 key=lambda candidate: (
@@ -397,6 +401,7 @@ def select_confidence_threshold(
                     -float(candidate["threshold"]),
                 ),
             )
+            selection_status = "macro_f1_selected"
     provenance = validation_ensemble.member_provenance
     shared = provenance[0] if provenance is not None else None
     return FrozenThresholdArtifact(

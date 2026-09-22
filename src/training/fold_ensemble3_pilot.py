@@ -31,9 +31,7 @@ from src.eval.ensemble_ue import (  # noqa: E402
 from src.eval.predictions import load_member_prediction_artifact  # noqa: E402
 from src.methods.weight_alignment import WEIGHT_ALIGNMENT_POLICIES  # noqa: E402
 from src.eval.threshold import (  # noqa: E402
-    BALANCED_ACCURACY_SELECTION_RULE,
-    BALANCED_ACCURACY_TIE_BREAKERS,
-    PAPER_SELECTION_RULE,
+    MACRO_F1_SELECTION_RULE,
     load_frozen_threshold_artifact,
     load_threshold_selection_config,
 )
@@ -316,19 +314,16 @@ def _load_locked_config(
         or threshold.probability_source != "raw"
         or threshold.candidate_grid != tuple(index / 100 for index in range(50, 100))
     )
-    paper_rule_ok = (
-        threshold.selection_rule == PAPER_SELECTION_RULE
-        and threshold.target_accuracy == 0.95
-        and threshold.fallback_minimum_coverage == 0.5
-    )
-    balanced_rule_ok = (
-        threshold.selection_rule == BALANCED_ACCURACY_SELECTION_RULE
+    macro_f1_rule_ok = (
+        threshold.selection_rule == MACRO_F1_SELECTION_RULE
         and threshold.minimum_coverage == 0.5
-        and threshold.tie_breakers == BALANCED_ACCURACY_TIE_BREAKERS
+        and threshold.tie_breakers == ("accuracy", "coverage", "lower_threshold")
         and threshold.target_accuracy is None
     )
-    if threshold_common_ok or not (paper_rule_ok or balanced_rule_ok):
-        raise ValueError("Pilot threshold config does not match the approved OOF policy.")
+    if threshold_common_ok or not macro_f1_rule_ok:
+        raise ValueError(
+            "Fold ensemble threshold config must use the official OOF Macro-F1 policy."
+        )
 
     output_source = overrides.get("output_root") or value["output_root"]
     value["output_root"] = _resolve(output_source, root, "output_root")
