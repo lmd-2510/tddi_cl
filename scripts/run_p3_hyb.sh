@@ -76,7 +76,9 @@ run_member() {
       || die "Member 1 chưa hoàn tất task 7; chưa được chạy member 2"
   fi
   mkdir -p "$MONITOR"
-  local stamp="member_${member}_$(date -u +%Y%m%dT%H%M%SZ)" log="$MONITOR/$stamp"
+  local stamp log
+  stamp="member_${member}_$(date -u +%Y%m%dT%H%M%SZ)"
+  log="$MONITOR/$stamp"
   mkdir "$log"
   nohup env CUDA_VISIBLE_DEVICES="$GPU" PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     "$PYTHON_BIN" src/training/fold_ensemble3_full.py "${COMMON[@]}" --member-id "$member" --execute \
