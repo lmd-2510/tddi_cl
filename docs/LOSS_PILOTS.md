@@ -16,11 +16,13 @@ Trên máy GPU:
 
 ```bash
 conda activate ai_env
-python src/training/fold_ensemble3_pilot.py \
-  --config configs/pilot_er_p4_t01.json --member-id 0
-python src/training/fold_ensemble3_pilot.py \
-  --config configs/pilot_hybrid_p4_t01.json --member-id 0
+export FOLD_ROOT="$PWD/outputs/fold_preparation_seed42_20260916_230549/folds"
+export PREP_ROOT="$PWD/study_assets/preprocessing_p4_seed0_fold42_old"
 
+# Dry-run cả hai pilot, không tạo model:
+bash scripts/run_loss_pilots.sh dry-run
+
+# Chạy tuần tự ER rồi Hybrid:
 nohup env CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
   bash scripts/run_loss_pilots.sh --execute \
   > outputs/loss_pilots.nohup.log 2>&1 < /dev/null &

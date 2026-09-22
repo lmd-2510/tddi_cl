@@ -16,6 +16,19 @@ fi
 PYTHON_BIN="${PYTHON_BIN:-python}"
 export PYTHONUNBUFFERED=1
 
+# The fold/preprocessing artifacts are often timestamped on the GPU server.
+# Supply both roots to relocate inputs without changing the locked configs.
+OVERRIDES=()
+if [[ -n "${FOLD_ROOT:-}" || -n "${PREP_ROOT:-}" ]]; then
+  : "${FOLD_ROOT:?Set FOLD_ROOT to the directory containing fold_assignments.parquet and fold_manifest.json}"
+  : "${PREP_ROOT:?Set PREP_ROOT to the directory containing member_{0,1,2}/B/fold_preprocessing.json}"
+  OVERRIDES+=(
+    --fold-assignments "$FOLD_ROOT/fold_assignments.parquet"
+    --fold-manifest "$FOLD_ROOT/fold_manifest.json"
+    --preprocessing-root "$PREP_ROOT"
+  )
+fi
+
 CONFIGS=(
   "configs/pilot_er_p4_t01.json"
   "configs/pilot_hybrid_p4_t01.json"
@@ -29,9 +42,9 @@ for CONFIG in "${CONFIGS[@]}"; do
     --member-id 0
   )
   if [[ "$MODE" == "--execute" ]]; then
-    "${ARGS[@]}" --execute
+    "${ARGS[@]}" "${OVERRIDES[@]}" --execute
   else
-    "${ARGS[@]}"
+    "${ARGS[@]}" "${OVERRIDES[@]}"
   fi
 done
 
