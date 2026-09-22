@@ -209,6 +209,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--distill-alpha", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--loss-variant",
+        choices=["baseline", "er", "hybrid"],
+        default="baseline",
+        help=(
+            "Frozen-fold replay loss: baseline keeps Focal+distillation; "
+            "er uses Cross-Entropy on current+replay; hybrid uses Focal on "
+            "current and Cross-Entropy on replay, without distillation."
+        ),
+    )
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
     parser.add_argument(
         "--resume-ewc-checkpoint",
@@ -503,6 +513,7 @@ def build_replay_checkpoint_config(
         "distill_alpha": args.distill_alpha,
         "temperature": args.temperature,
         "feature_distill_weight": args.feature_distill_weight,
+        "loss_variant": args.loss_variant,
         "total_memory_budget": args.total_memory_budget,
         "replay_draws_per_epoch": args.replay_draws_per_epoch,
         "sampler_metadata": fixed_replay_seed_provenance(args),
@@ -1267,6 +1278,7 @@ def train_one_epoch(
     distill_alpha: float = 1.0,
     temperature: float = 2.0,
     feature_distill_weight: float = 0.5,
+    loss_variant: str = "baseline",
     fisher: dict[str, "torch.Tensor"] | None = None,
     theta_star: dict[str, "torch.Tensor"] | None = None,
     ewc_lambda: float = 0.0,
@@ -1276,6 +1288,8 @@ def train_one_epoch(
 ) -> float | EpochLossComponents:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
+    if loss_variant not in {"baseline", "er", "hybrid"}:
+        raise ValueError(f"Unsupported loss_variant: {loss_variant!r}")
     model.train()
     total_loss = 0.0
     total_classification_loss = 0.0
@@ -1299,18 +1313,44 @@ def train_one_epoch(
         features = features.to(device)
         labels = labels.to(device)
 
-        logits, student_features, classification_loss = classification_forward(
+        logits, student_features, _baseline_classification_loss = classification_forward(
             model,
             features,
             labels,
             criterion,
-            include_latent=teacher_model is not None and bool(student_old_indices),
+            include_latent=(
+                loss_variant == "baseline"
+                and teacher_model is not None
+                and bool(student_old_indices)
+            ),
         )
+        if loss_variant == "er":
+            classification_loss = F.cross_entropy(logits, labels)
+        elif loss_variant == "hybrid" and student_old_indices:
+            old_index_tensor = torch.as_tensor(student_old_indices, device=labels.device)
+            replay_mask = torch.isin(labels, old_index_tensor)
+            current_mask = ~replay_mask
+            log_probs = F.log_softmax(logits, dim=1)
+            target_log_probs = log_probs.gather(1, labels.unsqueeze(1)).squeeze(1)
+            target_probs = target_log_probs.exp()
+            gamma = float(getattr(criterion, "gamma", 1.0))
+            focal_values = -((1.0 - target_probs) ** gamma) * target_log_probs
+            ce_values = F.cross_entropy(logits, labels, reduction="none")
+            terms = []
+            if bool(current_mask.any()):
+                terms.append(focal_values[current_mask])
+            if bool(replay_mask.any()):
+                terms.append(ce_values[replay_mask])
+            classification_loss = torch.cat(terms).mean()
+        elif loss_variant == "hybrid":
+            classification_loss = _baseline_classification_loss
+        else:
+            classification_loss = _baseline_classification_loss
         loss = classification_loss
         distill_loss = None
         feature_distill_loss = None
 
-        if teacher_model is not None and student_old_indices:
+        if loss_variant == "baseline" and teacher_model is not None and student_old_indices:
             with torch.no_grad():
                 teacher_logits, teacher_features = teacher_model.forward_with_latent(features)
             if teacher_logits.shape[1] != len(student_old_indices):
@@ -2044,6 +2084,7 @@ def main() -> None:
         teacher_model = None
         if (
             args.method in DISTILL_METHODS
+            and args.loss_variant == "baseline"
             and previous_model is not None
             and previous_seen_raw_classes is not None
         ):
@@ -2103,6 +2144,7 @@ def main() -> None:
                 distill_alpha=args.distill_alpha,
                 temperature=args.temperature,
                 feature_distill_weight=args.feature_distill_weight,
+                loss_variant=args.loss_variant,
                 fisher=fisher_total if args.method == "ewc" else None,
                 theta_star=theta_star if args.method == "ewc" else None,
                 ewc_lambda=args.ewc_lambda if args.method == "ewc" else 0.0,

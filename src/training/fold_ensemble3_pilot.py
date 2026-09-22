@@ -189,9 +189,11 @@ def _load_locked_config(
         )
     _keys(value["inputs"], INPUT_KEYS, "inputs")
     _keys(value["preprocessing"], {"policy", "artifact_template"}, "preprocessing")
-    # Schema-v1 configs created before WA remain valid and mean no alignment.
+    # Schema-v1 configs created before WA/loss pilots remain valid.
     if isinstance(value.get("training"), dict) and "weight_alignment" not in value["training"]:
         value["training"]["weight_alignment"] = "none"
+    if isinstance(value.get("training"), dict) and "loss_variant" not in value["training"]:
+        value["training"]["loss_variant"] = "baseline"
     _keys(value["training"], {*TRAINING, "epochs", "patience"}, "training")
     _keys(value["evaluation"], EVALUATION_KEYS, "evaluation")
     if value["preprocessing"]["policy"] != "task0_standard_frozen":
@@ -208,6 +210,8 @@ def _load_locked_config(
     weight_alignment = value["training"].get("weight_alignment")
     if weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
         raise ValueError("Unsupported classifier weight-alignment policy.")
+    if value["training"].get("loss_variant") not in {"baseline", "er", "hybrid"}:
+        raise ValueError("Unsupported replay loss variant.")
     configured_epochs = value["training"].get("epochs")
     if fold_policy == "stratified_fraction_rotating_current_v2":
         expected_epochs = 30
@@ -221,6 +225,7 @@ def _load_locked_config(
         **TRAINING,
         "fold_replay_policy": fold_policy,
         "weight_alignment": weight_alignment,
+        "loss_variant": value["training"]["loss_variant"],
         "epochs": expected_epochs,
         "patience": 5,
     }

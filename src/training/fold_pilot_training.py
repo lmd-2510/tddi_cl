@@ -121,6 +121,8 @@ def validate_fold_options(args):
         raise ValueError(f"Unsupported exemplar ranking policy: {args.exemplar_ranking_policy}.")
     if args.weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
         raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
+    if args.loss_variant not in {"baseline", "er", "hybrid"}:
+        raise ValueError(f"Unsupported replay loss variant: {args.loss_variant}.")
     if (args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY
             and args.preprocessing_policy != "task0_standard_frozen"):
         raise ValueError("Pipeline-input exemplar ranking requires task0_standard_frozen preprocessing.")
@@ -342,7 +344,14 @@ def prepare_fold_run(args, *, engine, context=None):
         "drop_last": False, "optimizer": "AdamW_new_each_task", "scheduler": None,
         "classification_weight": 1.0, "logit_distillation_weight": args.distill_alpha,
         "feature_distillation_weight": args.feature_distill_weight, "temperature": args.temperature,
-        "loss_scope": "focal_and_old_column_KL_T2_and_latent_MSE_on_all_current_plus_replay_draws",
+        "loss_variant": args.loss_variant,
+        "loss_scope": (
+            "focal_and_old_column_KL_T2_and_latent_MSE_on_all_current_plus_replay_draws"
+            if args.loss_variant == "baseline" else
+            "cross_entropy_on_current_plus_replay_no_distillation"
+            if args.loss_variant == "er" else
+            "focal_current_cross_entropy_replay_no_distillation"
+        ),
         "weight_alignment": {
             "policy": args.weight_alignment,
             "timing": "after_best_epoch_before_evaluation_teacher_and_boundary_checkpoint",
@@ -368,7 +377,8 @@ def prepare_fold_run(args, *, engine, context=None):
     contract = {k: v for k, v in resolved.items() if k != "stop_after_task"}
     contract["hyperparameters"] = {k: getattr(args, k) for k in (
         "epochs", "patience", "lr", "weight_decay", "dropout", "activation", "norm", "focal_gamma",
-        "distill_alpha", "temperature", "feature_distill_weight", "weight_alignment")}
+        "distill_alpha", "temperature", "feature_distill_weight", "weight_alignment",
+        "loss_variant")}
     rotating_current = args.fold_replay_policy == ROTATING_CURRENT_POLICY
     contract["sampler"] = {
         "policy": ROTATING_CURRENT_SAMPLER_POLICY if rotating_current else SAMPLER_POLICY,
@@ -492,7 +502,11 @@ def run_fold_training(args, *, engine):
         model = engine.expand_model_for_seen_classes(previous, previous_map, seen_map,
             variant=args.variant, input_dim=len(columns), dropout=args.dropout,
             activation=args.activation, norm=args.norm).to(device)
-        teacher = previous.to(device).eval().requires_grad_(False) if previous is not None else None
+        teacher = (
+            previous.to(device).eval().requires_grad_(False)
+            if previous is not None and args.loss_variant == "baseline"
+            else None
+        )
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         criterion = engine.FocalLoss(args.focal_gamma)
         best_score, best_state, best_epoch, best_validation_metrics, stale = (
@@ -507,6 +521,7 @@ def run_fold_training(args, *, engine):
                 teacher_model=teacher, teacher_raw_classes=engine.ordered_raw_classes(previous_map),
                 current_seen_map=seen_map, distill_alpha=args.distill_alpha, temperature=args.temperature,
                 feature_distill_weight=args.feature_distill_weight, gradient_accumulation_steps=1024 // args.batch_size,
+                loss_variant=args.loss_variant,
                 return_loss_components=True)
             audit = sampler.last_audit
             expected_replay = (
