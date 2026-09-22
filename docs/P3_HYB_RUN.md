@@ -1,0 +1,45 @@
+# P3 Hybrid full run
+
+This run uses the original TDDI paper-size member, P3 `tail_to_head`, eight tasks,
+and `loss_variant=hybrid`. The replay buffer is 4% of the full development set:
+27,778 stored slots total, split as 9,260/9,259/9,259 across members 0/1/2.
+The separate `fraction=0.125` is replay exposure per training batch, not the
+buffer size.
+
+On the GPU server, from the repository root:
+
+```bash
+conda activate ai_env
+
+# If assets are timestamped, set these once to the real locations.
+export P3_FOLD_ROOT="$PWD/outputs/fold_preparation_seed42_YYYYMMDD_HHMMSS/folds"
+export P3_PREP_ROOT="$PWD/study_assets/preprocessing_ab_seed0_fold42"
+
+bash scripts/run_p3_hyb.sh check
+bash scripts/run_p3_hyb.sh dry-run
+bash scripts/run_p3_hyb.sh start 0
+```
+
+Follow or inspect member 0:
+
+```bash
+bash scripts/run_p3_hyb.sh status
+bash scripts/run_p3_hyb.sh follow
+```
+
+After member 0 is complete, run members sequentially:
+
+```bash
+bash scripts/run_p3_hyb.sh start 1
+bash scripts/run_p3_hyb.sh start 2
+```
+
+After all three members have task 7 checkpoints and prediction artifacts, run:
+
+```bash
+bash scripts/run_p3_hyb.sh evaluate
+```
+
+The script never starts two members concurrently. Existing complete members are
+skipped and an interrupted member is resumed from its valid task-boundary
+checkpoint. Outputs are isolated under `outputs/p3_hyb_full8_seed0`.
