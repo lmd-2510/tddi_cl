@@ -20,6 +20,11 @@ unset P3_FOLD_ROOT P3_PREP_ROOT
 # export P3_FOLD_ROOT="$PWD/outputs/<real-fold-preparation-dir>"
 # export P3_PREP_ROOT="$PWD/study_assets/<real-p3-preprocessing-dir>"
 
+# If P3 preprocessing does not exist yet, create it from the existing fold
+# preparation (assignments + manifest):
+# export P3_FOLD_ROOT="$PWD/outputs/<real-fold-preparation-dir>"
+# bash scripts/prepare_p3_assets.sh
+
 bash scripts/run_p3_hyb.sh check
 bash scripts/run_p3_hyb.sh dry-run
 bash scripts/run_p3_hyb.sh start 0
