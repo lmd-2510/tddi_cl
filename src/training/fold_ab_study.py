@@ -204,6 +204,9 @@ def member_command(config, member, *, python=sys.executable):
         "outdir": str(Path(config["output_root"]) / f"member_{member}")}
     args.update({k: v for k, v in config["training"].items() if k not in ("optimizer", "gradient_accumulation_steps")})
     args.update({k: v for k, v in config["model"].items() if k not in ("input_dim", "hidden_dims")})
+    if config.get("budget_policy") == "per_member_4_percent":
+        args["fold_member_budget"] = config["member_budgets"][str(member)]
+        args["fold_global_budget"] = config["global_slot_budget"]
     command = [str(python), str(PROJECT_ROOT / "src/training/train_cil.py")]
     for key, value in args.items():
         command.extend(["--" + key.replace("_", "-"), str(value)])

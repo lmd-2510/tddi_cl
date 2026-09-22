@@ -312,7 +312,16 @@ def prepare_fold_run(args, *, engine, context=None):
     prep = load_fold_preprocessing(args.fold_preprocessing, context=context, task_file=args.task_file,
         feature_columns=columns, member_id=args.member_id, validation_fold=args.member_id,
         policy=args.preprocessing_policy, experiment_seed=args.seed, expected_sha256=prep_hash)
-    budgets = four_percent_member_budgets(manifest["assignment_row_count"])
+    if args.fold_member_budget is None:
+        budgets = four_percent_member_budgets(manifest["assignment_row_count"])
+    else:
+        if args.fold_member_budget < 0:
+            raise ValueError("--fold-member-budget must be non-negative.")
+        if args.fold_global_budget is None:
+            raise ValueError("--fold-global-budget is required with --fold-member-budget.")
+        budgets = {member: int(args.fold_member_budget) for member in (0, 1, 2)}
+        if int(args.fold_global_budget) != sum(budgets.values()):
+            raise ValueError("Explicit frozen-fold global budget does not equal three member budgets.")
     buffer_kwargs = dict(context=context, task_file=args.task_file, feature_columns=columns,
         member_id=args.member_id, total_memory_budget=budgets[args.member_id], base_quota=10,
         experiment_seed=args.seed, ranking_policy=args.exemplar_ranking_policy,

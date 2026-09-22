@@ -141,11 +141,18 @@ def _load_locked_config(
 
     path, root = Path(path).resolve(), Path(project_root).resolve()
     value = json.loads(path.read_text(encoding="utf-8"))
+    # Configs created before the explicit budget-policy field remain valid and
+    # retain the historical meaning: 4% is the ensemble-wide slot budget,
+    # split across the three members.  New runs may explicitly request 4% per
+    # member without changing the old contract.
+    if isinstance(value, dict) and "budget_policy" not in value:
+        value["budget_policy"] = "ensemble_total_4_percent"
     _keys(
         value,
         {
             "schema_version", "kind", "phase", "experiment_seed", "fold_seed",
             "member_ids", "development_count", "global_slot_budget", "member_budgets",
+            "budget_policy",
             "protocol", "inputs", "preprocessing", "model", "training", "replay",
             "execution", "evaluation", "device", "output_root",
         },
@@ -163,12 +170,28 @@ def _load_locked_config(
         raise ValueError("Pilot member order must be exactly [0, 1, 2].")
     if type(value["development_count"]) is not int or value["development_count"] != 694455:
         raise ValueError("Pilot development_count must be the audited 694455 rows.")
-    budgets = {
-        str(key): amount
-        for key, amount in four_percent_member_budgets(value["development_count"]).items()
-    }
-    if value["member_budgets"] != budgets or value["global_slot_budget"] != sum(budgets.values()):
-        raise ValueError("Pilot budgets must be 9260/9259/9259 from the global 4% slot budget.")
+    budget_policy = value["budget_policy"]
+    if budget_policy == "ensemble_total_4_percent":
+        budgets = {
+            str(key): amount
+            for key, amount in four_percent_member_budgets(value["development_count"]).items()
+        }
+        expected_global_budget = sum(budgets.values())
+        budget_error = "Pilot budgets must be 9260/9259/9259 from the global 4% slot budget."
+    elif budget_policy == "per_member_4_percent":
+        # Each member owns an independent 4% development-set buffer.  The
+        # physical total across the ensemble is therefore 12% (three copies
+        # of the 4% member budget), by design.
+        per_member = 4 * value["development_count"] // 100
+        budgets = {str(member): per_member for member in MEMBER_IDS}
+        expected_global_budget = sum(budgets.values())
+        budget_error = "Per-member 4% policy requires 27778 slots for each member (83334 total)."
+    else:
+        raise ValueError(
+            "budget_policy must be ensemble_total_4_percent or per_member_4_percent."
+        )
+    if value["member_budgets"] != budgets or value["global_slot_budget"] != expected_global_budget:
+        raise ValueError(budget_error)
 
     protocol = _keys(
         value["protocol"],
@@ -215,9 +238,9 @@ def _load_locked_config(
     configured_epochs = value["training"].get("epochs")
     if fold_policy == "stratified_fraction_rotating_current_v2":
         expected_epochs = 30
-    elif expected_phase == "full" and configured_epochs in (20, 25):
-        # 20 is the immutable historical baseline; 25 is its new convergence
-        # extension in a separate output namespace.
+    elif expected_phase == "full" and configured_epochs in (20, 25, 30):
+        # 20 is the immutable historical baseline; 25/30 are convergence
+        # extensions in separate output namespaces.
         expected_epochs = configured_epochs
     else:
         expected_epochs = 20

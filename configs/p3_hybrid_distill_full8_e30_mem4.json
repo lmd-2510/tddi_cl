@@ -1,18 +1,19 @@
 {
   "schema_version": 1,
-  "kind": "tddi_frozen_fold_ensemble3_pilot",
-  "phase": "pilot",
+  "kind": "tddi_frozen_fold_ensemble3_full",
+  "phase": "full",
   "experiment_seed": 0,
   "fold_seed": 42,
   "member_ids": [0, 1, 2],
   "development_count": 694455,
-  "global_slot_budget": 27778,
-  "member_budgets": {"0": 9260, "1": 9259, "2": 9259},
+  "budget_policy": "per_member_4_percent",
+  "global_slot_budget": 83334,
+  "member_budgets": {"0": 27778, "1": 27778, "2": 27778},
   "protocol": {
-    "id": "P4",
-    "name": "constrained_mass_balanced",
-    "task_file": "study_assets/task_protocols/constrained_mass_balanced_seed0_tasks.json",
-    "sha256": "9d22af8618fe03c40b92e2aabbab8b68a89de83bc0de4f51e24932951cf298f4",
+    "id": "P3",
+    "name": "tail_to_head",
+    "task_file": "study_assets/task_protocols/tail_to_head_tasks.json",
+    "sha256": "0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79",
     "layout": [38, 20, 20, 20, 20, 20, 20, 20],
     "class_count": 178
   },
@@ -26,7 +27,7 @@
   },
   "preprocessing": {
     "policy": "task0_standard_frozen",
-    "artifact_template": "study_assets/preprocessing_p4_seed0_fold42/member_{member_id}/B/fold_preprocessing.json"
+    "artifact_template": "study_assets/preprocessing_p3_seed0_fold42/member_{member_id}/B/fold_preprocessing.json"
   },
   "model": {
     "variant": "tddi_paper_member",
@@ -43,16 +44,16 @@
     "batch_size": 64,
     "effective_batch_size": 1024,
     "gradient_accumulation_steps": 16,
+    "epochs": 30,
+    "patience": 5,
     "lr": 0.001,
     "weight_decay": 0.0001,
     "focal_gamma": 1.0,
     "distill_alpha": 1.0,
     "temperature": 2.0,
     "feature_distill_weight": 0.5,
-    "loss_variant": "hybrid",
-    "weight_alignment": "none",
-    "epochs": 20,
-    "patience": 5
+    "loss_variant": "hybrid_distill",
+    "weight_alignment": "none"
   },
   "replay": {
     "buffer_policy": "fold_min_quota_sqrt_capacity_v1",
@@ -63,16 +64,16 @@
     "replay_starts_at_task": 1
   },
   "execution": {
-    "stop_after_task": 1,
+    "stop_after_task": 7,
     "validation_only": false,
     "sequential": true,
     "checkpoint_resume_policy": "immutable_frozen_fold_task_boundary_v1",
     "export_member_predictions": ["validation", "test"]
   },
   "evaluation": {
-    "threshold_config": "configs/eval_tddi_p4_ensemble_entropy_balanced_accuracy_threshold.json",
+    "threshold_config": "configs/eval_tddi_p3_ensemble_entropy_balanced_accuracy_threshold.json",
     "ensemble_namespace": "offline_evaluation"
   },
   "device": "cuda",
-  "output_root": "outputs/loss_pilot_hybrid_p4_t01"
+  "output_root": "outputs/p3_hybrid_distill_full8_e30_mem4_seed0"
 }

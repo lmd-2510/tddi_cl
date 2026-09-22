@@ -271,6 +271,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fold-manifest", type=Path)
     parser.add_argument("--fold-preprocessing", type=Path,
                         help="Frozen artifact from Prompt 6; the trainer never fits it.")
+    parser.add_argument("--fold-member-budget", type=int, default=None,
+                        help="Explicit frozen-fold replay capacity for this member.")
+    parser.add_argument("--fold-global-budget", type=int, default=None,
+                        help="Total planned frozen-fold budget recorded in the contract.")
     parser.add_argument("--resume-fold-checkpoint", type=Path,
                         help="Resume only the frozen-fold policy at a completed task boundary.")
     parser.add_argument("--preprocessing-policy", choices=["raw_identity", "task0_standard_frozen"])
