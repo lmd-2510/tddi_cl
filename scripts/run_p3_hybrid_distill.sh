@@ -61,8 +61,8 @@ check() {
       "$FOLD_ROOT/fold_manifest.json" "$TASK" "$THRESHOLD"; do
     [[ -s "$f" ]] || die "Missing: $f"
   done
-  for member in 0 1 2; do
-    [[ -s "$PREP_ROOT/member_${member}/B/fold_preprocessing.json" ]] || die "Missing preprocessing member $member"
+  for prep_member in 0 1 2; do
+    [[ -s "$PREP_ROOT/member_${prep_member}/B/fold_preprocessing.json" ]] || die "Missing preprocessing member $prep_member"
   done
   [[ "$(sha256sum "$TASK" | awk '{print $1}')" == "0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79" ]] || die "P3 task hash mismatch"
   echo "[OK] P3 Hybrid+distillation; member=0; total buffer=4% (27778); member budget=9260"
