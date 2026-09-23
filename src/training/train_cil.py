@@ -211,13 +211,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
     parser.add_argument(
         "--loss-variant",
-        choices=["baseline", "er", "hybrid", "hybrid_distill"],
+        choices=["baseline", "er", "hybrid", "hybrid_distill", "hybrid_distill_replay_only"],
         default="baseline",
         help=(
             "Frozen-fold replay loss: baseline keeps Focal+distillation; "
             "er uses Cross-Entropy on current+replay; hybrid uses Focal on "
             "current and Cross-Entropy on replay, without distillation; "
-            "hybrid_distill keeps that split and adds logit/feature distillation."
+            "hybrid_distill keeps that split and adds logit/feature distillation; "
+            "hybrid_distill_replay_only applies distillation only to replay examples."
         ),
     )
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
@@ -1301,7 +1302,7 @@ def train_one_epoch(
 ) -> float | EpochLossComponents:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
-    if loss_variant not in {"baseline", "er", "hybrid", "hybrid_distill"}:
+    if loss_variant not in {"baseline", "er", "hybrid", "hybrid_distill", "hybrid_distill_replay_only"}:
         raise ValueError(f"Unsupported loss_variant: {loss_variant!r}")
     model.train()
     total_loss = 0.0
@@ -1310,6 +1311,7 @@ def train_one_epoch(
     total_scaled_ewc_penalty = 0.0
     total_logit_distillation = 0.0
     total_feature_distillation = 0.0
+    total_distill_examples = 0
     total_examples = 0
 
     student_old_indices: list[int] = []
@@ -1332,14 +1334,14 @@ def train_one_epoch(
             labels,
             criterion,
             include_latent=(
-                loss_variant in {"baseline", "hybrid_distill"}
+                loss_variant in {"baseline", "hybrid_distill", "hybrid_distill_replay_only"}
                 and teacher_model is not None
                 and bool(student_old_indices)
             ),
         )
         if loss_variant == "er":
             classification_loss = F.cross_entropy(logits, labels)
-        elif loss_variant in {"hybrid", "hybrid_distill"} and student_old_indices:
+        elif loss_variant in {"hybrid", "hybrid_distill", "hybrid_distill_replay_only"} and student_old_indices:
             old_index_tensor = torch.as_tensor(student_old_indices, device=labels.device)
             replay_mask = torch.isin(labels, old_index_tensor)
             current_mask = ~replay_mask
@@ -1355,7 +1357,7 @@ def train_one_epoch(
             if bool(replay_mask.any()):
                 terms.append(ce_values[replay_mask])
             classification_loss = torch.cat(terms).mean()
-        elif loss_variant in {"hybrid", "hybrid_distill"}:
+        elif loss_variant in {"hybrid", "hybrid_distill", "hybrid_distill_replay_only"}:
             classification_loss = _baseline_classification_loss
         else:
             classification_loss = _baseline_classification_loss
@@ -1363,23 +1365,36 @@ def train_one_epoch(
         distill_loss = None
         feature_distill_loss = None
 
-        if loss_variant in {"baseline", "hybrid_distill"} and teacher_model is not None and student_old_indices:
+        if loss_variant in {"baseline", "hybrid_distill", "hybrid_distill_replay_only"} and teacher_model is not None and student_old_indices:
+            replay_mask = None
+            if loss_variant == "hybrid_distill_replay_only":
+                old_index_tensor = torch.as_tensor(student_old_indices, device=labels.device)
+                replay_mask = torch.isin(labels, old_index_tensor)
+            has_distill_examples = replay_mask is None or bool(replay_mask.any())
+        else:
+            replay_mask = None
+            has_distill_examples = False
+
+        if has_distill_examples:
+            distill_features = features if replay_mask is None else features[replay_mask]
+            distill_student_logits = logits if replay_mask is None else logits[replay_mask]
+            distill_student_features = student_features if replay_mask is None else student_features[replay_mask]
             with torch.no_grad():
-                teacher_logits, teacher_features = teacher_model.forward_with_latent(features)
+                teacher_logits, teacher_features = teacher_model.forward_with_latent(distill_features)
             if teacher_logits.shape[1] != len(student_old_indices):
                 raise ValueError(
                     "Teacher logit width does not match the recorded teacher class order: "
                     f"{teacher_logits.shape[1]} != {len(student_old_indices)}"
                 )
-            student_old_logits = logits[:, student_old_indices]
+            student_old_logits = distill_student_logits[:, student_old_indices]
             distill_loss = F.kl_div(
                 F.log_softmax(student_old_logits / temperature, dim=1),
                 F.softmax(teacher_logits / temperature, dim=1),
                 reduction="batchmean",
             ) * (temperature ** 2)
-            if student_features is None:
-                student_features = model.encode(features)
-            feature_distill_loss = F.mse_loss(student_features, teacher_features)
+            if distill_student_features is None:
+                distill_student_features = model.encode(distill_features)
+            feature_distill_loss = F.mse_loss(distill_student_features, teacher_features)
             loss = loss + distill_alpha * distill_loss + feature_distill_weight * feature_distill_loss
 
         raw_ewc_penalty = torch.zeros((), device=loss.device)
@@ -1424,8 +1439,10 @@ def train_one_epoch(
         total_raw_ewc_penalty += float(raw_ewc_penalty.detach().item()) * batch_size
         total_scaled_ewc_penalty += float(scaled_ewc_penalty.detach().item()) * batch_size
         if distill_loss is not None:
-            total_logit_distillation += float(distill_loss.detach().item()) * batch_size
-            total_feature_distillation += float(feature_distill_loss.detach().item()) * batch_size
+            distill_count = batch_size if replay_mask is None else int(replay_mask.sum().item())
+            total_logit_distillation += float(distill_loss.detach().item()) * distill_count
+            total_feature_distillation += float(feature_distill_loss.detach().item()) * distill_count
+            total_distill_examples += distill_count
         total_examples += batch_size
 
     denominator = max(total_examples, 1)
@@ -1434,10 +1451,10 @@ def train_one_epoch(
         raw_ewc_penalty=total_raw_ewc_penalty / denominator,
         scaled_ewc_penalty=total_scaled_ewc_penalty / denominator,
         total_loss=total_loss / denominator,
-        logit_distillation_loss=total_logit_distillation / denominator,
-        feature_distillation_loss=total_feature_distillation / denominator,
-        scaled_logit_distillation_loss=distill_alpha * total_logit_distillation / denominator,
-        scaled_feature_distillation_loss=feature_distill_weight * total_feature_distillation / denominator,
+        logit_distillation_loss=total_logit_distillation / max(total_distill_examples, 1),
+        feature_distillation_loss=total_feature_distillation / max(total_distill_examples, 1),
+        scaled_logit_distillation_loss=distill_alpha * total_logit_distillation / max(total_distill_examples, 1),
+        scaled_feature_distillation_loss=feature_distill_weight * total_feature_distillation / max(total_distill_examples, 1),
         optimizer_steps=optimizer_step,
         examples_seen=total_examples,
         tail_effective_batch=group_sample_count if total_examples else 0,

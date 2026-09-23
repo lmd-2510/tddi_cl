@@ -121,7 +121,9 @@ def validate_fold_options(args):
         raise ValueError(f"Unsupported exemplar ranking policy: {args.exemplar_ranking_policy}.")
     if args.weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
         raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
-    if args.loss_variant not in {"baseline", "er", "hybrid", "hybrid_distill"}:
+    if args.loss_variant not in {
+        "baseline", "er", "hybrid", "hybrid_distill", "hybrid_distill_replay_only"
+    }:
         raise ValueError(f"Unsupported replay loss variant: {args.loss_variant}.")
     if not math.isfinite(args.replay_fraction) or not 0.0 <= args.replay_fraction < 1.0:
         raise ValueError("replay_fraction must be finite and in [0,1).")
@@ -363,6 +365,8 @@ def prepare_fold_run(args, *, engine, context=None):
             if args.loss_variant == "baseline" else
             "focal_current_cross_entropy_replay_plus_old_column_KL_T2_and_latent_MSE"
             if args.loss_variant == "hybrid_distill" else
+            "focal_current_cross_entropy_replay_plus_old_column_KL_T2_and_latent_MSE_on_replay_samples_only"
+            if args.loss_variant == "hybrid_distill_replay_only" else
             "cross_entropy_on_current_plus_replay_no_distillation"
             if args.loss_variant == "er" else
             "focal_current_cross_entropy_replay_no_distillation"
@@ -521,7 +525,9 @@ def run_fold_training(args, *, engine):
             activation=args.activation, norm=args.norm).to(device)
         teacher = (
             previous.to(device).eval().requires_grad_(False)
-            if previous is not None and args.loss_variant in {"baseline", "hybrid_distill"}
+            if previous is not None and args.loss_variant in {
+                "baseline", "hybrid_distill", "hybrid_distill_replay_only"
+            }
             else None
         )
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
