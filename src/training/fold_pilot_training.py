@@ -123,6 +123,10 @@ def validate_fold_options(args):
         raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
     if args.loss_variant not in {"baseline", "er", "hybrid", "hybrid_distill"}:
         raise ValueError(f"Unsupported replay loss variant: {args.loss_variant}.")
+    if not math.isfinite(args.replay_fraction) or not 0.0 <= args.replay_fraction < 1.0:
+        raise ValueError("replay_fraction must be finite and in [0,1).")
+    if args.replay_repeat_cap <= 0:
+        raise ValueError("replay_repeat_cap must be positive.")
     if (args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY
             and args.preprocessing_policy != "task0_standard_frozen"):
         raise ValueError("Pipeline-input exemplar ranking requires task0_standard_frozen preprocessing.")
@@ -395,8 +399,8 @@ def prepare_fold_run(args, *, engine, context=None):
         "policy": ROTATING_CURRENT_SAMPLER_POLICY if rotating_current else SAMPLER_POLICY,
         "schema_version": 2 if rotating_current else 1,
         "rng_derivation": RNG_DERIVATION,
-        "replay_fraction": 0.125,
-        "repeat_cap": 3,
+        "replay_fraction": args.replay_fraction,
+        "repeat_cap": args.replay_repeat_cap,
         "task_boundary_epoch_reset": 0,
     }
     if rotating_current:
@@ -490,6 +494,8 @@ def run_fold_training(args, *, engine):
             current_sample_ids=_ids(current), replay_sample_ids=_ids(retained),
             replay_raw_labels=retained.labels, experiment_seed=args.seed,
             member_id=args.member_id, task_id=task_id,
+            replay_fraction=args.replay_fraction,
+            repeat_cap=args.replay_repeat_cap,
             rotate_current_when_capacity_limited=rotating_current,
         )
         _publish_json(task_root / "input_audit.json", {"task_id": task_id, "current_ids": _ids(current),
@@ -536,13 +542,22 @@ def run_fold_training(args, *, engine):
                 return_loss_components=True)
             audit = sampler.last_audit
             expected_replay = (
-                0 if task_id == 0 else min(len(current.labels) // 7, 3 * len(retained.labels))
+                0 if task_id == 0 else min(
+                    int(len(current.labels) * args.replay_fraction / (1.0 - args.replay_fraction)),
+                    args.replay_repeat_cap * len(retained.labels),
+                )
             )
             expected_current = len(current.labels)
-            if rotating_current and task_id > 0 and expected_replay < len(current.labels) // 7:
-                expected_current = min(len(current.labels), expected_replay * 7)
+            if rotating_current and task_id > 0:
+                target_current = int(
+                    expected_replay * (1.0 - args.replay_fraction) / args.replay_fraction
+                ) if args.replay_fraction > 0 else len(current.labels)
+                if expected_replay < int(
+                    len(current.labels) * args.replay_fraction / (1.0 - args.replay_fraction)
+                ):
+                    expected_current = min(len(current.labels), target_current)
             if (audit is None or audit["epoch"] != epoch or audit["current_draws"] != expected_current
-                    or audit["max_repeat"] > 3 or audit["actual_replay_draws"] !=
+                    or audit["max_repeat"] > args.replay_repeat_cap or audit["actual_replay_draws"] !=
                     expected_replay
                     or losses.examples_seen != len(sampler)
                     or losses.optimizer_steps != math.ceil(len(sampler) / 1024)

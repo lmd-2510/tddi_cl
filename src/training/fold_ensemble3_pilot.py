@@ -221,8 +221,18 @@ def _load_locked_config(
         raise ValueError("Approved pilot preprocessing is task0_standard_frozen.")
     if value["model"] != MODEL:
         raise ValueError("Pilot model must be the locked tddi_paper_member configuration.")
-    if value["replay"] != {**REPLAY, "ranking_policy": "raw_sample_normalized_class_mean_control_v1"}:
-        raise ValueError("Pilot replay/ranking policy does not match the approved decision.")
+    expected_replay = {**REPLAY, "ranking_policy": "raw_sample_normalized_class_mean_control_v1"}
+    replay = value["replay"]
+    for key in ("buffer_policy", "ranking_policy", "base_quota", "fraction", "repeat_cap", "replay_starts_at_task"):
+        if key not in replay:
+            raise ValueError(f"replay.{key} is required.")
+    for key in ("buffer_policy", "ranking_policy", "base_quota", "replay_starts_at_task"):
+        if replay[key] != expected_replay[key]:
+            raise ValueError(f"replay.{key} does not match the approved buffer policy.")
+    if not isinstance(replay["fraction"], (int, float)) or not 0.0 < float(replay["fraction"]) < 1.0:
+        raise ValueError("replay.fraction must be in (0,1).")
+    if type(replay["repeat_cap"]) is not int or replay["repeat_cap"] <= 0:
+        raise ValueError("replay.repeat_cap must be a positive integer.")
     fold_policy = value["training"].get("fold_replay_policy")
     if fold_policy not in {
         "stratified_fraction_v1", "stratified_fraction_rotating_current_v2"

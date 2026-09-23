@@ -275,6 +275,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Explicit frozen-fold replay capacity for this member.")
     parser.add_argument("--fold-global-budget", type=int, default=None,
                         help="Total planned frozen-fold budget recorded in the contract.")
+    parser.add_argument("--replay-fraction", type=float, default=0.125,
+                        help="Frozen-fold replay fraction; default is the baseline 12.5%%.")
+    parser.add_argument("--replay-repeat-cap", type=int, default=3,
+                        help="Maximum replay repeats per exemplar in one epoch.")
     parser.add_argument("--resume-fold-checkpoint", type=Path,
                         help="Resume only the frozen-fold policy at a completed task boundary.")
     parser.add_argument("--preprocessing-policy", choices=["raw_identity", "task0_standard_frozen"])
@@ -301,6 +305,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.batch_size = 64
         if args.effective_batch_size is None:
             args.effective_batch_size = 1024
+        if not 0.0 <= args.replay_fraction < 1.0:
+            parser.error("--replay-fraction must be in [0, 1).")
+        if args.replay_repeat_cap <= 0:
+            parser.error("--replay-repeat-cap must be positive.")
     else:
         if args.scaler is None:
             parser.error("--scaler is required for legacy training.")
