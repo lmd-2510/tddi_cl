@@ -123,7 +123,7 @@ def validate_fold_options(args):
         raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
     if args.loss_variant not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
     }:
         raise ValueError(f"Unsupported replay loss variant: {args.loss_variant}.")
     if not math.isfinite(args.replay_fraction) or not 0.0 <= args.replay_fraction < 1.0:
@@ -133,10 +133,15 @@ def validate_fold_options(args):
     if (args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY
             and args.preprocessing_policy != "task0_standard_frozen"):
         raise ValueError("Pipeline-input exemplar ranking requires task0_standard_frozen preprocessing.")
-    for name in ("lr", "weight_decay", "distill_alpha", "temperature", "feature_distill_weight", "focal_gamma"):
+    for name in ("lr", "weight_decay", "distill_alpha", "temperature", "feature_distill_weight", "focal_gamma",
+                 "class_balance_beta", "class_balance_max_weight"):
         value = getattr(args, name)
         if not math.isfinite(value) or value < 0 or (name in ("lr", "temperature") and value == 0):
             raise ValueError(f"Invalid hyperparameter {name}.")
+    if not 0.0 <= args.class_balance_beta < 1.0:
+        raise ValueError("class_balance_beta must be in [0, 1).")
+    if args.class_balance_max_weight <= 0:
+        raise ValueError("class_balance_max_weight must be positive.")
     if not 0 <= args.dropout < 1:
         raise ValueError("Dropout must be in [0,1).")
 
@@ -370,6 +375,8 @@ def prepare_fold_run(args, *, engine, context=None):
             if args.loss_variant == "hybrid_distill_replay_only" else
             "focal_current_cross_entropy_replay_plus_old_column_KL_T2_only"
             if args.loss_variant == "hybrid_logit_distill" else
+            "class_balanced_focal_current_cross_entropy_replay_no_distillation"
+            if args.loss_variant == "cb_hybrid" else
             "cross_entropy_on_current_plus_replay_no_distillation"
             if args.loss_variant == "er" else
             "focal_current_cross_entropy_replay_no_distillation"
@@ -400,7 +407,7 @@ def prepare_fold_run(args, *, engine, context=None):
     contract["hyperparameters"] = {k: getattr(args, k) for k in (
         "epochs", "patience", "lr", "weight_decay", "dropout", "activation", "norm", "focal_gamma",
         "distill_alpha", "temperature", "feature_distill_weight", "weight_alignment",
-        "loss_variant")}
+        "class_balance_beta", "class_balance_max_weight", "loss_variant")}
     rotating_current = args.fold_replay_policy == ROTATING_CURRENT_POLICY
     contract["sampler"] = {
         "policy": ROTATING_CURRENT_SAMPLER_POLICY if rotating_current else SAMPLER_POLICY,
@@ -517,6 +524,11 @@ def run_fold_training(args, *, engine):
         val_inputs = _model_values(validation.features, prep, columns, args.member_id)
         training = engine.build_tensor_dataset(np.concatenate((current_inputs, replay_inputs)),
             remap_labels(np.concatenate((current.labels, retained.labels)), seen_map))
+        current_local_labels = remap_labels(current.labels, seen_map)
+        current_class_counts = {
+            int(class_id): int(count)
+            for class_id, count in zip(*np.unique(current_local_labels, return_counts=True), strict=True)
+        }
         loader = DataLoader(training, batch_size=args.batch_size, sampler=sampler, drop_last=False,
                             generator=torch.Generator().manual_seed(seeds.member_seed + task_id))
         val_loader = DataLoader(engine.build_tensor_dataset(val_inputs, remap_labels(validation.labels, seen_map)),
@@ -545,8 +557,11 @@ def run_fold_training(args, *, engine):
             epoch_start = time.perf_counter()
             losses = engine.train_one_epoch(model, loader, optimizer, criterion, device,
                 teacher_model=teacher, teacher_raw_classes=engine.ordered_raw_classes(previous_map),
-                current_seen_map=seen_map, distill_alpha=args.distill_alpha, temperature=args.temperature,
+                current_seen_map=seen_map, current_class_counts=current_class_counts,
+                distill_alpha=args.distill_alpha, temperature=args.temperature,
                 feature_distill_weight=args.feature_distill_weight, gradient_accumulation_steps=1024 // args.batch_size,
+                class_balance_beta=args.class_balance_beta,
+                class_balance_max_weight=args.class_balance_max_weight,
                 loss_variant=args.loss_variant,
                 return_loss_components=True)
             audit = sampler.last_audit

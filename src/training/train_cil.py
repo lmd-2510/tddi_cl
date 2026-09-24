@@ -121,6 +121,49 @@ class FocalLoss(nn.Module if nn is not None else object):
         return loss.mean()
 
 
+def effective_number_class_weights(
+    class_counts: dict[int, int] | None,
+    *,
+    beta: float = 0.9999,
+    max_weight: float = 4.0,
+    device: "torch.device | str",
+    dtype: "torch.dtype",
+) -> dict[int, "torch.Tensor"]:
+    """Return normalized effective-number weights for the current task classes.
+
+    The weights are deliberately computed from the current task only. Replay
+    examples keep ordinary CE in ``cb_hybrid`` so that the fixed memory does
+    not get double-reweighted. Mean-normalization preserves the approximate
+    scale of the existing focal loss; clipping prevents a tiny class from
+    dominating a minibatch.
+    """
+    if not class_counts:
+        return {}
+    if not 0.0 <= beta < 1.0:
+        raise ValueError("class-balance beta must be in [0, 1).")
+    if not math.isfinite(max_weight) or max_weight <= 0:
+        raise ValueError("class-balance max_weight must be positive and finite.")
+    labels = sorted(int(label) for label in class_counts)
+    counts = torch.as_tensor(
+        [max(int(class_counts[label]), 1) for label in labels],
+        device=device,
+        dtype=dtype,
+    )
+    if beta == 0.0:
+        weights = torch.ones_like(counts)
+    else:
+        beta_tensor = torch.as_tensor(beta, device=device, dtype=dtype)
+        effective = 1.0 - torch.pow(beta_tensor, counts)
+        weights = (1.0 - beta_tensor) / torch.clamp(effective, min=torch.finfo(dtype).tiny)
+    weights = weights / torch.clamp(weights.mean(), min=torch.finfo(dtype).tiny)
+    # Clip both tails: without the lower bound, a very large class can receive
+    # an almost-zero gradient while a tiny class dominates the whole update.
+    min_weight = 1.0 / float(max_weight)
+    weights = torch.clamp(weights, min=min_weight, max=float(max_weight))
+    weights = weights / torch.clamp(weights.mean(), min=torch.finfo(dtype).tiny)
+    return {label: weights[index] for index, label in enumerate(labels)}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train the numerical T-DDI paper-member continual-learning study."
@@ -213,7 +256,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--loss-variant",
         choices=[
             "baseline", "er", "hybrid", "hybrid_distill",
-            "hybrid_distill_replay_only", "hybrid_logit_distill",
+            "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
         ],
         default="baseline",
         help=(
@@ -222,7 +265,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "current and Cross-Entropy on replay, without distillation; "
             "hybrid_distill keeps that split and adds logit/feature distillation; "
             "hybrid_distill_replay_only applies distillation only to replay examples; "
-            "hybrid_logit_distill adds logit distillation without feature distillation."
+            "hybrid_logit_distill adds logit distillation without feature distillation; "
+            "cb_hybrid uses effective-number class-balanced Focal on current data "
+            "and ordinary CE on replay."
         ),
     )
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
@@ -245,6 +290,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--focal-gamma", type=float, default=1.0)
+    parser.add_argument(
+        "--class-balance-beta", type=float, default=0.9999,
+        help="Effective-number beta used by cb_hybrid (0 disables reweighting).",
+    )
+    parser.add_argument(
+        "--class-balance-max-weight", type=float, default=4.0,
+        help="Maximum normalized class weight used by cb_hybrid.",
+    )
     parser.add_argument(
         "--weight-alignment",
         choices=WEIGHT_ALIGNMENT_POLICIES,
@@ -528,6 +581,8 @@ def build_replay_checkpoint_config(
         "norm": args.norm,
         "patience": args.patience,
         "focal_gamma": args.focal_gamma,
+        "class_balance_beta": args.class_balance_beta,
+        "class_balance_max_weight": args.class_balance_max_weight,
         "distill_alpha": args.distill_alpha,
         "temperature": args.temperature,
         "feature_distill_weight": args.feature_distill_weight,
@@ -1293,9 +1348,12 @@ def train_one_epoch(
     teacher_model: nn.Module | None = None,
     teacher_raw_classes: list[int] | None = None,
     current_seen_map: dict[int, int] | None = None,
+    current_class_counts: dict[int, int] | None = None,
     distill_alpha: float = 1.0,
     temperature: float = 2.0,
     feature_distill_weight: float = 0.5,
+    class_balance_beta: float = 0.9999,
+    class_balance_max_weight: float = 4.0,
     loss_variant: str = "baseline",
     fisher: dict[str, "torch.Tensor"] | None = None,
     theta_star: dict[str, "torch.Tensor"] | None = None,
@@ -1308,9 +1366,13 @@ def train_one_epoch(
         raise ValueError("gradient_accumulation_steps must be positive.")
     if loss_variant not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
     }:
         raise ValueError(f"Unsupported loss_variant: {loss_variant!r}")
+    if not 0.0 <= class_balance_beta < 1.0:
+        raise ValueError("class_balance_beta must be in [0, 1).")
+    if not math.isfinite(class_balance_max_weight) or class_balance_max_weight <= 0:
+        raise ValueError("class_balance_max_weight must be positive and finite.")
     model.train()
     total_loss = 0.0
     total_classification_loss = 0.0
@@ -1322,12 +1384,13 @@ def train_one_epoch(
     total_examples = 0
 
     student_old_indices: list[int] = []
-    if teacher_model is not None and teacher_raw_classes is not None and current_seen_map is not None:
+    if teacher_raw_classes is not None and current_seen_map is not None:
         student_old_indices = build_student_old_indices(
             teacher_raw_classes,
             current_seen_map,
         )
-        teacher_model.eval()
+        if teacher_model is not None:
+            teacher_model.eval()
 
     optimizer.zero_grad(set_to_none=True)
     optimizer_step = 0
@@ -1349,7 +1412,7 @@ def train_one_epoch(
         if loss_variant == "er":
             classification_loss = F.cross_entropy(logits, labels)
         elif loss_variant in {
-            "hybrid", "hybrid_distill", "hybrid_distill_replay_only", "hybrid_logit_distill",
+            "hybrid", "hybrid_distill", "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
         } and student_old_indices:
             old_index_tensor = torch.as_tensor(student_old_indices, device=labels.device)
             replay_mask = torch.isin(labels, old_index_tensor)
@@ -1359,6 +1422,17 @@ def train_one_epoch(
             target_probs = target_log_probs.exp()
             gamma = float(getattr(criterion, "gamma", 1.0))
             focal_values = -((1.0 - target_probs) ** gamma) * target_log_probs
+            if loss_variant == "cb_hybrid":
+                weights = effective_number_class_weights(
+                    current_class_counts, beta=class_balance_beta,
+                    max_weight=class_balance_max_weight,
+                    device=logits.device, dtype=logits.dtype,
+                )
+                if weights:
+                    sample_weights = torch.ones_like(target_probs)
+                    for class_id, weight in weights.items():
+                        sample_weights = torch.where(labels == int(class_id), weight, sample_weights)
+                    focal_values = focal_values * sample_weights
             ce_values = F.cross_entropy(logits, labels, reduction="none")
             terms = []
             if bool(current_mask.any()):
@@ -1366,6 +1440,24 @@ def train_one_epoch(
             if bool(replay_mask.any()):
                 terms.append(ce_values[replay_mask])
             classification_loss = torch.cat(terms).mean()
+        elif loss_variant == "cb_hybrid":
+            weights = effective_number_class_weights(
+                current_class_counts, beta=class_balance_beta,
+                max_weight=class_balance_max_weight,
+                device=logits.device, dtype=logits.dtype,
+            )
+            if weights:
+                log_probs = F.log_softmax(logits, dim=1)
+                target_log_probs = log_probs.gather(1, labels.unsqueeze(1)).squeeze(1)
+                target_probs = target_log_probs.exp()
+                gamma = float(getattr(criterion, "gamma", 1.0))
+                focal_values = -((1.0 - target_probs) ** gamma) * target_log_probs
+                sample_weights = torch.ones_like(target_probs)
+                for class_id, weight in weights.items():
+                    sample_weights = torch.where(labels == int(class_id), weight, sample_weights)
+                classification_loss = (focal_values * sample_weights).mean()
+            else:
+                classification_loss = _baseline_classification_loss
         elif loss_variant in {
             "hybrid", "hybrid_distill", "hybrid_distill_replay_only", "hybrid_logit_distill",
         }:

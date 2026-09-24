@@ -215,6 +215,9 @@ def _load_locked_config(
         value["training"]["weight_alignment"] = "none"
     if isinstance(value.get("training"), dict) and "loss_variant" not in value["training"]:
         value["training"]["loss_variant"] = "baseline"
+    if isinstance(value.get("training"), dict):
+        value["training"].setdefault("class_balance_beta", 0.9999)
+        value["training"].setdefault("class_balance_max_weight", 4.0)
     _keys(value["training"], {*TRAINING, "epochs", "patience"}, "training")
     _keys(value["evaluation"], EVALUATION_KEYS, "evaluation")
     if value["preprocessing"]["policy"] != "task0_standard_frozen":
@@ -243,7 +246,7 @@ def _load_locked_config(
         raise ValueError("Unsupported classifier weight-alignment policy.")
     if value["training"].get("loss_variant") not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
     }:
         raise ValueError("Unsupported replay loss variant.")
     configured_epochs = value["training"].get("epochs")
@@ -263,7 +266,7 @@ def _load_locked_config(
         "epochs": expected_epochs,
         "patience": 5,
     }
-    if value["training"]["loss_variant"] == "hybrid_logit_distill":
+    if value["training"]["loss_variant"] in {"hybrid_logit_distill", "cb_hybrid"}:
         expected_training["feature_distill_weight"] = 0.0
     if value["training"] != expected_training:
         raise ValueError("Pilot training hyperparameters must match the approved baseline.")
