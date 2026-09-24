@@ -211,14 +211,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feature-distill-weight", type=float, default=0.5)
     parser.add_argument(
         "--loss-variant",
-        choices=["baseline", "er", "hybrid", "hybrid_distill", "hybrid_distill_replay_only"],
+        choices=[
+            "baseline", "er", "hybrid", "hybrid_distill",
+            "hybrid_distill_replay_only", "hybrid_logit_distill",
+        ],
         default="baseline",
         help=(
             "Frozen-fold replay loss: baseline keeps Focal+distillation; "
             "er uses Cross-Entropy on current+replay; hybrid uses Focal on "
             "current and Cross-Entropy on replay, without distillation; "
             "hybrid_distill keeps that split and adds logit/feature distillation; "
-            "hybrid_distill_replay_only applies distillation only to replay examples."
+            "hybrid_distill_replay_only applies distillation only to replay examples; "
+            "hybrid_logit_distill adds logit distillation without feature distillation."
         ),
     )
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
@@ -1302,7 +1306,10 @@ def train_one_epoch(
 ) -> float | EpochLossComponents:
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
-    if loss_variant not in {"baseline", "er", "hybrid", "hybrid_distill", "hybrid_distill_replay_only"}:
+    if loss_variant not in {
+        "baseline", "er", "hybrid", "hybrid_distill",
+        "hybrid_distill_replay_only", "hybrid_logit_distill",
+    }:
         raise ValueError(f"Unsupported loss_variant: {loss_variant!r}")
     model.train()
     total_loss = 0.0
@@ -1341,7 +1348,9 @@ def train_one_epoch(
         )
         if loss_variant == "er":
             classification_loss = F.cross_entropy(logits, labels)
-        elif loss_variant in {"hybrid", "hybrid_distill", "hybrid_distill_replay_only"} and student_old_indices:
+        elif loss_variant in {
+            "hybrid", "hybrid_distill", "hybrid_distill_replay_only", "hybrid_logit_distill",
+        } and student_old_indices:
             old_index_tensor = torch.as_tensor(student_old_indices, device=labels.device)
             replay_mask = torch.isin(labels, old_index_tensor)
             current_mask = ~replay_mask
@@ -1357,7 +1366,9 @@ def train_one_epoch(
             if bool(replay_mask.any()):
                 terms.append(ce_values[replay_mask])
             classification_loss = torch.cat(terms).mean()
-        elif loss_variant in {"hybrid", "hybrid_distill", "hybrid_distill_replay_only"}:
+        elif loss_variant in {
+            "hybrid", "hybrid_distill", "hybrid_distill_replay_only", "hybrid_logit_distill",
+        }:
             classification_loss = _baseline_classification_loss
         else:
             classification_loss = _baseline_classification_loss
@@ -1365,7 +1376,9 @@ def train_one_epoch(
         distill_loss = None
         feature_distill_loss = None
 
-        if loss_variant in {"baseline", "hybrid_distill", "hybrid_distill_replay_only"} and teacher_model is not None and student_old_indices:
+        if loss_variant in {
+            "baseline", "hybrid_distill", "hybrid_distill_replay_only", "hybrid_logit_distill",
+        } and teacher_model is not None and student_old_indices:
             replay_mask = None
             if loss_variant == "hybrid_distill_replay_only":
                 old_index_tensor = torch.as_tensor(student_old_indices, device=labels.device)
@@ -1380,7 +1393,11 @@ def train_one_epoch(
             distill_student_logits = logits if replay_mask is None else logits[replay_mask]
             distill_student_features = student_features if replay_mask is None else student_features[replay_mask]
             with torch.no_grad():
-                teacher_logits, teacher_features = teacher_model.forward_with_latent(distill_features)
+                if loss_variant == "hybrid_logit_distill":
+                    teacher_logits = teacher_model(distill_features)
+                    teacher_features = None
+                else:
+                    teacher_logits, teacher_features = teacher_model.forward_with_latent(distill_features)
             if teacher_logits.shape[1] != len(student_old_indices):
                 raise ValueError(
                     "Teacher logit width does not match the recorded teacher class order: "
@@ -1392,10 +1409,18 @@ def train_one_epoch(
                 F.softmax(teacher_logits / temperature, dim=1),
                 reduction="batchmean",
             ) * (temperature ** 2)
-            if distill_student_features is None:
-                distill_student_features = model.encode(distill_features)
-            feature_distill_loss = F.mse_loss(distill_student_features, teacher_features)
-            loss = loss + distill_alpha * distill_loss + feature_distill_weight * feature_distill_loss
+            if loss_variant == "hybrid_logit_distill":
+                # This ablation deliberately preserves only the old-class
+                # output function. It must not encode the student features or
+                # add a feature MSE term.
+                feature_distill_loss = torch.zeros_like(distill_loss)
+            else:
+                if distill_student_features is None:
+                    distill_student_features = model.encode(distill_features)
+                feature_distill_loss = F.mse_loss(distill_student_features, teacher_features)
+            loss = loss + distill_alpha * distill_loss
+            if loss_variant != "hybrid_logit_distill":
+                loss = loss + feature_distill_weight * feature_distill_loss
 
         raw_ewc_penalty = torch.zeros((), device=loss.device)
         scaled_ewc_penalty = torch.zeros((), device=loss.device)

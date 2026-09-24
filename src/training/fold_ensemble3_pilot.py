@@ -242,7 +242,8 @@ def _load_locked_config(
     if weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
         raise ValueError("Unsupported classifier weight-alignment policy.")
     if value["training"].get("loss_variant") not in {
-        "baseline", "er", "hybrid", "hybrid_distill", "hybrid_distill_replay_only"
+        "baseline", "er", "hybrid", "hybrid_distill",
+        "hybrid_distill_replay_only", "hybrid_logit_distill",
     }:
         raise ValueError("Unsupported replay loss variant.")
     configured_epochs = value["training"].get("epochs")
@@ -262,6 +263,8 @@ def _load_locked_config(
         "epochs": expected_epochs,
         "patience": 5,
     }
+    if value["training"]["loss_variant"] == "hybrid_logit_distill":
+        expected_training["feature_distill_weight"] = 0.0
     if value["training"] != expected_training:
         raise ValueError("Pilot training hyperparameters must match the approved baseline.")
     expected_execution = {

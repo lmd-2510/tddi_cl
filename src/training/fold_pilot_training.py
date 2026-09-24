@@ -122,7 +122,8 @@ def validate_fold_options(args):
     if args.weight_alignment not in WEIGHT_ALIGNMENT_POLICIES:
         raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
     if args.loss_variant not in {
-        "baseline", "er", "hybrid", "hybrid_distill", "hybrid_distill_replay_only"
+        "baseline", "er", "hybrid", "hybrid_distill",
+        "hybrid_distill_replay_only", "hybrid_logit_distill",
     }:
         raise ValueError(f"Unsupported replay loss variant: {args.loss_variant}.")
     if not math.isfinite(args.replay_fraction) or not 0.0 <= args.replay_fraction < 1.0:
@@ -367,6 +368,8 @@ def prepare_fold_run(args, *, engine, context=None):
             if args.loss_variant == "hybrid_distill" else
             "focal_current_cross_entropy_replay_plus_old_column_KL_T2_and_latent_MSE_on_replay_samples_only"
             if args.loss_variant == "hybrid_distill_replay_only" else
+            "focal_current_cross_entropy_replay_plus_old_column_KL_T2_only"
+            if args.loss_variant == "hybrid_logit_distill" else
             "cross_entropy_on_current_plus_replay_no_distillation"
             if args.loss_variant == "er" else
             "focal_current_cross_entropy_replay_no_distillation"
@@ -526,7 +529,7 @@ def run_fold_training(args, *, engine):
         teacher = (
             previous.to(device).eval().requires_grad_(False)
             if previous is not None and args.loss_variant in {
-                "baseline", "hybrid_distill", "hybrid_distill_replay_only"
+                "baseline", "hybrid_distill", "hybrid_distill_replay_only", "hybrid_logit_distill"
             }
             else None
         )
