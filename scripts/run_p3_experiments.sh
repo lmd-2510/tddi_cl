@@ -11,13 +11,31 @@ MODE="${1:-run}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PILOT_CONFIG="$ROOT/configs/p3_focal_equal_buffer_pilot.json"
 FULL_CONFIG="$ROOT/configs/p3_hybrid_full8_e30_mem4_nodistill.json"
-PILOT_ROOT="$ROOT/outputs/p3_focal_equal_buffer_pilot_seed0"
-FULL_ROOT="$ROOT/outputs/p3_hybrid_full8_e30_mem4_nodistill_seed0"
+PILOT_ROOT="${P3_PILOT_OUT:-$ROOT/outputs/p3_focal_equal_buffer_pilot_seed0}"
+FULL_ROOT="${P3_FULL_OUT:-$ROOT/outputs/p3_hybrid_full8_e30_mem4_nodistill_seed0}"
 SEQUENCE_ROOT="$ROOT/outputs/p3_experiments"
 mkdir -p "$SEQUENCE_ROOT"
 SEQUENCE_LOG="$SEQUENCE_ROOT/sequence_${STAMP}.log"
 
 say() { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$SEQUENCE_LOG"; }
+
+if [[ "$MODE" == "start" ]]; then
+  RUN_TAG="${P3_RUN_TAG:-$STAMP}"
+  PILOT_OUT="${P3_PILOT_OUT:-$ROOT/outputs/p3_focal_equal_buffer_pilot_seed0_$RUN_TAG}"
+  FULL_OUT="${P3_FULL_OUT:-$ROOT/outputs/p3_hybrid_full8_e30_mem4_nodistill_seed0_$RUN_TAG}"
+  LAUNCHER_LOG="$SEQUENCE_ROOT/launcher_${RUN_TAG}.log"
+  LAUNCHER_PID="$SEQUENCE_ROOT/launcher_${RUN_TAG}.pid"
+  nohup env P3_PILOT_OUT="$PILOT_OUT" P3_FULL_OUT="$FULL_OUT" \
+    bash "$ROOT/scripts/run_p3_experiments.sh" run \
+    > "$LAUNCHER_LOG" 2>&1 < /dev/null &
+  PID=$!
+  printf '%s\n' "$PID" > "$LAUNCHER_PID"
+  printf '[OK] Started detached P3 experiments; pid=%s\n' "$PID"
+  printf '[OK] log: %s\n' "$LAUNCHER_LOG"
+  printf '[OK] pilot output: %s\n' "$PILOT_OUT"
+  printf '[OK] full output: %s\n' "$FULL_OUT"
+  exit 0
+fi
 
 find_fold_root() {
   if [[ -n "${P3_FOLD_ROOT:-}" ]]; then printf '%s\n' "$P3_FOLD_ROOT"; return 0; fi
@@ -105,5 +123,5 @@ case "$MODE" in
     run_one hybrid_full "$FULL_CONFIG" "$FULL_ROOT" all yes
     say "Both experiments have been attempted. Review each .status.txt and .zip independently."
     ;;
-  *) echo "Usage: bash scripts/run_p3_experiments.sh [check|run]" >&2; exit 2 ;;
+  *) echo "Usage: bash scripts/run_p3_experiments.sh [check|run|start]" >&2; exit 2 ;;
 esac
