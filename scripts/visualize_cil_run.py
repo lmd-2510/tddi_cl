@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 import matplotlib
 
@@ -34,6 +35,9 @@ if str(ROOT) not in sys.path:
 from src.eval.predictions import load_member_prediction_artifact
 
 
+DEFAULT_TASK_FILE = ROOT / "study_assets" / "task_protocols" / "tail_to_head_tasks.json"
+
+
 def _save(fig: plt.Figure, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -47,6 +51,141 @@ def _placeholder(path: Path, title: str, message: str) -> None:
     ax.text(0.5, 0.6, title, ha="center", va="center", fontsize=16, weight="bold")
     ax.text(0.5, 0.4, message, ha="center", va="center", wrap=True, fontsize=11)
     _save(fig, path)
+
+
+def _load_task_info(
+    run_root: Path,
+    task_file: Path | None,
+    warnings: list[str],
+) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+    """Load raw-class -> human-readable task/stage labels.
+
+    Raw IDs remain the stable key.  The added label is intentionally derived
+    from the frozen task schedule, not from model predictions.
+    """
+    candidates: list[Path] = []
+    if task_file is not None:
+        candidates.append(task_file)
+    # A completed member run records the resolved task-file path in arguments.
+    for run_config in [run_root / "member_0" / "run_config.json", *run_root.glob("member_*/run_config.json")]:
+        if not run_config.is_file():
+            continue
+        try:
+            payload = json.loads(run_config.read_text(encoding="utf-8"))
+            value = payload.get("arguments", {}).get("task_file")
+            if value:
+                candidate = Path(str(value))
+                candidates.append(candidate if candidate.is_absolute() else ROOT / candidate)
+        except Exception as exc:
+            warnings.append(f"cannot read task source from {run_config}: {type(exc).__name__}: {exc}")
+    candidates.append(DEFAULT_TASK_FILE)
+    source = next((path for path in candidates if path.is_file()), None)
+    if source is None:
+        warnings.append("task protocol file not found; using raw-class labels only")
+        return {}, {}
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        protocol = str(payload.get("protocol", "unknown"))
+        tasks = payload.get("tasks", [])
+        info: dict[int, dict[str, Any]] = {}
+        for task in tasks:
+            task_id = int(task["task_id"])
+            if protocol == "tail_to_head":
+                stage = "tail" if task_id == 0 else "head" if task_id == len(tasks) - 1 else "mid"
+            else:
+                stage = "balanced"
+            for raw in task.get("classes", []):
+                raw_id = int(raw)
+                info[raw_id] = {
+                    "task_id": task_id,
+                    "stage": stage,
+                    "class_label": f"t{task_id}_{stage}:c{raw_id}",
+                }
+        return info, {"protocol": protocol, "source": str(source), "num_tasks": len(tasks)}
+    except Exception as exc:
+        warnings.append(f"cannot parse task protocol {source}: {type(exc).__name__}: {exc}")
+        return {}, {}
+
+
+def _decorate_class_table(frame: pd.DataFrame, task_info: dict[int, dict[str, Any]]) -> pd.DataFrame:
+    out = frame.copy()
+    out["task_id"] = [task_info.get(int(raw), {}).get("task_id", -1) for raw in out["raw_class_id"]]
+    out["stage"] = [task_info.get(int(raw), {}).get("stage", "unknown") for raw in out["raw_class_id"]]
+    out["class_label"] = [
+        task_info.get(int(raw), {}).get("class_label", f"class_{int(raw)}")
+        for raw in out["raw_class_id"]
+    ]
+    return out
+
+
+def _class_label(task_info: dict[int, dict[str, Any]], raw: int) -> str:
+    return task_info.get(int(raw), {}).get("class_label", f"class_{int(raw)}")
+
+
+def _infer_source_paths(run_root: Path) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    for run_config in [run_root / "member_0" / "run_config.json", *run_root.glob("member_*/run_config.json")]:
+        if not run_config.is_file():
+            continue
+        try:
+            payload = json.loads(run_config.read_text(encoding="utf-8"))
+            for split in ("train", "validation", "test"):
+                value = payload.get("arguments", {}).get(split)
+                if value:
+                    candidate = Path(str(value))
+                    candidate = candidate if candidate.is_absolute() else ROOT / candidate
+                    if candidate.is_file():
+                        paths[split] = candidate
+            if len(paths) == 3:
+                break
+        except Exception:
+            continue
+    return paths
+
+
+def _task_sample_counts(
+    run_root: Path,
+    task_info: dict[int, dict[str, Any]],
+    source_paths: dict[str, Path],
+    fallback_test_labels: np.ndarray | None,
+    warnings: list[str],
+    protocol: str = "tail_to_head",
+) -> pd.DataFrame:
+    task_ids = sorted({int(meta["task_id"]) for meta in task_info.values()})
+    rows = []
+    for task_id in task_ids:
+        classes = sorted(raw for raw, meta in task_info.items() if int(meta["task_id"]) == task_id)
+        stage = (
+            "tail" if protocol == "tail_to_head" and task_id == 0 else
+            "head" if protocol == "tail_to_head" and task_id == task_ids[-1] else
+            "balanced" if protocol == "constrained_mass_balanced" else "mid"
+        )
+        row: dict[str, Any] = {
+            "task_id": task_id,
+            "task_label": f"task_{task_id}_{stage}",
+            "class_count": len(classes),
+            "raw_class_ids": ",".join(map(str, classes)),
+        }
+        for split in ("train", "validation", "test"):
+            path = source_paths.get(split)
+            if path is not None:
+                try:
+                    columns = pq.read_schema(path).names
+                    label_col = "class" if "class" in columns else "raw_class_id" if "raw_class_id" in columns else None
+                    if label_col is None:
+                        raise ValueError("no class/raw_class_id column")
+                    labels = pq.read_table(path, columns=[label_col])[label_col].to_numpy()
+                    row[f"{split}_samples"] = int(np.isin(labels.astype(int), classes).sum())
+                except Exception as exc:
+                    warnings.append(f"cannot count {split} samples from {path}: {type(exc).__name__}: {exc}")
+                    row[f"{split}_samples"] = None
+            elif split == "test" and fallback_test_labels is not None:
+                row["test_samples"] = int(np.isin(fallback_test_labels, classes).sum())
+            else:
+                row[f"{split}_samples"] = None
+        row["all_split_samples"] = int(sum(row[f"{s}_samples"] or 0 for s in ("train", "validation", "test")))
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def _task_ids(run_root: Path, member_id: int = 0) -> list[int]:
@@ -134,11 +273,16 @@ def _load_predictions(
     }
 
 
-def _class_metrics(labels: np.ndarray, predictions: np.ndarray, class_ids: np.ndarray) -> pd.DataFrame:
+def _class_metrics(
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    class_ids: np.ndarray,
+    task_info: dict[int, dict[str, Any]] | None = None,
+) -> pd.DataFrame:
     precision, recall, f1, support = precision_recall_fscore_support(
         labels, predictions, labels=class_ids.tolist(), zero_division=0
     )
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         {
             "raw_class_id": class_ids.astype(int),
             "support": support.astype(int),
@@ -147,6 +291,7 @@ def _class_metrics(labels: np.ndarray, predictions: np.ndarray, class_ids: np.nd
             "f1": f1,
         }
     )
+    return _decorate_class_table(frame, task_info or {})
 
 
 def _load_buffer(run_root: Path, member_id: int, task_id: int, warnings: list[str]) -> pd.DataFrame | None:
@@ -227,6 +372,9 @@ def _plot_buffer(df: pd.DataFrame, path: Path, title: str) -> None:
     axes[1].set_xlabel("raw class id")
     axes[1].axhline(1.0, color="gray", linestyle="--", linewidth=0.8)
     axes[0].legend(handles=[Patch(color="#d95f02", label="tail"), Patch(color="#7570b3", label="mid"), Patch(color="#1b9e77", label="head")], loc="upper left")
+    ticks = np.arange(0, len(df), max(1, len(df) // 18))
+    axes[0].set_xticks(df.raw_class_id.iloc[ticks], df.class_label.iloc[ticks], rotation=90)
+    axes[1].set_xticks(df.raw_class_id.iloc[ticks], df.class_label.iloc[ticks], rotation=90)
     _save(fig, path)
 
 
@@ -238,6 +386,8 @@ def _plot_exposure(df: pd.DataFrame, path: Path, title: str, mode: str) -> None:
     ax.set_title(f"{title} ({mode.replace('_', ' ')})")
     ax.set_xlabel("raw class id")
     ax.set_ylabel("replay draws / planned slots")
+    ticks = np.arange(0, len(df), max(1, len(df) // 18))
+    ax.set_xticks(df.raw_class_id.iloc[ticks], df.class_label.iloc[ticks], rotation=90)
     _save(fig, path)
 
 
@@ -255,10 +405,18 @@ def _plot_classwise(df: pd.DataFrame, path: Path, title: str) -> None:
     axes[1].set_ylabel("class recall / balanced recall")
     axes[1].set_xlabel("raw class id; marker size = support")
     axes[1].legend()
+    ticks = np.arange(0, len(df), max(1, len(df) // 18))
+    axes[0].set_xticks(df.raw_class_id.iloc[ticks], df.class_label.iloc[ticks], rotation=90)
+    axes[1].set_xticks(df.raw_class_id.iloc[ticks], df.class_label.iloc[ticks], rotation=90)
     _save(fig, path)
 
 
-def _plot_forgetting(matrix: pd.DataFrame, path: Path, title: str) -> None:
+def _plot_forgetting(
+    matrix: pd.DataFrame,
+    path: Path,
+    title: str,
+    task_info: dict[int, dict[str, Any]] | None = None,
+) -> None:
     fig, ax = plt.subplots(figsize=(13, 10))
     if matrix.empty or matrix.shape[1] < 2:
         ax.axis("off")
@@ -273,11 +431,19 @@ def _plot_forgetting(matrix: pd.DataFrame, path: Path, title: str) -> None:
     ax.set_ylabel("raw class id")
     ax.set_xticks(range(len(matrix.columns)), matrix.columns)
     yticks = np.arange(0, len(matrix.index), max(1, len(matrix.index) // 20))
-    ax.set_yticks(yticks, matrix.index.to_numpy()[yticks])
+    info = task_info or {}
+    ax.set_yticks(yticks, [_class_label(info, int(raw)) for raw in matrix.index.to_numpy()[yticks]])
     _save(fig, path)
 
 
-def _plot_confusion(labels: np.ndarray, predictions: np.ndarray, class_ids: np.ndarray, path: Path, title: str) -> pd.DataFrame:
+def _plot_confusion(
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    class_ids: np.ndarray,
+    path: Path,
+    title: str,
+    task_info: dict[int, dict[str, Any]] | None = None,
+) -> pd.DataFrame:
     counts = confusion_matrix(labels, predictions, labels=class_ids.tolist())
     row_totals = counts.sum(axis=1, keepdims=True)
     normalized = np.divide(counts, row_totals, out=np.zeros_like(counts, dtype=float), where=row_totals != 0)
@@ -289,7 +455,16 @@ def _plot_confusion(labels: np.ndarray, predictions: np.ndarray, class_ids: np.n
         true_i, pred_i = np.unravel_index(idx, off.shape)
         if off[true_i, pred_i] <= 0:
             break
-        pairs.append({"true_class": int(class_ids[true_i]), "predicted_class": int(class_ids[pred_i]), "count": int(off[true_i, pred_i]), "row_rate": float(normalized[true_i, pred_i])})
+        true_raw = int(class_ids[true_i])
+        pred_raw = int(class_ids[pred_i])
+        pairs.append({
+            "true_class": true_raw,
+            "true_label": _class_label(task_info or {}, true_raw),
+            "predicted_class": pred_raw,
+            "predicted_label": _class_label(task_info or {}, pred_raw),
+            "count": int(off[true_i, pred_i]),
+            "row_rate": float(normalized[true_i, pred_i]),
+        })
         if len(pairs) >= 15:
             break
     top = pd.DataFrame(pairs)
@@ -299,17 +474,18 @@ def _plot_confusion(labels: np.ndarray, predictions: np.ndarray, class_ids: np.n
     image = ax.imshow(normalized, interpolation="nearest", aspect="auto", vmin=0, vmax=1, cmap="magma")
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="row-normalized rate")
     ax.set_title(title)
-    ax.set_xlabel("predicted raw class id")
-    ax.set_ylabel("true raw class id")
+    ax.set_xlabel("predicted class (task/stage:raw id)")
+    ax.set_ylabel("true class (task/stage:raw id)")
     ticks = np.arange(0, len(class_ids), max(1, len(class_ids) // 18))
-    ax.set_xticks(ticks, class_ids[ticks], rotation=90)
-    ax.set_yticks(ticks, class_ids[ticks])
+    labels_for_ticks = [_class_label(task_info or {}, int(raw)) for raw in class_ids[ticks]]
+    ax.set_xticks(ticks, labels_for_ticks, rotation=90)
+    ax.set_yticks(ticks, labels_for_ticks)
     side = fig.add_subplot(grid[0, 1])
     if top.empty:
         side.text(0.5, 0.5, "No off-diagonal errors", ha="center", va="center")
         side.axis("off")
     else:
-        labels = [f"{r.true_class}->{r.predicted_class}" for r in top.itertuples()]
+        labels = [f"{r.true_label}->{r.predicted_label}" for r in top.itertuples()]
         side.barh(labels[::-1], top["count"].to_numpy()[::-1], color="#d73027")
         side.set_xlabel("count")
         side.set_title("Top confusions")
@@ -329,6 +505,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     outdir = (args.outdir or run_root / "visualizations").resolve()
     outdir.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
+    task_info, task_metadata = _load_task_info(run_root, args.task_file, warnings)
+    source_paths = _infer_source_paths(run_root)
+    for split in ("train", "validation", "test"):
+        explicit = getattr(args, split, None)
+        if explicit is not None:
+            source_paths[split] = explicit.resolve()
     available = [m for m in args.member_ids if (run_root / f"member_{m}").exists()]
     if not available:
         available = [args.member_id]
@@ -345,6 +527,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if buffer is None:
         _placeholder(buffer_png, "Buffer allocation", "buffer_audit.json was not found for this task/member")
     else:
+        buffer = _decorate_class_table(buffer, task_info)
         buffer.to_csv(outdir / f"buffer_allocation_task{task_id}_member{args.member_id}.csv", index=False)
         _plot_buffer(buffer, buffer_png, f"Buffer allocation: task {task_id}, member {args.member_id}")
     generated.append(str(buffer_png))
@@ -354,6 +537,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if exposure is None:
         _placeholder(exposure_png, "Replay exposure", "No replay exposure audit was found")
     else:
+        exposure = _decorate_class_table(exposure, task_info)
         exposure.to_csv(outdir / f"replay_exposure_task{task_id}_member{args.member_id}.csv", index=False)
         _plot_exposure(exposure, exposure_png, f"Replay exposure: task {task_id}, member {args.member_id}", exposure_mode)
     generated.append(str(exposure_png))
@@ -363,7 +547,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if final_prediction is None:
         _placeholder(classwise_png, "Class-wise performance", f"No {args.split}.npz prediction artifact was found")
     else:
-        metrics = _class_metrics(final_prediction["labels"], final_prediction["predictions"], final_prediction["class_ids"])
+        metrics = _class_metrics(
+            final_prediction["labels"], final_prediction["predictions"],
+            final_prediction["class_ids"], task_info,
+        )
         metrics.to_csv(outdir / f"classwise_metrics_task{task_id}_{scope}.csv", index=False)
         _plot_classwise(metrics, classwise_png, f"Class-wise performance: task {task_id} ({scope}, {args.split})")
     generated.append(str(classwise_png))
@@ -373,12 +560,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         data = _load_predictions(run_root, prediction_members, boundary, args.split, warnings)
         if data is None:
             continue
-        metrics = _class_metrics(data["labels"], data["predictions"], data["class_ids"])
+        metrics = _class_metrics(data["labels"], data["predictions"], data["class_ids"], task_info)
         matrix_rows[boundary] = metrics.set_index("raw_class_id")["f1"]
     matrix = pd.DataFrame(matrix_rows).sort_index()
     matrix.columns = [f"task_{int(c)}" for c in matrix.columns]
     forgetting_png = outdir / f"04_forgetting_heatmap_{scope}.png"
-    _plot_forgetting(matrix, forgetting_png, f"Class-wise F1 across task boundaries ({scope}, {args.split})")
+    _plot_forgetting(
+        matrix, forgetting_png,
+        f"Class-wise F1 across task boundaries ({scope}, {args.split})",
+        task_info,
+    )
     if not matrix.empty:
         matrix.to_csv(outdir / f"forgetting_f1_matrix_{scope}.csv")
         if matrix.shape[1] >= 2:
@@ -391,9 +582,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if final_prediction is None:
         _placeholder(confusion_png, "Confusion matrix", f"No {args.split}.npz prediction artifact was found")
     else:
-        top = _plot_confusion(final_prediction["labels"], final_prediction["predictions"], final_prediction["class_ids"], confusion_png, f"Confusion matrix: task {task_id} ({scope}, {args.split})")
+        top = _plot_confusion(
+            final_prediction["labels"], final_prediction["predictions"],
+            final_prediction["class_ids"], confusion_png,
+            f"Confusion matrix: task {task_id} ({scope}, {args.split})",
+            task_info,
+        )
         top.to_csv(outdir / f"top_confusions_task{task_id}_{scope}.csv", index=False)
     generated.append(str(confusion_png))
+
+    fallback_labels = None if final_prediction is None else final_prediction["labels"]
+    task_counts = _task_sample_counts(
+        run_root, task_info, source_paths, fallback_labels, warnings,
+        str(task_metadata.get("protocol", "tail_to_head")),
+    )
+    task_counts.to_csv(outdir / "task_sample_counts.csv", index=False)
+    generated.append(str(outdir / "task_sample_counts.csv"))
+    if task_info:
+        (outdir / "class_labels.csv").write_text(
+            pd.DataFrame(
+                [
+                    {"raw_class_id": raw, **meta}
+                    for raw, meta in sorted(task_info.items())
+                ]
+            ).to_csv(index=False),
+            encoding="utf-8",
+        )
+        generated.append(str(outdir / "class_labels.csv"))
 
     manifest = {
         "run_root": str(run_root),
@@ -404,12 +619,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "scope": scope,
         "members_requested": args.member_ids,
         "members_used_for_predictions": prediction_members,
+        "task_protocol": task_metadata,
+        "source_splits": {split: str(path) for split, path in source_paths.items()},
         "generated": generated,
         "warnings": sorted(set(warnings)),
         "notes": [
             "Replay exposure uses actual replay audit when present; otherwise it is labelled as planned buffer allocation.",
             "Forgetting is computed from per-task prediction artifacts, not from aggregate task metrics.",
             "Macro-F1 is the unweighted mean of class F1 values in the class-wise CSV.",
+            "Class labels use task/stage aliases (t0_tail, t7_head) while raw_class_id remains the stable key.",
+            "task_sample_counts.csv reports train/validation/test rows per task when source Parquet paths are available; otherwise test counts fall back to the prediction artifact.",
         ],
     }
     (outdir / "visualization_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -425,6 +644,10 @@ def main() -> None:
     parser.add_argument("--member-ids", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--ensemble", action="store_true", help="average available member prediction artifacts")
     parser.add_argument("--split", choices=("test", "validation"), default="test")
+    parser.add_argument("--task-file", type=Path, default=None)
+    parser.add_argument("--train", type=Path, default=None, help="Optional train Parquet for per-task sample counts")
+    parser.add_argument("--validation", type=Path, default=None, help="Optional validation Parquet for per-task sample counts")
+    parser.add_argument("--test", type=Path, default=None, help="Optional test Parquet for per-task sample counts")
     args = parser.parse_args()
     manifest = run(args)
     print(json.dumps({"outdir": manifest["outdir"], "generated": len(manifest["generated"]), "warnings": len(manifest["warnings"])}, indent=2))

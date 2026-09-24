@@ -160,6 +160,8 @@ def _build_task_row(
     report: Mapping[str, Any],
     *,
     task_id: int,
+    task_classes: Sequence[int] | None = None,
+    protocol_name: str = "tail_to_head",
 ) -> dict[str, Any]:
     if (
         str(report.get("evaluation_split", "")).casefold() != "test"
@@ -235,8 +237,18 @@ def _build_task_row(
     if int(selected.get("total_count", -1)) != total_count:
         raise ValueError(f"Task {task_id} total_count mismatch.")
 
+    task_classes = [int(value) for value in (task_classes or [])]
+    new_class_mask = np.isin(artifact.labels, task_classes) if task_classes else np.zeros(artifact.row_count, dtype=bool)
+    stage = (
+        "tail" if protocol_name == "tail_to_head" and task_id == 0 else
+        "head" if protocol_name == "tail_to_head" and task_id == 7 else
+        "balanced" if protocol_name == "constrained_mass_balanced" else "mid"
+    )
     return {
         "task_id": task_id,
+        "task_label": f"task_{task_id}_{stage}",
+        "new_class_count": len(task_classes),
+        "new_class_test_samples": int(new_class_mask.sum()),
         "full_accuracy": full_metrics["accuracy"],
         "full_balanced_accuracy": full_metrics["balanced_accuracy"],
         "full_macro_f1": full_metrics["macro_f1"],
@@ -492,6 +504,10 @@ def _build_markdown(
             "",
             "## Per-task results",
             "",
+            "`new_class_test_samples` là số test mẫu thuộc các class mới của task; "
+            "`full_samples` là toàn bộ test mẫu của các class đã thấy đến boundary đó.",
+            "Tên `task_0_tail`/`task_7_head` là nhãn diễn giải; raw class ID vẫn là khóa chính.",
+            "",
             _markdown_table(paper_table),
             "",
             "## Forgetting summary",
@@ -634,6 +650,8 @@ def build_final_report(
                 artifact,
                 _read_json(_threshold_report_path(full_root, task_id)),
                 task_id=task_id,
+                task_classes=task_classes,
+                protocol_name=protocol_name,
             )
         )
     if shared_context is None:
@@ -642,6 +660,10 @@ def build_final_report(
     task_summary = pd.DataFrame(rows)
     paper_columns = [
         "task_id",
+        "task_label",
+        "new_class_count",
+        "new_class_test_samples",
+        "full_samples",
         "full_accuracy",
         "full_balanced_accuracy",
         "full_macro_f1",
