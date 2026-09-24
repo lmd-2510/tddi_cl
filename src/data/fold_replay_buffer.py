@@ -23,6 +23,8 @@ from src.utils.seed import resolve_seed_configuration
 
 
 BUFFER_POLICY = "fold_min_quota_sqrt_capacity_v1"
+EQUAL_CLASS_BUFFER_POLICY = "fold_equal_class_capacity_v1"
+BUFFER_POLICIES = (BUFFER_POLICY, EQUAL_CLASS_BUFFER_POLICY)
 SAMPLE_NORMALIZED_RANKING_POLICY = "raw_sample_normalized_class_mean_control_v1"
 PIPELINE_INPUT_RANKING_POLICY = "frozen_preprocessed_input_class_mean_v1"
 RANKING_POLICIES = (SAMPLE_NORMALIZED_RANKING_POLICY, PIPELINE_INPUT_RANKING_POLICY)
@@ -117,6 +119,17 @@ def min_quota_sqrt_allocation(
     return allocation
 
 
+def equal_class_capacity_allocation(capacities: Mapping[int, int], budget: int) -> dict[int, int]:
+    """Allocate slots equally across seen classes, capped by retained availability."""
+    budget = _integer(budget, "budget")
+    caps = {_class_id(c): _integer(n, "capacity") for c, n in capacities.items()}
+    if not caps:
+        return {}
+    if budget == 0:
+        return {c: 0 for c in sorted(caps)}
+    return max_min_uniform_allocation(caps, budget)
+
+
 def rank_raw_class_exemplars(raw_features: np.ndarray, sample_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return original-row indices in rank order and their Euclidean distances.
 
@@ -190,6 +203,7 @@ class FoldSqrtReplayBuffer:
     def __init__(self, *, context: DevelopmentFoldContext, task_file: str | Path,
                  feature_columns: Sequence[str], member_id: int, total_memory_budget: int,
                  base_quota: int = 10, experiment_seed: int = 0,
+                 buffer_policy: str = BUFFER_POLICY,
                  ranking_policy: str = RANKING_POLICY,
                  ranking_preprocessing: FoldPreprocessing | None = None,
                  ranking_preprocessing_sha256: str | None = None) -> None:
@@ -199,6 +213,9 @@ class FoldSqrtReplayBuffer:
             raise ValueError("member_id must be 0, 1 or 2.")
         self._budget = _integer(total_memory_budget, "total_memory_budget")
         self._base_quota = _integer(base_quota, "base_quota")
+        if buffer_policy not in BUFFER_POLICIES:
+            raise ValueError(f"buffer_policy must be one of {BUFFER_POLICIES}.")
+        self._buffer_policy = buffer_policy
         seed = _integer(experiment_seed, "experiment_seed")
         if seed >= 2**32:
             raise ValueError("experiment_seed must fit uint32.")
@@ -259,10 +276,14 @@ class FoldSqrtReplayBuffer:
         self._context = context
         manifest = context.manifest
         self._metadata = {
-            "policy": BUFFER_POLICY, "schema_version": 1, "base_quota": self._base_quota,
+            "policy": self._buffer_policy, "schema_version": 1, "base_quota": self._base_quota,
             "total_memory_budget": self._budget, "ranking": ranking,
             "storage": "retained_raw_float64_only", "class_order": "raw_class_id_ascending",
-            "allocation_rounding": "clipped_base_max_min_then_capped_sqrt_largest_remainder_raw_id_tie",
+            "allocation_rounding": (
+                "capacity_constrained_equal_class_max_min_raw_id_tie"
+                if self._buffer_policy == EQUAL_CLASS_BUFFER_POLICY else
+                "clipped_base_max_min_then_capped_sqrt_largest_remainder_raw_id_tie"
+            ),
             "seeds": asdict(resolve_seed_configuration(seed, self._member_id)),
             "validation_fold": self._member_id, "fold_seed": manifest["fold_seed"],
             "assignment_sha256": manifest["assignment_sha256"], "fold_manifest_sha256": context.manifest_sha256,
@@ -374,7 +395,11 @@ class FoldSqrtReplayBuffer:
         for c in classes:
             observed[c] = int(np.sum(current.labels == c))
             capacities[c] = observed[c]
-        allocation = min_quota_sqrt_allocation(observed, capacities, self._budget, base_quota=self._base_quota)
+        allocation = (
+            equal_class_capacity_allocation(capacities, self._budget)
+            if self._buffer_policy == EQUAL_CLASS_BUFFER_POLICY else
+            min_quota_sqrt_allocation(observed, capacities, self._budget, base_quota=self._base_quota)
+        )
         updated = {}
         for c in sorted(observed):
             quota = allocation[c]
@@ -391,7 +416,7 @@ class FoldSqrtReplayBuffer:
                     {k: np.asarray(current.metadata[k])[selected].copy() for k in META_KEYS},
                 )
                 updated[c].metadata.update(rank_priority=np.arange(quota, dtype=np.int64), rank_distance=distances[:quota].copy())
-        audit = {"task_id": task_id, "policy": BUFFER_POLICY, "observed_counts": observed,
+        audit = {"task_id": task_id, "policy": self._buffer_policy, "observed_counts": observed,
                  "feasible_capacities": capacities, "allocation": allocation,
                  "stored_slots": sum(allocation.values()), "budget": self._budget}
         self._check_sources()
@@ -460,8 +485,12 @@ class FoldSqrtReplayBuffer:
                 for c in result._tasks[task_id]:
                     observed[c] = sum(row[2] == c for row in expected.values())
                     capacities[c] = observed[c]
-                allocation = min_quota_sqrt_allocation(observed, capacities, result._budget, base_quota=result._base_quota)
-                audit = {"task_id": task_id, "policy": BUFFER_POLICY, "observed_counts": dict(observed),
+                allocation = (
+                    equal_class_capacity_allocation(capacities, result._budget)
+                    if result._buffer_policy == EQUAL_CLASS_BUFFER_POLICY else
+                    min_quota_sqrt_allocation(observed, capacities, result._budget, base_quota=result._base_quota)
+                )
+                audit = {"task_id": task_id, "policy": result._buffer_policy, "observed_counts": dict(observed),
                          "feasible_capacities": dict(capacities), "allocation": allocation,
                          "stored_slots": sum(allocation.values()), "budget": result._budget}
                 if history[task_id] != audit:
@@ -525,7 +554,7 @@ def ensemble_buffer_accounting(buffers: Sequence[FoldSqrtReplayBuffer], *, globa
     if configured > global_budget or slots > configured:
         raise ValueError("Ensemble configured/stored slots exceed global budget.")
     unique = len(set().union(*ids.values()))
-    return {"policy": BUFFER_POLICY, "global_budget": global_budget, "configured_slots": configured,
+    return {"policy": reference["policy"], "global_budget": global_budget, "configured_slots": configured,
             "stored_slots": slots, "unique_sample_ids": unique, "duplicate_stored_copies": slots - unique,
             "per_member_slots": {b._member_id: b.total_size for b in buffers},
             "pairwise_overlap": {f"{a}_{b}": len(ids[a] & ids[b]) for a, b in ((0, 1), (0, 2), (1, 2))}}

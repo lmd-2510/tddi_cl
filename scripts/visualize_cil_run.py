@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.eval.predictions import load_member_prediction_artifact
+from src.eval.ensemble_ue import load_offline_ensemble_artifact
 
 
 DEFAULT_TASK_FILE = ROOT / "study_assets" / "task_protocols" / "tail_to_head_tasks.json"
@@ -220,6 +221,24 @@ def _load_predictions(
     split: str,
     warnings: list[str],
 ) -> dict[str, Any] | None:
+    # When the normal offline ensemble stage has already run, visualize that
+    # exact artifact instead of rebuilding ensemble probabilities from members.
+    offline_path = run_root / "offline_evaluation" / f"task_{task_id}" / (
+        "oof.npz" if split == "validation" else "test.npz"
+    )
+    if len(member_ids) == 3 and offline_path.is_file():
+        try:
+            artifact = load_offline_ensemble_artifact(offline_path)
+            return {
+                "labels": np.asarray(artifact.labels).astype(int),
+                "predictions": np.asarray(artifact.predictions).astype(int),
+                "probabilities": np.asarray(artifact.probabilities, dtype=float),
+                "class_ids": np.asarray(artifact.raw_class_ids).astype(int),
+                "sources": [str(offline_path)],
+                "members_used": len(artifact.context.member_ids),
+            }
+        except Exception as exc:
+            warnings.append(f"cannot load offline ensemble {offline_path}: {type(exc).__name__}: {exc}")
     artifacts = []
     sources = []
     for member_id in member_ids:

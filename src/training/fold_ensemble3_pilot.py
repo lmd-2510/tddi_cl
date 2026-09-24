@@ -22,7 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.fold_replay_buffer import four_percent_member_budgets  # noqa: E402
+from src.data.fold_replay_buffer import BUFFER_POLICIES, four_percent_member_budgets  # noqa: E402
 from src.data.stratified_folds import fold_file_sha256  # noqa: E402
 from src.eval.ensemble_ue import (  # noqa: E402
     aggregate_member_predictions,
@@ -229,9 +229,11 @@ def _load_locked_config(
     for key in ("buffer_policy", "ranking_policy", "base_quota", "fraction", "repeat_cap", "replay_starts_at_task"):
         if key not in replay:
             raise ValueError(f"replay.{key} is required.")
-    for key in ("buffer_policy", "ranking_policy", "base_quota", "replay_starts_at_task"):
+    for key in ("ranking_policy", "base_quota", "replay_starts_at_task"):
         if replay[key] != expected_replay[key]:
             raise ValueError(f"replay.{key} does not match the approved buffer policy.")
+    if replay["buffer_policy"] not in BUFFER_POLICIES:
+        raise ValueError(f"replay.buffer_policy must be one of {BUFFER_POLICIES}.")
     if not isinstance(replay["fraction"], (int, float)) or not 0.0 < float(replay["fraction"]) < 1.0:
         raise ValueError("replay.fraction must be in (0,1).")
     if type(replay["repeat_cap"]) is not int or replay["repeat_cap"] <= 0:
@@ -246,7 +248,7 @@ def _load_locked_config(
         raise ValueError("Unsupported classifier weight-alignment policy.")
     if value["training"].get("loss_variant") not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all",
     }:
         raise ValueError("Unsupported replay loss variant.")
     configured_epochs = value["training"].get("epochs")
@@ -506,7 +508,7 @@ def _validate_member_predictions(config: Mapping[str, Any], member_id: int) -> N
                 or artifact.provenance.preprocessing_policy != "task0_standard_frozen"
                 or artifact.provenance.ranking_policy
                 != "raw_sample_normalized_class_mean_control_v1"
-                or artifact.provenance.buffer_policy != "fold_min_quota_sqrt_capacity_v1"
+                or artifact.provenance.buffer_policy != config["replay"]["buffer_policy"]
                 or artifact.provenance.member_memory_budget != config["member_budgets"][str(member_id)]
                 or artifact.provenance.global_memory_budget != config["global_slot_budget"]
             ):

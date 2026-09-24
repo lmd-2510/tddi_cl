@@ -23,6 +23,8 @@ REPLAY12P5_CONFIG = Path(
 P4_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0.json")
 P4_WA_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0_wa.json")
 P3_HYBRID_DISTILL_CONFIG = Path("configs/p3_hybrid_distill_full8.json")
+FOCAL_EQUAL_BUFFER_CONFIG = Path("configs/p3_focal_equal_buffer_pilot.json")
+HYBRID_NODISTILL_FULL_CONFIG = Path("configs/p3_hybrid_full8_e30_mem4_nodistill.json")
 
 
 def _arg(command: Sequence[str], name: str) -> str:
@@ -145,6 +147,45 @@ def test_p3_hybrid_distill_config_enables_requested_loss_and_separate_output(
     assert _arg(plan.members[0].command, "--loss-variant") == "hybrid_distill"
     assert plan.members[1].command is None
     assert plan.members[2].command is None
+
+
+def test_requested_focal_equal_buffer_pilot_is_one_member_full8(tmp_path: Path) -> None:
+    config = load_full_config(
+        FOCAL_EQUAL_BUFFER_CONFIG,
+        overrides={"output_root": tmp_path / "focal_equal_buffer"},
+    )
+    plan = shared.build_pilot_plan(
+        config,
+        member_ids=[0],
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+    assert config["training"]["loss_variant"] == "focal_all"
+    assert config["replay"]["buffer_policy"] == "fold_equal_class_capacity_v1"
+    assert config["execution"]["stop_after_task"] == 7
+    assert plan.members[0].command is not None
+    assert _arg(plan.members[0].command, "--loss-variant") == "focal_all"
+    assert _arg(plan.members[0].command, "--buffer-policy") == "fold_equal_class_capacity_v1"
+    assert plan.members[1].command is None and plan.members[2].command is None
+
+
+def test_hybrid_no_distill_full_uses_fresh_output_and_historical_buffer(tmp_path: Path) -> None:
+    config = load_full_config(
+        HYBRID_NODISTILL_FULL_CONFIG,
+        overrides={"output_root": tmp_path / "hybrid_no_distill"},
+    )
+    plan = shared.build_pilot_plan(
+        config,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+    assert config["training"]["loss_variant"] == "hybrid"
+    assert config["replay"]["buffer_policy"] == "fold_min_quota_sqrt_capacity_v1"
+    assert config["training"]["epochs"] == 30
+    assert Path(config["output_root"]).name == "hybrid_no_distill"
+    for member in plan.members:
+        assert _arg(member.command, "--loss-variant") == "hybrid"
+        assert _arg(member.command, "--buffer-policy") == "fold_min_quota_sqrt_capacity_v1"
 
 
 def test_p4_config_changes_only_protocol_preprocessing_namespace_and_threshold(

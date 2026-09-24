@@ -45,6 +45,13 @@ def test_allocation_invariants_random_small_cases():
         assert all(0 <= result[c] <= caps[c] for c in caps)
 
 
+def test_equal_class_allocation_balances_until_capacity_is_exhausted():
+    result = replay.equal_class_capacity_allocation({10: 5, 57: 100, 901: 100}, 20)
+    assert result == {10: 5, 57: 8, 901: 7}
+    assert sum(result.values()) == 20
+    assert replay.equal_class_capacity_allocation({2: 1, 1: 100}, 4) == {1: 3, 2: 1}
+
+
 @pytest.mark.parametrize("observed,caps,budget,q", [
     ({1: 0}, {1: 0}, 10, 10), ({1: 5}, {1: 6}, 10, 10),
     ({1: 5}, {2: 5}, 10, 10), ({1: 5}, {1: -1}, 10, 10),
@@ -123,9 +130,13 @@ def data(tmp_path):
     return paths, tmp_path / "folds", tasks
 
 
-def settings(data, member=0, budget=5):
+def settings(data, member=0, budget=5, buffer_policy=replay.BUFFER_POLICY):
     ctx = prepare_development_fold_context(data[1] / "fold_assignments.parquet", data[1] / "fold_manifest.json", source_paths=data[0])
-    return dict(context=ctx, task_file=data[2], feature_columns=["x", "y"], member_id=member, total_memory_budget=budget)
+    result = dict(context=ctx, task_file=data[2], feature_columns=["x", "y"], member_id=member,
+                  total_memory_budget=budget)
+    if buffer_policy != replay.BUFFER_POLICY:
+        result["buffer_policy"] = buffer_policy
+    return result
 
 
 def test_p4_task_file_is_supported_by_fold_buffer(data, tmp_path):
@@ -303,6 +314,21 @@ def test_state_roundtrip_continuation(data, save_after, budget):
         assert update(continuous, kw, task) == update(resumed, kw, task)
         assert_arrays_equal(continuous.get_all(), resumed.get_all())
         assert continuous.state_dict()["state_sha256"] == resumed.state_dict()["state_sha256"]
+
+
+def test_equal_class_buffer_updates_and_roundtrips(data):
+    kw = settings(data, budget=5)
+    kw["buffer_policy"] = replay.EQUAL_CLASS_BUFFER_POLICY
+    continuous = replay.FoldSqrtReplayBuffer(**kw)
+    for task in range(2):
+        update(continuous, kw, task)
+    assert continuous.metadata["policy"] == replay.EQUAL_CLASS_BUFFER_POLICY
+    assert continuous.audit_history[-1]["allocation"] == {10: 3, 57: 2}
+    snapshot = pickle.loads(pickle.dumps(continuous.state_dict()))
+    resumed = replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **settings(data, budget=5, buffer_policy=replay.EQUAL_CLASS_BUFFER_POLICY))
+    assert_arrays_equal(resumed.get_all(), continuous.get_all())
+    with pytest.raises(ValueError, match="metadata mismatch"):
+        replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **settings(data, budget=5))
 
 
 @pytest.mark.parametrize("change", [{"member_id": 1}, {"total_memory_budget": 6}, {"base_quota": 9},

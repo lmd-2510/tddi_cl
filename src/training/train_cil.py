@@ -45,7 +45,7 @@ from src.data.fixed_budget_replay import (
     FixedReplaySampler,
     ReplayEpochAudit,
 )
-from src.data.fold_replay_buffer import RANKING_POLICIES, RANKING_POLICY
+from src.data.fold_replay_buffer import BUFFER_POLICIES, RANKING_POLICIES, RANKING_POLICY
 from src.data.sample_identity import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
 from src.data.stratified_folds import (
     StratifiedFoldAssignments,
@@ -256,7 +256,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--loss-variant",
         choices=[
             "baseline", "er", "hybrid", "hybrid_distill",
-            "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
+            "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all",
         ],
         default="baseline",
         help=(
@@ -333,6 +333,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Explicit frozen-fold replay capacity for this member.")
     parser.add_argument("--fold-global-budget", type=int, default=None,
                         help="Total planned frozen-fold budget recorded in the contract.")
+    parser.add_argument("--buffer-policy", choices=BUFFER_POLICIES,
+                        default=BUFFER_POLICIES[0],
+                        help="Exemplar slot allocation; default preserves historical sqrt-quota policy.")
     parser.add_argument("--replay-fraction", type=float, default=0.125,
                         help="Frozen-fold replay fraction; default is the baseline 12.5%%.")
     parser.add_argument("--replay-repeat-cap", type=int, default=3,
@@ -1366,7 +1369,7 @@ def train_one_epoch(
         raise ValueError("gradient_accumulation_steps must be positive.")
     if loss_variant not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all",
     }:
         raise ValueError(f"Unsupported loss_variant: {loss_variant!r}")
     if not 0.0 <= class_balance_beta < 1.0:
@@ -1411,6 +1414,8 @@ def train_one_epoch(
         )
         if loss_variant == "er":
             classification_loss = F.cross_entropy(logits, labels)
+        elif loss_variant == "focal_all":
+            classification_loss = _baseline_classification_loss
         elif loss_variant in {
             "hybrid", "hybrid_distill", "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
         } and student_old_indices:

@@ -213,6 +213,7 @@ def member_command(config, member, *, python=sys.executable):
         args["fold_global_budget"] = config["global_slot_budget"]
     args["replay_fraction"] = config["replay"]["fraction"]
     args["replay_repeat_cap"] = config["replay"]["repeat_cap"]
+    args["buffer_policy"] = config["replay"]["buffer_policy"]
     command = [str(python), str(PROJECT_ROOT / "src/training/train_cil.py")]
     for key, value in args.items():
         command.extend(["--" + key.replace("_", "-"), str(value)])

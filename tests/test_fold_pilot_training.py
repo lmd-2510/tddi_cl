@@ -347,6 +347,28 @@ def test_legacy_ewc_loss_and_update_unchanged(tiny):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
+def test_focal_all_applies_focal_to_old_and_current_rows_without_distillation(tiny):
+    torch.manual_seed(19)
+    model = torch.nn.Linear(2, 3)
+    x = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [-1.0, 0.5]])
+    y = torch.tensor([0, 1, 2, 0])  # labels 0/1 are replay-old; 2 is current
+    criterion = engine.FocalLoss(gamma=1.0)
+    expected = criterion(model(x), y).item()
+    result = engine.train_one_epoch(
+        model,
+        torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x, y), batch_size=4),
+        torch.optim.SGD(model.parameters(), lr=0.0),
+        criterion,
+        "cpu",
+        teacher_raw_classes=[10, 20],
+        current_seen_map={10: 0, 20: 1, 30: 2},
+        loss_variant="focal_all",
+        return_loss_components=True,
+    )
+    assert result.classification_loss == pytest.approx(expected)
+    assert result.logit_distillation_loss == result.feature_distillation_loss == 0.0
+
+
 @pytest.mark.parametrize("data", [True], indirect=True)
 def test_optional_test_report_only_after_best_selection(data, monkeypatch, tiny):
     command = cli(data, extra=["--stop-after-task", "0", "--epochs", "1"])

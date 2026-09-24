@@ -28,6 +28,7 @@ from src.data.ddi_dataset import (
 )
 from src.data.fold_preprocessing import load_fold_preprocessing
 from src.data.fold_replay_buffer import (
+    BUFFER_POLICIES,
     PIPELINE_INPUT_RANKING_POLICY,
     RANKING_POLICIES,
     SAMPLE_NORMALIZED_RANKING_POLICY,
@@ -123,9 +124,11 @@ def validate_fold_options(args):
         raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
     if args.loss_variant not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all",
     }:
         raise ValueError(f"Unsupported replay loss variant: {args.loss_variant}.")
+    if args.buffer_policy not in BUFFER_POLICIES:
+        raise ValueError(f"Unsupported buffer policy: {args.buffer_policy}.")
     if not math.isfinite(args.replay_fraction) or not 0.0 <= args.replay_fraction < 1.0:
         raise ValueError("replay_fraction must be finite and in [0,1).")
     if args.replay_repeat_cap <= 0:
@@ -336,7 +339,8 @@ def prepare_fold_run(args, *, engine, context=None):
             raise ValueError("Explicit frozen-fold global budget does not equal three member budgets.")
     buffer_kwargs = dict(context=context, task_file=args.task_file, feature_columns=columns,
         member_id=args.member_id, total_memory_budget=budgets[args.member_id], base_quota=10,
-        experiment_seed=args.seed, ranking_policy=args.exemplar_ranking_policy,
+        experiment_seed=args.seed, buffer_policy=args.buffer_policy,
+        ranking_policy=args.exemplar_ranking_policy,
         ranking_preprocessing=(prep if args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY else None),
         ranking_preprocessing_sha256=(prep_hash if args.exemplar_ranking_policy == PIPELINE_INPUT_RANKING_POLICY else None))
     buffer = FoldSqrtReplayBuffer(**buffer_kwargs)
@@ -367,6 +371,8 @@ def prepare_fold_run(args, *, engine, context=None):
         "feature_distillation_weight": args.feature_distill_weight, "temperature": args.temperature,
         "loss_variant": args.loss_variant,
         "loss_scope": (
+            "focal_current_and_replay_no_distillation"
+            if args.loss_variant == "focal_all" else
             "focal_and_old_column_KL_T2_and_latent_MSE_on_all_current_plus_replay_draws"
             if args.loss_variant == "baseline" else
             "focal_current_cross_entropy_replay_plus_old_column_KL_T2_and_latent_MSE"
