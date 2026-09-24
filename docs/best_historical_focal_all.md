@@ -1,4 +1,4 @@
-# Baseline chuẩn — P3 Hybrid không distillation
+# Best historical result — P3 Focal-all, không distillation
 
 Tài liệu này là **gốc bất biến** để so sánh các thí nghiệm tiếp theo. Mọi
 thay đổi về replay exposure, exemplar ranking, loss, protocol hoặc preprocessing
@@ -13,9 +13,9 @@ phải tạo config/output namespace mới; không sửa ngược baseline này.
 - Config SHA256 trong kết quả chuẩn: `7c0faaf27a875b0a77be8a63e2794276f2ad48afd9fe63d75791f6eb13ad3531`
 - Task-file SHA256: `0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79`
 
-Đây là control tốt nhất hiện có trong các full run đã hoàn tất. “Tốt nhất” ở
-đây nghĩa là baseline có kết quả task-7 Macro-F1/Balanced Accuracy tốt nhất
-để làm mốc, không có nghĩa mọi dataset hoặc mọi seed đều tối ưu.
+Đây là kết quả tốt nhất hiện có trong các full run đã hoàn tất. “Tốt nhất” ở
+đây nghĩa là run có kết quả task-7 Macro-F1/Balanced Accuracy tốt nhất để làm
+mốc; **đây không phải một control Hybrid Focal-current/CE-replay hợp lệ**.
 
 ## 2. Dữ liệu và protocol
 
@@ -39,8 +39,8 @@ validation. Test không tham gia train, exemplar selection hay threshold fitting
 | Nhóm | Giá trị chuẩn |
 |---|---|
 | Method wrapper | `replay_distill_fixed_budget_uniform` |
-| Loss variant | `hybrid` |
-| Loss thực tế | focal classification + replay, **không logit distillation, không feature distillation** |
+| Config label | `loss_variant=hybrid` |
+| Loss thực tế trong run lịch sử | **Focal(current) + Focal(replay); không logit/feature distillation** |
 | Backbone | `tddi_paper_member` |
 | Input/hidden | `3780 → [7560, 7560]` |
 | Activation/norm | GELU + LayerNorm |
@@ -57,6 +57,17 @@ validation. Test không tham gia train, exemplar selection hay threshold fitting
 
 Các trường `distill_alpha`, `temperature` và `feature_distill_weight` vẫn có
 trong schema dùng chung, nhưng không được áp dụng khi `loss_variant=hybrid`.
+
+**Lưu ý quan trọng về thực thi:** bundle kết quả ghi commit
+`1f9cc1f1769fa4238460b04a0deed1b5206de390`. Ở source commit này, code chỉ tạo
+`student_old_indices` khi có teacher; run `hybrid` không có teacher. Vì vậy
+nhánh phân biệt current/replay không chạy và classification loss rơi về Focal
+trên cả batch. Báo cáo cũ ghi `focal_current_cross_entropy_replay` dựa trên
+metadata theo config, không phải bằng chứng loss đó đã chạy.
+
+Từ commit `b3dc8ee`, code đã sửa điều kiện này. **Chạy lại cùng JSON config bằng
+source hiện tại sẽ là Focal-current + CE-replay và không tái tạo chính xác kết
+quả lịch sử Focal-all.** Không dùng lại output root cũ cho run mới.
 
 ## 4. Replay và exemplar
 
@@ -94,7 +105,7 @@ theo fraction và repeat cap.
 
 ## 6. Kết quả mốc hiện tại
 
-Kết quả lấy từ `docs/P3_HYBRID_E30_MEM4_RESULTS.md`.
+Kết quả lấy từ `docs/P3_FOCAL_ALL_MEM4.md`.
 
 ### Member mean tại task 7
 
@@ -130,11 +141,10 @@ bị rỗng.
 
 Không thay đổi nhiều nhóm cùng lúc. Thứ tự khuyến nghị:
 
-1. Giữ nguyên baseline này làm control.
-2. Chỉ thay replay exposure: pilot `fraction=0.25`, `repeat_cap=4` trên task 6→7.
-3. Nếu old-class Macro-F1 tăng mà current-class không giảm mạnh, mới chạy full 8 task.
-4. Sau replay pilot mới thử class-balanced current sampler hoặc exemplar policy khác.
-5. Distillation chỉ được thử như một ablation riêng; không trộn vào replay pilot.
+1. Giữ kết quả này làm mốc lịch sử Focal-all, không xem là control cho Hybrid Focal-current/CE-replay.
+2. Muốn so sánh loss/CB, trước tiên chạy control Hybrid đã sửa bằng code hiện tại, giữ nguyên fold, seed, budget, sampler và epoch; dùng output root mới.
+3. Sau control loss-matched mới kiểm tra replay exposure theo class, nhất là task 6→7.
+4. Mỗi pilot chỉ đổi một yếu tố; không trộn distillation, sampler, exemplar policy và replay exposure.
 
 Các pilot mới phải có:
 
@@ -148,13 +158,15 @@ Lưu ý: code hiện tại còn kiểm soát `fraction=0.125` và `repeat_cap=3`
 sampler/contract. Vì vậy không được chỉ sửa hai con số trong JSON rồi cho rằng
 replay đã thành 25%; cần truyền chúng thật sự vào `FoldReplayFractionSampler`.
 
-## 8. Lệnh tham khảo khi chạy lại baseline
+## 8. Lệnh tham khảo cho Hybrid đã sửa (không tái lập lịch sử Focal-all)
 
-Trên server, đặt đúng fold/preprocessing root rồi chạy dry-run trước:
+Trên server, đặt đúng fold/preprocessing root rồi chạy dry-run trước. Lưu ý đây
+là config có ý định Hybrid; với code hiện tại nó chạy loss đã sửa
+Focal-current/CE-replay, không tái tạo run lịch sử Focal-all:
 
 ```bash
 export P3_CONFIG="$PWD/configs/p3_hybrid_full8_e30_mem4.json"
-export P3_OUT="$PWD/outputs/p3_hybrid_full8_e30_mem4_seed0"
+export P3_OUT="$PWD/outputs/p3_hybrid_fixed_full8_e30_mem4_seed0"
 export P3_PREP_ROOT="$PWD/study_assets/preprocessing_p3_seed0_fold42"
 export P3_FOLD_ROOT="$PWD/outputs/fold_preparation_seed42_<timestamp>/folds"
 
@@ -162,6 +174,6 @@ bash scripts/run_p3_hyb.sh check
 bash scripts/run_p3_hyb.sh dry-run
 ```
 
-Chỉ chạy member khi dry-run hợp lệ và output namespace chưa chứa một run khác.
-Không resume baseline bằng config replay 25% hoặc config distillation; đó là
-hai thí nghiệm khác nhau.
+Chỉ chạy member khi dry-run hợp lệ và output namespace mới, riêng biệt. Code
+hiện tại thực thi Focal-current + CE-replay, nên không tái lập đúng run lịch sử
+Focal-all. Config replay 25% và config distillation cũng là các thí nghiệm khác.

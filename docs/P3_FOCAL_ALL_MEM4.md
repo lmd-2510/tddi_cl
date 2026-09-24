@@ -1,4 +1,4 @@
-# P3 Hybrid không distillation — full 8-task, 30 epochs, 4%/member
+# P3 Focal-all (current + replay) — full 8-task, 30 epochs, 4%/member
 
 ## 1. Phạm vi và tính toàn vẹn
 
@@ -22,8 +22,9 @@ Báo cáo này phân tích bundle p3_hybrid_full8_e30_mem4_summary_clean.zip và
 | Backbone | tddi_paper_member, input 3780 → hidden [7560,7560] → expandable head |
 | Activation/normalization | GELU, LayerNorm, dropout 0.2 |
 | Method wrapper | replay_distill_fixed_budget_uniform |
-| Loss variant | hybrid |
-| Loss scope thực tế | focal_current_cross_entropy_replay_no_distillation |
+| Config label (`loss_variant`) | `hybrid` (ý định cấu hình) |
+| Loss thực tế của run lịch sử | **Focal(current) + Focal(replay); không distillation** |
+| Git commit ghi trong bundle | `1f9cc1f1769fa4238460b04a0deed1b5206de390` |
 | Epoch/patience | tối đa 30 epoch/task, patience 5 |
 | Optimizer | AdamW mới ở mỗi task, lr 0.001, weight decay 0.0001 |
 | Batch | microbatch 64, effective batch 1024, gradient accumulation 16 |
@@ -38,7 +39,11 @@ Báo cáo này phân tích bundle p3_hybrid_full8_e30_mem4_summary_clean.zip và
 
 ### Ý nghĩa của “không distillation”
 
-Tên wrapper vẫn là replay_distill_fixed_budget_uniform vì đây là pipeline replay/frozen-fold dùng chung. Tuy nhiên checkpoint contract xác nhận loss_scope=focal_current_cross_entropy_replay_no_distillation, và training_audit.csv cho thấy ở mọi task:
+Tên wrapper vẫn là replay_distill_fixed_budget_uniform vì đây là pipeline replay/frozen-fold dùng chung. Run summary/checkpoint ghi `loss_variant=hybrid` và `loss_scope=focal_current_cross_entropy_replay_no_distillation`; tuy nhiên `loss_scope` được gán theo tên config, không phải đo kiểm nhánh loss runtime. Source của commit ghi trong bundle cho thấy run `hybrid` không tạo teacher, trong khi `student_old_indices` chỉ được tạo nếu có teacher. Vì vậy, từ task 1 trở đi nhánh Focal-current/CE-replay bị bỏ qua và dùng Focal mặc định trên cả current lẫn replay. Task 0 không có replay nên chỉ là Focal trên current.
+
+Trong `training_audit.csv`, các cột loss distillation bằng 0 như kỳ vọng, nhưng không có cột riêng xác nhận current-loss và replay-loss. Do đó audit CSV không chứng minh được CE đã áp dụng cho replay.
+
+Kết luận này áp dụng cho run no-distillation `loss_variant=hybrid` chạy bằng source trước `b3dc8ee`, gồm full P3 baseline trong bundle này. Pilot `replay25/cap4` chạy ngày 2026-09-23 cũng có trước bản sửa; nếu không có thay đổi source cục bộ khác, nó chịu cùng lỗi và thực tế dùng Focal cho cả current/replay. Các variant có teacher (`hybrid_distill`, logit-distill, replay-only distill) không bị lỗi điều kiện này vì `student_old_indices` được tạo khi teacher tồn tại. CB pilot chạy sau bản sửa thực thi CB-Focal cho current và CE cho replay; vì thế so với kết quả Focal-all này, nó thay đổi cả class weighting lẫn loss trên replay, không phải phép thử class balancing đơn biến.
 
 ~~~text
 logit_distillation_loss   = 0
@@ -170,9 +175,9 @@ Threshold OOF được chọn là 0.99 theo entropy confidence và balanced accu
 
 Threshold cải thiện chất lượng của nhóm mẫu rất tự tin nhưng bỏ hơn một nửa dữ liệu. Đây là selective prediction, không phải cải thiện mô hình trên toàn bộ test và không phải phương pháp sửa forgetting.
 
-## 9. So sánh với run hybrid + distillation trước đó
+## 9. Đối chiếu với run Hybrid + distillation
 
-So sánh này dùng report P3_HYBRID_DISTILL_E30_MEM4_RESULTS.md trong repo. Hai run cùng P3, 30 epoch, 4% buffer/member và seed; khác chính ở loss distillation.
+So sánh này dùng report `P3_HYBRID_DISTILL_E30_MEM4.md`. Hai run cùng P3, 30 epoch, 4% buffer/member và seed, nhưng **không chỉ khác distillation**: run lịch sử này thực tế dùng Focal-current + Focal-replay; run distill dùng Focal-current + CE-replay cùng distillation. Bảng số liệu chỉ là đối chiếu mô tả, không phải ablation loss đã kiểm soát.
 
 ### Member mean tại task 7
 
@@ -192,7 +197,7 @@ So sánh này dùng report P3_HYBRID_DISTILL_E30_MEM4_RESULTS.md trong repo. Hai
 | Weighted-F1 | 0.865381 | 0.880469 | +0.015088 |
 | Balanced Accuracy | 0.614565 | 0.712910 | **+0.098345** |
 
-Đây là chênh lệch lớn và nhất quán, đặc biệt ở các metric coi trọng class tail. Tuy nhiên đây mới là một ablation ở cùng experiment seed, chưa đủ để khẳng định distillation luôn có hại trên mọi seed.
+Chênh lệch lớn và nhất quán ở các metric được báo cáo, nhưng do classification loss cũng khác nên **không thể quy chênh lệch riêng cho distillation**. Đây cũng chỉ là một experiment seed.
 
 Các lý do hợp lý cho kết quả này:
 
@@ -200,20 +205,23 @@ Các lý do hợp lý cho kết quả này:
 2. Teacher cũ có thể đã bias theo class head; distillation truyền bias đó sang student.
 3. Sai số teacher tích lũy qua 8 task.
 4. Distillation giữ biểu diễn cũ nhưng replay exposure vẫn thấp so với task 7, nên không bảo vệ được old class một cách hiệu quả.
-5. Khi tắt distillation, model tự do điều chỉnh representation và classifier theo toàn bộ replay/current data, giúp Macro-F1 và Balanced Accuracy tăng.
+5. Khác biệt replay loss (Focal so với CE) cũng có thể đóng góp vào chênh lệch; hai run hiện có không tách được tác động này khỏi distillation.
 
-Không nên kết luận từ run này rằng distillation nói chung vô dụng. Kết luận đúng hơn là cấu hình teacher, trọng số và cách chuẩn hóa distillation hiện tại không phù hợp với distribution của study này.
+Không nên kết luận từ hai run này rằng distillation nói chung có hại/vô dụng. Muốn đánh giá cần control loss-matched: Hybrid đã sửa (Focal-current + CE-replay) không distillation so với chính loss đó có distillation.
 
 ## 10. Kết luận và hướng phát triển
 
-Run hybrid không distillation là kết quả tốt hơn rõ ràng so với run có distillation ở task 7, nhất là Macro-F1 và Balanced Accuracy. Nó vẫn còn forgetting đáng kể, vì old-class metrics thấp hơn current-class metrics khoảng 19–26 điểm phần trăm.
+Run Focal-all không distillation có kết quả cao hơn run hybrid + distillation trong các số liệu task 7 được báo cáo. Đây là so sánh mô tả, không phải ablation chỉ thay distillation. Run vẫn còn forgetting đáng kể, vì old-class metrics thấp hơn current-class metrics khoảng 19–26 điểm phần trăm.
+
+### Ghi chú tái lập
+
+Commit `b3dc8ee` sửa việc tạo `student_old_indices` để Hybrid không distillation vẫn phân biệt được replay labels khi không có teacher. Vì vậy, chạy lại cùng JSON config bằng code hiện tại sẽ thực thi **Focal-current + CE-replay**, không tái lập chính xác run lịch sử Focal-all. Giữ nguyên output lịch sử; mọi run mới cần output namespace riêng và ghi rõ commit/source.
 
 Thứ tự thí nghiệm tiếp theo nên là:
 
-1. Giữ run không distillation làm control chính.
-2. Kiểm tra replay exposure theo class, đặc biệt ở task 7.
-3. Nếu muốn đánh giá distillation công bằng, thử chỉ bật logit với distill_alpha=0.25–0.5, giữ feature bằng 0.
-4. Chỉ thử feature distillation sau khi chuẩn hóa latent MSE theo dimension/scale và dùng weight nhỏ 0.05–0.1.
-5. Chạy thêm experiment seed trước khi đưa kết luận cuối vào báo cáo chính.
+1. Giữ run Focal-all này làm mốc lịch sử, không xem là control loss-matched.
+2. Nếu muốn kết luận về distillation hoặc CB, trước hết chạy control Hybrid đã sửa (Focal-current + CE-replay), cùng fold/seed/budget/sampler/epoch, dùng output root mới.
+3. Sau control loss-matched mới đánh giá distillation logit/feature hoặc replay exposure, mỗi lần chỉ đổi một yếu tố.
+4. Chạy thêm experiment seed trước khi đưa kết luận cuối vào báo cáo chính.
 
 Các run mới cần dùng output namespace riêng và giữ nguyên protocol, preprocessing, budget, epoch để ablation không bị trộn biến.
