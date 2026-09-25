@@ -35,13 +35,30 @@ def main() -> None:
     archive = args.archive.resolve()
     archive.parent.mkdir(parents=True, exist_ok=True)
     files = sorted(p for p in root.rglob("*") if p.is_file() and not _ignored(p, root)) if root.exists() else []
+    offline_task_ids = []
+    offline_root = root / "offline_evaluation"
+    if offline_root.is_dir():
+        for task_dir in offline_root.glob("task_*"):
+            try:
+                task_id = int(task_dir.name.split("_", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            if (task_dir / "oof.npz").is_file() and (task_dir / "test.npz").is_file():
+                offline_task_ids.append(task_id)
+    offline_task_ids.sort()
     summary = [
         f"# {args.label} — experiment review package",
         "",
         f"- Run root: `{root}`",
         f"- Config: `{config}`",
         f"- Status: `{args.status}`",
-        "- Offline ensemble: produced by the standard full-run pipeline when all members completed.",
+        (
+            "- Offline OOF/test ensemble artifacts present for tasks: "
+            f"`{offline_task_ids}` (NPZ arrays are intentionally excluded from this ZIP)."
+            if offline_task_ids
+            else "- Offline OOF/test ensemble artifacts: none found; this package does not claim an ensemble completed."
+        ),
+        f"- Full manifest present: `{(root / 'full_manifest.json').is_file()}`.",
         "- Included: configs, run/task summaries, logs, metric/audit CSV/JSON, visualization PNG/CSV.",
         "- Excluded: NPZ/NPY prediction arrays, checkpoints/model weights, and Parquet sources.",
         "",
