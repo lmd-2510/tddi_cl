@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full P3: historical training settings, Hybrid loss + equal-per-class memory.
+# Full P3 runner: configurable experiment slug/config; defaults preserve the historical Hybrid run.
 # Default action is detached nohup start; training and offline ensemble are sequential.
 set -uo pipefail
 
@@ -8,10 +8,13 @@ cd "$ROOT" || exit 2
 PYTHON_BIN="${P3_PYTHON:-python}"
 GPU_ID="${P3_GPU_ID:-0}"
 ACTION="${1:-start}"
-CONFIG="$ROOT/configs/p3_hybrid_equal_buffer_full8_e30_mem4.json"
+EXPERIMENT_SLUG="${P3_EXPERIMENT_SLUG:-p3_hybrid_equal_buffer_full8_e30_mem4}"
+DISPLAY_LABEL="${P3_DISPLAY_LABEL:-P3 Hybrid + equal-class buffer full8 e30 mem4}"
+LOSS_LABEL="${P3_LOSS_LABEL:-Hybrid (Focal current + CE replay)}"
+CONFIG="${P3_CONFIG:-$ROOT/configs/p3_hybrid_equal_buffer_full8_e30_mem4.json}"
 TASK_FILE="$ROOT/study_assets/task_protocols/tail_to_head_tasks.json"
 THRESHOLD="$ROOT/configs/eval_tddi_p3_ensemble_entropy_threshold.json"
-MONITOR_ROOT="$ROOT/outputs/p3_experiments/hybrid_equal_buffer"
+MONITOR_ROOT="${P3_MONITOR_ROOT:-$ROOT/outputs/p3_experiments/hybrid_equal_buffer}"
 LATEST="$MONITOR_ROOT/latest.txt"
 
 die() { echo "[STOP] $*" >&2; exit 2; }
@@ -73,7 +76,7 @@ check_inputs() {
     [[ -s "$PREP_ROOT/member_${member}/B/fold_preprocessing.json" ]] || die "Missing preprocessing member $member"
   done
   [[ "$(sha256sum "$TASK_FILE" | awk '{print $1}')" == "0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79" ]] || die "P3 task protocol hash mismatch"
-  echo "[OK] P3 inputs; 3 members sequential; 4% memory/member (27,778 slots); equal-class buffer; Hybrid loss; replay=12.5%, cap=3."
+  echo "[OK] P3 inputs; 3 members sequential; 4% memory/member (27,778 slots); equal-class buffer; loss=$LOSS_LABEL; replay=12.5%, cap=3."
   echo "[OK] Fold root: $FOLD_ROOT"
   echo "[OK] Preprocessing root: $PREP_ROOT"
 }
@@ -119,10 +122,10 @@ run_visualizations() {
 run_experiment() {
   local run_tag="$1"
   RUN_HOME="${P3_RUN_HOME:-$MONITOR_ROOT/run_$run_tag}"
-  OUT_ROOT="${P3_OUT:-$ROOT/outputs/p3_hybrid_equal_buffer_full8_e30_mem4_seed0_$run_tag}"
+  OUT_ROOT="${P3_OUT:-$ROOT/outputs/${EXPERIMENT_SLUG}_seed0_$run_tag}"
   mkdir -p "$RUN_HOME" "$OUT_ROOT"
   make_common_args "$OUT_ROOT"
-  echo "[RUN] Starting three-member full P3 run: $OUT_ROOT"
+  echo "[RUN] Starting three-member full P3 run ($DISPLAY_LABEL): $OUT_ROOT"
   if "$PYTHON_BIN" src/training/fold_ensemble3_full.py "${COMMON_ARGS[@]}" --execute \
     > "$RUN_HOME/training_and_offline.log" 2>&1; then
     TRAIN_STATUS=0
@@ -168,9 +171,9 @@ run_experiment() {
   STATUS_FILE="$OUT_ROOT/experiment_status.txt"
   printf 'train_and_offline_exit=%s\nfinal_report_exit=%s\nvisualization_exit=%s\ntask6_task7_analysis_exit=%s\n' \
     "$TRAIN_STATUS" "$REPORT_STATUS" "$VIZ_STATUS" "$DIAGNOSTIC_STATUS" > "$STATUS_FILE"
-  ARCHIVE="$OUT_ROOT/review/p3_hybrid_equal_buffer_full8_e30_mem4_review_${run_tag}.zip"
+  ARCHIVE="$OUT_ROOT/review/${EXPERIMENT_SLUG}_review_${run_tag}.zip"
   if "$PYTHON_BIN" scripts/package_p3_experiment_review.py \
-    --label "P3 Hybrid + equal-class buffer full8 e30 mem4" \
+    --label "$DISPLAY_LABEL" \
     --run-root "$OUT_ROOT" --config "$CONFIG" --status \
     "train_and_offline_exit=$TRAIN_STATUS; final_report_exit=$REPORT_STATUS; visualization_exit=$VIZ_STATUS; task6_task7_analysis_exit=$DIAGNOSTIC_STATUS" \
     --log "$RUN_HOME/training_and_offline.log" --archive "$ARCHIVE" \
@@ -189,7 +192,7 @@ case "$ACTION" in
   check)
     check_inputs
     TAG="${2:-$(date -u +%Y%m%dT%H%M%SZ)}"
-    OUT_ROOT="${P3_OUT:-$ROOT/outputs/p3_hybrid_equal_buffer_full8_e30_mem4_seed0_$TAG}"
+    OUT_ROOT="${P3_OUT:-$ROOT/outputs/${EXPERIMENT_SLUG}_seed0_$TAG}"
     preflight "$OUT_ROOT"
     echo "[OK] Dry-run/preflight complete; no model created."
     ;;
@@ -201,7 +204,7 @@ case "$ACTION" in
   start)
     TAG="${2:-$(date -u +%Y%m%dT%H%M%SZ)}"
     RUN_HOME="$MONITOR_ROOT/run_$TAG"
-    OUT_ROOT="$ROOT/outputs/p3_hybrid_equal_buffer_full8_e30_mem4_seed0_$TAG"
+    OUT_ROOT="$ROOT/outputs/${EXPERIMENT_SLUG}_seed0_$TAG"
     mkdir -p "$RUN_HOME"
     preflight "$OUT_ROOT" > "$RUN_HOME/preflight.log" 2>&1 || {
       tail -n 30 "$RUN_HOME/preflight.log" >&2
@@ -215,7 +218,7 @@ case "$ACTION" in
       bash "$ROOT/scripts/run_p3_hybrid_equal_buffer_full.sh" run "$TAG" \
       > "$RUN_HOME/nohup.log" 2>&1 < /dev/null &
     echo $! > "$RUN_HOME/job.pid"
-    echo "[STARTED] P3 Hybrid + equal buffer, full 8 tasks, 3 members; PID=$(<"$RUN_HOME/job.pid")"
+    echo "[STARTED] $DISPLAY_LABEL; full 8 tasks, 3 members; PID=$(<"$RUN_HOME/job.pid")"
     echo "[LOG] $RUN_HOME/nohup.log"
     echo "[OUTPUT] $OUT_ROOT"
     ;;

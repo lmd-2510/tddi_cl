@@ -256,7 +256,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--loss-variant",
         choices=[
             "baseline", "er", "hybrid", "hybrid_distill",
-            "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all",
+            "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all", "er_ace",
         ],
         default="baseline",
         help=(
@@ -267,7 +267,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "hybrid_distill_replay_only applies distillation only to replay examples; "
             "hybrid_logit_distill adds logit distillation without feature distillation; "
             "cb_hybrid uses effective-number class-balanced Focal on current data "
-            "and ordinary CE on replay."
+            "and ordinary CE on replay; er_ace masks current-example logits to current-task "
+            "classes and applies full-seen-class CE to replay examples."
         ),
     )
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
@@ -451,6 +452,46 @@ def build_student_old_indices(
     if missing:
         raise ValueError(f"Teacher classes missing from current class map: {missing}")
     return [current_seen_map[raw_class] for raw_class in teacher_raw_classes]
+
+
+def er_ace_classification_loss(
+    logits: "torch.Tensor",
+    labels: "torch.Tensor",
+    old_class_indices: list[int],
+) -> "torch.Tensor":
+    """ER-ACE classification objective for a mixed current/replay minibatch.
+
+    Incoming/current examples use CE over current-task classes only, while
+    replay examples use CE over every class seen so far.  The two source-wise
+    means are summed, matching the asymmetric objective in ER-ACE.
+    """
+    if logits.ndim != 2 or labels.ndim != 1 or logits.shape[0] != labels.shape[0]:
+        raise ValueError("ER-ACE expects [batch, classes] logits and [batch] labels.")
+    if len(set(old_class_indices)) != len(old_class_indices):
+        raise ValueError("ER-ACE old class indices must be unique.")
+    if any(index < 0 or index >= logits.shape[1] for index in old_class_indices):
+        raise ValueError("ER-ACE old class indices fall outside the current classifier head.")
+
+    old_indices = torch.as_tensor(old_class_indices, dtype=torch.long, device=labels.device)
+    replay_mask = torch.isin(labels, old_indices) if old_indices.numel() else torch.zeros_like(labels, dtype=torch.bool)
+    current_mask = ~replay_mask
+    old_index_set = set(old_class_indices)
+    current_indices = [index for index in range(logits.shape[1]) if index not in old_index_set]
+    if not current_indices:
+        raise ValueError("ER-ACE needs at least one current-task class in the classifier head.")
+
+    terms = []
+    if bool(current_mask.any()):
+        current_index_tensor = torch.as_tensor(current_indices, dtype=torch.long, device=labels.device)
+        target_lookup = torch.full((logits.shape[1],), -1, dtype=torch.long, device=labels.device)
+        target_lookup[current_index_tensor] = torch.arange(len(current_indices), device=labels.device)
+        current_targets = target_lookup[labels[current_mask]]
+        terms.append(F.cross_entropy(logits[current_mask][:, current_index_tensor], current_targets))
+    if bool(replay_mask.any()):
+        terms.append(F.cross_entropy(logits[replay_mask], labels[replay_mask]))
+    if not terms:
+        raise ValueError("ER-ACE received an empty minibatch.")
+    return torch.stack(terms).sum()
 
 
 def method_protocol_name(method: str) -> str:
@@ -1369,7 +1410,7 @@ def train_one_epoch(
         raise ValueError("gradient_accumulation_steps must be positive.")
     if loss_variant not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all", "er_ace",
     }:
         raise ValueError(f"Unsupported loss_variant: {loss_variant!r}")
     if not 0.0 <= class_balance_beta < 1.0:
@@ -1414,6 +1455,8 @@ def train_one_epoch(
         )
         if loss_variant == "er":
             classification_loss = F.cross_entropy(logits, labels)
+        elif loss_variant == "er_ace":
+            classification_loss = er_ace_classification_loss(logits, labels, student_old_indices)
         elif loss_variant == "focal_all":
             classification_loss = _baseline_classification_loss
         elif loss_variant in {

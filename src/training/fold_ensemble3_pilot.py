@@ -248,7 +248,7 @@ def _load_locked_config(
         raise ValueError("Unsupported classifier weight-alignment policy.")
     if value["training"].get("loss_variant") not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all", "er_ace",
     }:
         raise ValueError("Unsupported replay loss variant.")
     configured_epochs = value["training"].get("epochs")

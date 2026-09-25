@@ -181,6 +181,22 @@ def test_hybrid_distill_activates_both_distillation_losses(data, monkeypatch, ti
     )
 
 
+def test_er_ace_records_scope_and_keeps_distillation_off(data, monkeypatch, tiny):
+    command = cli(data, suffix="_er_ace", extra=["--loss-variant", "er_ace"])
+    monkeypatch.setattr(sys, "argv", command)
+    engine.main()
+
+    root = data["root"] / "run_raw_identity_er_ace"
+    resolved = json.loads((root / "run_config.json").read_text())["resolved"]
+    assert resolved["loss_variant"] == "er_ace"
+    assert resolved["loss_scope"] == (
+        "ER_ACE_current_CE_masked_to_current_task_classes_plus_replay_CE_over_all_seen_classes_source_mean_sum_no_distillation"
+    )
+    losses = pd.read_csv(root / "training_audit.csv")
+    assert (losses.logit_distillation_loss == 0).all()
+    assert (losses.feature_distillation_loss == 0).all()
+
+
 def test_fold_training_exports_assignment_bound_validation_predictions(data, monkeypatch, tiny):
     command = cli(
         data, suffix="_predictions",

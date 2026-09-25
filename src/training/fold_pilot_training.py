@@ -124,7 +124,7 @@ def validate_fold_options(args):
         raise ValueError(f"Unsupported weight-alignment policy: {args.weight_alignment}.")
     if args.loss_variant not in {
         "baseline", "er", "hybrid", "hybrid_distill",
-        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all",
+        "hybrid_distill_replay_only", "hybrid_logit_distill", "cb_hybrid", "focal_all", "er_ace",
     }:
         raise ValueError(f"Unsupported replay loss variant: {args.loss_variant}.")
     if args.buffer_policy not in BUFFER_POLICIES:
@@ -385,6 +385,8 @@ def prepare_fold_run(args, *, engine, context=None):
             if args.loss_variant == "cb_hybrid" else
             "cross_entropy_on_current_plus_replay_no_distillation"
             if args.loss_variant == "er" else
+            "ER_ACE_current_CE_masked_to_current_task_classes_plus_replay_CE_over_all_seen_classes_source_mean_sum_no_distillation"
+            if args.loss_variant == "er_ace" else
             "focal_current_cross_entropy_replay_no_distillation"
         ),
         "weight_alignment": {

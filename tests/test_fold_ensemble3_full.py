@@ -26,6 +26,7 @@ P3_HYBRID_DISTILL_CONFIG = Path("configs/p3_hybrid_distill_full8.json")
 FOCAL_EQUAL_BUFFER_CONFIG = Path("configs/p3_focal_equal_buffer_pilot.json")
 HYBRID_NODISTILL_FULL_CONFIG = Path("configs/p3_hybrid_full8_e30_mem4_nodistill.json")
 HYBRID_EQUAL_BUFFER_FULL_CONFIG = Path("configs/p3_hybrid_equal_buffer_full8_e30_mem4.json")
+ER_ACE_EQUAL_BUFFER_FULL_CONFIG = Path("configs/p3_er_ace_equal_buffer_full8_e30_mem4.json")
 
 
 def _arg(command: Sequence[str], name: str) -> str:
@@ -225,6 +226,31 @@ def test_hybrid_equal_buffer_full_changes_only_requested_historical_settings(
     for member in plan.members:
         assert member.command is not None
         assert _arg(member.command, "--loss-variant") == "hybrid"
+        assert _arg(member.command, "--buffer-policy") == "fold_equal_class_capacity_v1"
+        assert _arg(member.command, "--epochs") == "30"
+        assert _arg(member.command, "--stop-after-task") == "7"
+
+
+def test_er_ace_full_config_uses_fresh_namespace_and_full_ensemble(tmp_path: Path) -> None:
+    config = load_full_config(
+        ER_ACE_EQUAL_BUFFER_FULL_CONFIG,
+        overrides={"output_root": tmp_path / "er_ace"},
+    )
+    plan = shared.build_pilot_plan(
+        config,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+
+    assert config["training"]["loss_variant"] == "er_ace"
+    assert config["replay"]["buffer_policy"] == "fold_equal_class_capacity_v1"
+    assert config["training"]["epochs"] == 30
+    assert config["execution"]["stop_after_task"] == 7
+    assert Path(config["output_root"]).name == "er_ace"
+    assert len(plan.members) == 3
+    for member in plan.members:
+        assert member.command is not None
+        assert _arg(member.command, "--loss-variant") == "er_ace"
         assert _arg(member.command, "--buffer-policy") == "fold_equal_class_capacity_v1"
         assert _arg(member.command, "--epochs") == "30"
         assert _arg(member.command, "--stop-after-task") == "7"
