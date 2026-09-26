@@ -61,6 +61,7 @@ EXECUTION = {
 }
 EVALUATION_KEYS = {"threshold_config", "ensemble_namespace"}
 SUPPORTED_PROTOCOLS = {
+    "P2": "head_to_tail",
     "P3": "tail_to_head",
     "P4": "constrained_mass_balanced",
 }
@@ -714,6 +715,11 @@ def execute_ensemble_study(
         config, member_ids=selected, python=python, require_inputs=True, inspector=inspector
     )
     if any(member.status != "complete" for member in final.members):
+        return None
+    # A single selected member is a supported training operation (for example,
+    # a protocol-diverse ensemble).  It must not trigger validation of missing
+    # sibling predictions or run the same-protocol offline aggregation.
+    if set(selected) != set(MEMBER_IDS):
         return None
     for member_id in MEMBER_IDS:
         _validate_member_predictions(config, member_id)

@@ -1,10 +1,37 @@
-# Best historical result — P3 Focal-all, không distillation
+# Best historical anchor và cấu hình P3 được chốt để phát triển tiếp
 
-Tài liệu này là **gốc bất biến** để so sánh các thí nghiệm tiếp theo. Mọi
-thay đổi về replay exposure, exemplar ranking, loss, protocol hoặc preprocessing
-phải tạo config/output namespace mới; không sửa ngược baseline này.
+Tài liệu này giữ lại kết quả lịch sử tốt nhất làm mốc đối chiếu, đồng thời chốt
+cấu hình tiếp theo dựa trên mốc đó. Hai phần cần được phân biệt:
 
-## 1. Config chuẩn
+- **Historical anchor (bất biến):** run Focal-all với buffer theo quota lịch sử;
+  không sửa lại cấu hình hay số liệu đã chạy.
+- **Cấu hình được chốt để phát triển tiếp:** giữ các thiết lập historical, chỉ
+  đổi sang macro/equal-class buffer và Hybrid loss (Focal cho dữ liệu task hiện
+  tại, CE cho replay). Cấu hình này đã có file riêng và full-run runbook.
+
+Mọi thay đổi khác về replay exposure, exemplar ranking, protocol, preprocessing
+hoặc training phải tạo config/output namespace mới.
+
+## Cấu hình được chốt hiện tại
+
+- Config: `configs/p3_hybrid_equal_buffer_full8_e30_mem4.json`
+- Runbook/lệnh chạy: `docs/P3_HYBRID_EQUAL_BUFFER_FULL_RUNBOOK.md`
+- Output gốc trong config: `outputs/p3_hybrid_equal_buffer_full8_e30_mem4_seed0`
+- Hai khác biệt so với historical anchor:
+  1. Buffer: `fold_min_quota_sqrt_capacity_v1` →
+     `fold_equal_class_capacity_v1` (macro/equal-class, giới hạn bởi số mẫu còn
+     giữ được của từng class).
+  2. Loss: Focal-all → Hybrid: Focal cho current-task samples + CE cho replay
+     samples; không bật logit/feature distillation.
+- Các thiết lập khác giữ theo historical setup, gồm P3 tail-to-head, 3 members,
+  30 epoch tối đa/task, patience 5, replay fraction 12.5%, repeat cap 3 và
+  4% budget cho mỗi member.
+
+Đây là **cấu hình thí nghiệm được chọn**, không thay đổi sự thật rằng historical
+anchor bên dưới đã chạy bằng Focal-all. Kết quả của cấu hình mới phải được báo
+cáo riêng, không ghi đè số liệu historical.
+
+## 1. Historical anchor: config và provenance
 
 - Config: `configs/p3_hybrid_full8_e30_mem4.json`
 - Output namespace: `outputs/p3_hybrid_full8_e30_mem4_seed0`
@@ -13,9 +40,10 @@ phải tạo config/output namespace mới; không sửa ngược baseline này.
 - Config SHA256 trong kết quả chuẩn: `7c0faaf27a875b0a77be8a63e2794276f2ad48afd9fe63d75791f6eb13ad3531`
 - Task-file SHA256: `0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79`
 
-Đây là kết quả tốt nhất hiện có trong các full run đã hoàn tất. “Tốt nhất” ở
-đây nghĩa là run có kết quả task-7 Macro-F1/Balanced Accuracy tốt nhất để làm
-mốc; **đây không phải một control Hybrid Focal-current/CE-replay hợp lệ**.
+Đây là kết quả tốt nhất hiện có trong các full run đã hoàn tất tại thời điểm
+tài liệu được tổng hợp. “Tốt nhất” nói về **kết quả lịch sử đã quan sát**, không
+phải cấu hình tiếp theo được chọn ở đầu tài liệu. Đây không phải control Hybrid
+Focal-current/CE-replay hợp lệ.
 
 ## 2. Dữ liệu và protocol
 
@@ -40,7 +68,7 @@ validation. Test không tham gia train, exemplar selection hay threshold fitting
 |---|---|
 | Method wrapper | `replay_distill_fixed_budget_uniform` |
 | Config label | `loss_variant=hybrid` |
-| Loss thực tế trong run lịch sử | **Focal(current) + Focal(replay); không logit/feature distillation** |
+| Loss thực tế trong historical anchor | **Focal(current) + Focal(replay); không logit/feature distillation** |
 | Backbone | `tddi_paper_member` |
 | Input/hidden | `3780 → [7560, 7560]` |
 | Activation/norm | GELU + LayerNorm |
@@ -69,7 +97,7 @@ Từ commit `b3dc8ee`, code đã sửa điều kiện này. **Chạy lại cùng
 source hiện tại sẽ là Focal-current + CE-replay và không tái tạo chính xác kết
 quả lịch sử Focal-all.** Không dùng lại output root cũ cho run mới.
 
-## 4. Replay và exemplar
+## 4. Replay và exemplar của historical anchor
 
 | Thành phần | Giá trị chuẩn |
 |---|---|
@@ -141,10 +169,10 @@ bị rỗng.
 
 Không thay đổi nhiều nhóm cùng lúc. Thứ tự khuyến nghị:
 
-1. Giữ kết quả này làm mốc lịch sử Focal-all, không xem là control cho Hybrid Focal-current/CE-replay.
-2. Muốn so sánh loss/CB, trước tiên chạy control Hybrid đã sửa bằng code hiện tại, giữ nguyên fold, seed, budget, sampler và epoch; dùng output root mới.
-3. Sau control loss-matched mới kiểm tra replay exposure theo class, nhất là task 6→7.
-4. Mỗi pilot chỉ đổi một yếu tố; không trộn distillation, sampler, exemplar policy và replay exposure.
+1. Giữ kết quả này làm historical anchor Focal-all; không diễn giải lại nó thành Hybrid.
+2. Cấu hình được chốt để phát triển tiếp là Hybrid + macro/equal-class buffer ở đầu tài liệu và trong runbook liên kết.
+3. Khi đánh giá tác động riêng của loss hoặc buffer, so sánh với run có cùng các yếu tố còn lại; tổ hợp hai thay đổi chỉ cho biết hiệu quả của cấu hình kết hợp, không tách được đóng góp riêng của từng thay đổi.
+4. Mỗi thí nghiệm sau đó chỉ đổi một yếu tố; không trộn distillation, sampler, exemplar policy và replay exposure.
 
 Các pilot mới phải có:
 
@@ -158,22 +186,18 @@ Lưu ý: code hiện tại còn kiểm soát `fraction=0.125` và `repeat_cap=3`
 sampler/contract. Vì vậy không được chỉ sửa hai con số trong JSON rồi cho rằng
 replay đã thành 25%; cần truyền chúng thật sự vào `FoldReplayFractionSampler`.
 
-## 8. Lệnh tham khảo cho Hybrid đã sửa (không tái lập lịch sử Focal-all)
+## 8. Tham chiếu lệnh chạy cấu hình được chốt
 
-Trên server, đặt đúng fold/preprocessing root rồi chạy dry-run trước. Lưu ý đây
-là config có ý định Hybrid; với code hiện tại nó chạy loss đã sửa
-Focal-current/CE-replay, không tái tạo run lịch sử Focal-all:
+Runbook dưới đây chạy cấu hình Hybrid + equal-class buffer đã chốt; đây không
+phải lệnh tái lập historical anchor Focal-all. Trên server, bảo đảm fold và
+preprocessing artifacts vẫn tồn tại rồi chạy:
 
 ```bash
-export P3_CONFIG="$PWD/configs/p3_hybrid_full8_e30_mem4.json"
-export P3_OUT="$PWD/outputs/p3_hybrid_fixed_full8_e30_mem4_seed0"
-export P3_PREP_ROOT="$PWD/study_assets/preprocessing_p3_seed0_fold42"
-export P3_FOLD_ROOT="$PWD/outputs/fold_preparation_seed42_<timestamp>/folds"
-
-bash scripts/run_p3_hyb.sh check
-bash scripts/run_p3_hyb.sh dry-run
+bash scripts/run_p3_hybrid_equal_buffer_full.sh check
+bash scripts/run_p3_hybrid_equal_buffer_full.sh
 ```
 
-Chỉ chạy member khi dry-run hợp lệ và output namespace mới, riêng biệt. Code
-hiện tại thực thi Focal-current + CE-replay, nên không tái lập đúng run lịch sử
-Focal-all. Config replay 25% và config distillation cũng là các thí nghiệm khác.
+Script mặc định chạy `start`: kiểm tra đầu vào/dry-run, chạy tuần tự ba member,
+offline ensemble, tổng hợp metric/visualization và gói review. Xem runbook để
+theo dõi tiến trình và tìm ZIP kết quả. Không dùng lại output namespace của run
+cũ; config replay 25% và các config có distillation là thí nghiệm khác.

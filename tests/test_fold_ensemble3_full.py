@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Sequence
 
@@ -289,6 +290,31 @@ def test_p4_config_changes_only_protocol_preprocessing_namespace_and_threshold(
             "constrained_mass_balanced_seed0_tasks.json"
         )
         assert _arg(member.command, "--epochs") == "20"
+
+
+def test_full_config_accepts_locked_p2_head_to_tail_protocol(tmp_path: Path) -> None:
+    payload = {"protocol": "head_to_tail", "seed": None, "num_classes": 178,
+               "tasks": []}
+    start = 0
+    for task_id, width in enumerate([38, 20, 20, 20, 20, 20, 20, 20]):
+        payload["tasks"].append({"task_id": task_id,
+                                 "classes": list(range(start, start + width)),
+                                 "num_classes": width})
+        start += width
+    task_file = tmp_path / "head_to_tail_tasks.json"
+    task_file.write_text(json.dumps(payload), encoding="utf-8")
+    digest = hashlib.sha256(task_file.read_bytes()).hexdigest()
+    config = json.loads(Path("configs/p3_hybrid_equal_buffer_full8_e30_mem4.json").read_text())
+    config["protocol"].update({"id": "P2", "name": "head_to_tail",
+                               "task_file": str(task_file), "sha256": digest})
+    config_path = tmp_path / "p2_config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    loaded = load_full_config(config_path, project_root=Path.cwd(),
+                              overrides={"output_root": tmp_path / "p2_output"})
+    assert loaded["protocol"]["id"] == "P2"
+    assert loaded["tasks"][0]["classes"] == list(range(38))
+    assert loaded["training"]["loss_variant"] == "hybrid"
+    assert loaded["replay"]["buffer_policy"] == "fold_equal_class_capacity_v1"
 
 
 def test_p4_wa_config_changes_only_alignment_and_output_namespace(tmp_path: Path) -> None:

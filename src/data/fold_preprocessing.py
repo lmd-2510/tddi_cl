@@ -41,6 +41,7 @@ def _digest(value) -> str:
 
 
 SUPPORTED_PROTOCOLS = {
+    "head_to_tail": None,
     "tail_to_head": None,
     "constrained_mass_balanced": 0,
 }
@@ -51,7 +52,7 @@ def _task0(path: str | Path) -> tuple[str, str, list[int]]:
     payload = json.loads(content)
     protocol = payload.get("protocol") if isinstance(payload, dict) else None
     if protocol not in SUPPORTED_PROTOCOLS:
-        raise ValueError("Expected a supported P3 tail_to_head or P4 constrained_mass_balanced task file.")
+        raise ValueError("Expected a supported P2 head_to_tail, P3 tail_to_head, or P4 constrained_mass_balanced task file.")
     expected_seed = SUPPORTED_PROTOCOLS[protocol]
     if payload.get("seed") != expected_seed:
         raise ValueError(f"Task-file protocol={protocol} requires seed={expected_seed!r}.")

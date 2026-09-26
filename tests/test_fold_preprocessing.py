@@ -100,6 +100,18 @@ def test_p4_task_file_fits_and_loads_with_p4_provenance(data, tmp_path):
     assert loaded.metadata == artifact.metadata
 
 
+def test_p2_head_to_tail_task_file_is_supported_for_task0_preprocessing(data, tmp_path):
+    payload = json.loads(data[2].read_text())
+    payload["protocol"] = "head_to_tail"
+    payload["seed"] = None
+    p2_task = tmp_path / "p2_tasks.json"
+    p2_task.write_text(json.dumps(payload))
+    task_hash, protocol, task0_classes = prep._task0(p2_task)
+    assert len(task_hash) == 64
+    assert protocol == "head_to_tail"
+    assert task0_classes == [10]
+
+
 @pytest.mark.parametrize("kwargs,match", [
     ({"member_id": 2}, "member"), ({"policy": "raw_identity"}, "policy"),
     ({"feature_columns": ["constant", "x"]}, "feature order"),

@@ -64,6 +64,7 @@ TRAINING_POLICY = "frozen_fold_replay_distill_v1"
 P3_LAYOUT = [38, 20, 20, 20, 20, 20, 20, 20]
 ROTATING_CURRENT_POLICY = "stratified_fraction_rotating_current_v2"
 SUPPORTED_TASK_PROTOCOLS = {
+    "head_to_tail": "P2",
     "tail_to_head": "P3",
     "constrained_mass_balanced": "P4",
 }
@@ -154,7 +155,7 @@ def validate_p3_spec(spec, context):
     tasks = spec.get("tasks", [])
     protocol = spec.get("protocol")
     if protocol not in SUPPORTED_TASK_PROTOCOLS or len(tasks) != 8:
-        raise ValueError("Use a full P3/P4 supported file, not a two-task smoke protocol.")
+        raise ValueError("Use a full P2/P3/P4 supported file, not a two-task smoke protocol.")
     expected_seed = 0 if protocol == "constrained_mass_balanced" else None
     if spec.get("seed") != expected_seed:
         raise ValueError(
@@ -164,15 +165,15 @@ def validate_p3_spec(spec, context):
     for task_id, (task, width) in enumerate(zip(tasks, P3_LAYOUT, strict=True)):
         raw = task.get("classes", [])
         if type(task.get("task_id")) is not int or task["task_id"] != task_id or len(raw) != width:
-            raise ValueError("P3/P4 task IDs/layout must be 0..7 and [38,20,20,20,20,20,20,20].")
+            raise ValueError("P2/P3/P4 task IDs/layout must be 0..7 and [38,20,20,20,20,20,20,20].")
         if any(type(c) is not int for c in raw):
-            raise ValueError("P3/P4 requires integer raw class IDs.")
+            raise ValueError("P2/P3/P4 requires integer raw class IDs.")
         classes.extend(raw)
     # Identity-only tables already validated against both source labels. No old
     # descriptors or future features are read for this protocol integrity check.
     assigned = {int(c) for table in context._rows for c in table["raw_class_id"].to_pylist()}
     if len(set(classes)) != 178 or set(classes) != assigned:
-        raise ValueError("P3/P4 must cover exactly the 178 assignment raw classes without duplicates.")
+        raise ValueError("P2/P3/P4 must cover exactly the 178 assignment raw classes without duplicates.")
     return tasks
 
 

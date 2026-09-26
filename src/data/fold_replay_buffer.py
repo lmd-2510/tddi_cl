@@ -264,7 +264,7 @@ class FoldSqrtReplayBuffer:
         if (protocol not in SUPPORTED_PROTOCOLS
                 or spec.get("seed") != SUPPORTED_PROTOCOLS.get(protocol)
                 or not isinstance(spec.get("tasks"), list) or not spec["tasks"]):
-            raise ValueError("Expected a supported P3 tail_to_head or P4 constrained_mass_balanced task file.")
+            raise ValueError("Expected a supported P2 head_to_tail, P3 tail_to_head, or P4 constrained_mass_balanced task file.")
         self._tasks = []
         for i, task in enumerate(spec["tasks"]):
             if not isinstance(task, dict) or type(task.get("task_id")) is not int or task["task_id"] != i or not isinstance(task.get("classes"), list) or not task["classes"]:
