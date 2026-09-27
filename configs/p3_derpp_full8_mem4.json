@@ -1,0 +1,47 @@
+{
+  "kind": "p3_derpp_online_full8",
+  "experiment_seed": 0,
+  "fold_seed": 42,
+  "member_ids": [0, 1, 2],
+  "protocol": {
+    "id": "P3",
+    "name": "tail_to_head",
+    "task_file": "study_assets/task_protocols/tail_to_head_tasks.json",
+    "sha256": "0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79"
+  },
+  "model": {
+    "variant": "tddi_paper_member",
+    "input_dim": 3780,
+    "hidden_dims": [7560, 7560],
+    "activation": "gelu",
+    "dropout": 0.2,
+    "norm": "layernorm",
+    "head": "fixed_178_from_task0"
+  },
+  "training": {
+    "classification_loss": "cross_entropy",
+    "logit_loss": "mean_squared_error_on_stored_full_head_logits",
+    "replay_label_loss": "cross_entropy",
+    "alpha": 0.3,
+    "beta": 0.5,
+    "batch_size": 64,
+    "replay_batch_size": 64,
+    "epochs_per_task": 1,
+    "optimizer": "adamw",
+    "lr": 0.001,
+    "weight_decay": 0.0001
+  },
+  "replay": {
+    "policy": "online_reservoir_logits_v1",
+    "budget_policy": "per_member_4_percent_of_development",
+    "member_budget": 27778,
+    "global_slot_budget": 83334,
+    "draws_per_step": 2,
+    "logit_refresh": false
+  },
+  "preprocessing": "task0_standard_frozen",
+  "evaluation": {
+    "future_class_mask": true,
+    "threshold_config": "configs/eval_tddi_p3_ensemble_entropy_threshold.json"
+  }
+}

@@ -347,9 +347,15 @@ def _load_buffer(run_root: Path, member_id: int, task_id: int, warnings: list[st
 def _replay_exposure(
     run_root: Path, member_id: int, task_id: int, buffer: pd.DataFrame | None, warnings: list[str]
 ) -> tuple[pd.DataFrame | None, str]:
-    candidates = []
+    direct = run_root / f"member_{member_id}" / f"task_{task_id}" / "replay_exposure.csv"
+    candidates = [direct] if direct.is_file() else []
     for pattern in ("*replay*exposure*.csv", "*replay*draw*.csv", "*replay*audit*.csv"):
-        candidates.extend(run_root.glob(f"member_{member_id}/**/{pattern}"))
+        scoped = [path for path in run_root.glob(f"member_{member_id}/**/{pattern}")
+                  if path != direct and f"task_{task_id}" in path.parts]
+        candidates.extend(scoped)
+        if not candidates:
+            candidates.extend(path for path in run_root.glob(f"member_{member_id}/**/{pattern}")
+                              if path != direct)
     for path in candidates:
         try:
             df = pd.read_csv(path)
