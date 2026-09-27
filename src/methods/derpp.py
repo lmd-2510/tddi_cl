@@ -104,6 +104,156 @@ class ReservoirLogitBuffer:
         self.rng.bit_generator.state = state["rng_state"]
 
 
+def equal_class_quotas(counts: dict[int, int], capacity: int) -> dict[int, int]:
+    """Water-fill seen training classes; never allocate more than observed rows."""
+    if capacity <= 0 or not counts or any(label < 0 or count <= 0 for label, count in counts.items()):
+        raise ValueError("Balanced reservoir requires positive capacity and observed class counts.")
+    labels = sorted(counts)
+    if sum(counts.values()) <= capacity:
+        return {label: int(counts[label]) for label in labels}
+    low, high = 0, max(counts.values())
+    while low < high:
+        middle = (low + high + 1) // 2
+        if sum(min(counts[label], middle) for label in labels) <= capacity:
+            low = middle
+        else:
+            high = middle - 1
+    quotas = {label: min(counts[label], low) for label in labels}
+    remaining = capacity - sum(quotas.values())
+    for label in labels:
+        if remaining == 0:
+            break
+        if counts[label] > quotas[label]:
+            quotas[label] += 1
+            remaining -= 1
+    if remaining != 0 or sum(quotas.values()) != capacity:
+        raise RuntimeError("Balanced reservoir quota allocation did not fill the budget.")
+    return quotas
+
+
+class ClassBalancedReservoirLogitBuffer(ReservoirLogitBuffer):
+    """Class-quota reservoir; uniform random replacement within each seen class.
+
+    At a task boundary, only current-task training counts and earlier observed
+    counts set the water-filled quotas. Old retained rows are uniformly
+    downsampled when their quotas shrink. New rows are then seen exactly once.
+    Replay draws remain uniform over all retained slots, as in original DER++.
+    """
+
+    policy = "online_equal_class_reservoir_logits_v1"
+
+    def __init__(self, capacity: int, feature_dim: int, class_count: int, *, seed: int):
+        super().__init__(capacity, feature_dim, class_count, seed=seed)
+        self.class_seen: dict[int, int] = {}
+        self.quotas: dict[int, int] = {}
+        self._class_slots: dict[int, list[int]] = {}
+        self._position = np.empty(capacity, dtype=np.int32)
+
+    def _remove_slot(self, slot: int) -> None:
+        label = int(self.labels[slot])
+        slots = self._class_slots[label]
+        position = int(self._position[slot])
+        tail_in_class = slots[-1]
+        slots[position] = tail_in_class
+        self._position[tail_in_class] = position
+        slots.pop()
+        tail = self.size - 1
+        if slot != tail:
+            moved_label = int(self.labels[tail])
+            moved_position = int(self._position[tail])
+            self.features[slot] = self.features[tail]
+            self.logits[slot] = self.logits[tail]
+            self.labels[slot] = self.labels[tail]
+            self.sample_ids[slot] = self.sample_ids[tail]
+            self._class_slots[moved_label][moved_position] = slot
+            self._position[slot] = moved_position
+        self.size -= 1
+
+    def begin_task(self, new_training_counts: dict[int, int]) -> dict[int, int]:
+        """Freeze task quotas without reading future tasks, validation or test."""
+        if (not new_training_counts or any(label < 0 or label >= self.class_count or count <= 0
+                                            for label, count in new_training_counts.items())
+                or set(new_training_counts) & set(self.class_seen)):
+            raise ValueError("Task quotas need positive counts for previously unseen training classes.")
+        planned = {**self.class_seen, **{int(k): int(v) for k, v in new_training_counts.items()}}
+        quotas = equal_class_quotas(planned, self.capacity)
+        for label, slots in self._class_slots.items():
+            if quotas[label] > len(slots):
+                raise ValueError("Cannot recover previously discarded examples for a growing quota.")
+            while len(slots) > quotas[label]:
+                index = int(self.rng.integers(len(slots)))
+                self._remove_slot(slots[index])
+        self.quotas = quotas
+        for label in new_training_counts:
+            self._class_slots[int(label)] = []
+        return quotas.copy()
+
+    def add_batch(self, features: np.ndarray, labels: np.ndarray, logits: np.ndarray,
+                  sample_ids: Sequence[str]) -> None:
+        features = np.asarray(features, dtype=np.float32)
+        labels = np.asarray(labels, dtype=np.int64)
+        logits = np.asarray(logits, dtype=np.float32)
+        if (features.ndim != 2 or features.shape[1] != self.feature_dim
+                or logits.shape != (len(features), self.class_count)
+                or labels.shape != (len(features),) or len(sample_ids) != len(features)
+                or not np.isfinite(features).all() or not np.isfinite(logits).all()
+                or np.any(labels < 0) or np.any(labels >= self.class_count)
+                or any(len(str(value)) > 96 for value in sample_ids)):
+            raise ValueError("Invalid balanced DER++ buffer batch.")
+        for index, raw_label in enumerate(labels):
+            label = int(raw_label)
+            if label not in self.quotas:
+                raise ValueError("Balanced DER++ received a class before its task quota was set.")
+            self.seen += 1
+            count = self.class_seen.get(label, 0) + 1
+            self.class_seen[label] = count
+            slots = self._class_slots[label]
+            if len(slots) < self.quotas[label]:
+                slot = self.size
+                self.size += 1
+                self._position[slot] = len(slots)
+                slots.append(slot)
+            else:
+                candidate = int(self.rng.integers(count))
+                if candidate >= self.quotas[label]:
+                    continue
+                slot = slots[candidate]
+            self.features[slot] = features[index]
+            self.labels[slot] = label
+            self.logits[slot] = logits[index]
+            self.sample_ids[slot] = str(sample_ids[index])
+
+    def finish_task(self) -> None:
+        if any(self.class_seen.get(label, 0) < quota or len(self._class_slots[label]) != quota
+               for label, quota in self.quotas.items()):
+            raise ValueError("Balanced reservoir task ended before its planned class quotas were filled.")
+
+    def state_dict(self) -> dict:
+        state = super().state_dict()
+        state.update({"policy": self.policy, "class_seen": self.class_seen.copy(),
+                      "quotas": self.quotas.copy()})
+        return state
+
+    def load_state_dict(self, state: dict) -> None:
+        if state.get("policy") != self.policy:
+            raise ValueError("Balanced DER++ reservoir checkpoint policy mismatch.")
+        super().load_state_dict(state)
+        self.class_seen = {int(k): int(v) for k, v in state["class_seen"].items()}
+        self.quotas = {int(k): int(v) for k, v in state["quotas"].items()}
+        self._class_slots = {label: [] for label in self.quotas}
+        for slot in range(self.size):
+            label = int(self.labels[slot])
+            if label not in self._class_slots:
+                raise ValueError("Balanced DER++ checkpoint contains a class without a quota.")
+            self._position[slot] = len(self._class_slots[label])
+            self._class_slots[label].append(slot)
+        if (sum(self.class_seen.values()) != self.seen
+                or set(self.class_seen) != set(self.quotas)
+                or any(len(self._class_slots[label]) != quota for label, quota in self.quotas.items())
+                or sum(self.quotas.values()) != self.size):
+            raise ValueError("Balanced DER++ checkpoint class occupancy mismatch.")
+
+
 def observe(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
             current_features: torch.Tensor, current_labels: torch.Tensor,
             current_sample_ids: Sequence[str], buffer: ReservoirLogitBuffer,

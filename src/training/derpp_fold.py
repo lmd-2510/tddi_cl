@@ -32,7 +32,7 @@ from src.eval.predictions import (
     MemberPredictionContext, PredictionProvenance, export_member_prediction_artifact,
     partition_identity_sha256,
 )
-from src.methods.derpp import ReservoirLogitBuffer, observe
+from src.methods.derpp import ClassBalancedReservoirLogitBuffer, ReservoirLogitBuffer, observe
 from src.models.tddi_paper_member import TDDIPaperMember, TDDIPaperMemberConfig
 from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 
@@ -40,6 +40,8 @@ from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 METHOD = "derpp"
 METHOD_PROTOCOL = "p3_derpp_online_fixed_head_v1"
+BALANCED_METHOD_PROTOCOL = "p3_derpp_online_equal_class_buffer_v1"
+BALANCED_BUFFER_POLICY = ClassBalancedReservoirLogitBuffer.policy
 
 
 def _sha(data: object) -> str:
@@ -108,6 +110,7 @@ def _groups(outputs: PredictionOutputs, new_classes: list[int], seen_classes: li
 def _prediction_provenance(args, *, context, prep_hash: str, task_hash: str,
                            config_hash: str, labels: np.ndarray,
                            metadata: dict[str, np.ndarray], member: int,
+                           method_protocol: str, buffer_policy: str, member_count: int,
                            all_identity=None) -> PredictionProvenance:
     ids = np.asarray(metadata["sample_id"]).astype(np.str_, copy=False)
     folds = np.asarray(metadata["fold_id"], dtype=np.int16)
@@ -118,7 +121,7 @@ def _prediction_provenance(args, *, context, prep_hash: str, task_hash: str,
         expected_oof_sha = partition_identity_sha256(
             all_meta["sample_id"], all_labels, all_meta["fold_id"])
     shared = {
-        "method": METHOD, "method_protocol": METHOD_PROTOCOL, "config_sha256": config_hash,
+        "method": METHOD, "method_protocol": method_protocol, "config_sha256": config_hash,
         "task_file_sha256": task_hash, "assignment_sha256": context.manifest["assignment_sha256"],
         "fold_manifest_sha256": context.manifest_sha256,
     }
@@ -127,8 +130,10 @@ def _prediction_provenance(args, *, context, prep_hash: str, task_hash: str,
         fold_manifest_sha256=context.manifest_sha256, task_file_sha256=task_hash,
         study_contract_sha256=_sha(shared), preprocessing_policy="task0_standard_frozen",
         preprocessing_sha256=prep_hash, preprocessing_member_id=member,
-        ranking_policy="reservoir_uniform_online", buffer_policy="online_reservoir_logits_v1",
-        member_memory_budget=args.memory_budget, global_memory_budget=3 * args.memory_budget,
+        ranking_policy=("equal_class_quota_random_within_class" if buffer_policy == BALANCED_BUFFER_POLICY
+                        else "reservoir_uniform_online"), buffer_policy=buffer_policy,
+        member_memory_budget=args.memory_budget,
+        global_memory_budget=member_count * args.memory_budget,
         expected_partition_rows=len(labels),
         expected_partition_sha256=partition_identity_sha256(ids, labels, folds),
         expected_oof_rows=expected_oof_rows, expected_oof_sha256=expected_oof_sha,
@@ -137,15 +142,17 @@ def _prediction_provenance(args, *, context, prep_hash: str, task_hash: str,
 
 def _export(args, *, root: Path, context, task_id: int, split: str, outputs: PredictionOutputs,
             metadata: dict[str, np.ndarray], run_id: str, seeds, prep_hash: str,
-            task_hash: str, config_hash: str, all_identity=None) -> Path:
+            task_hash: str, config_hash: str, method_protocol: str,
+            buffer_policy: str, member_count: int, all_identity=None) -> Path:
     member = args.member_id
     provenance = _prediction_provenance(
         args, context=context, prep_hash=prep_hash, task_hash=task_hash,
         config_hash=config_hash, labels=outputs.labels, metadata=metadata,
-        member=member, all_identity=all_identity)
+        member=member, method_protocol=method_protocol, buffer_policy=buffer_policy,
+        member_count=member_count, all_identity=all_identity)
     return export_member_prediction_artifact(
         outputs, metadata,
-        MemberPredictionContext(run_id=run_id, method=METHOD, method_protocol=METHOD_PROTOCOL,
+        MemberPredictionContext(run_id=run_id, method=METHOD, method_protocol=method_protocol,
                                 task_id=task_id, split=split, member_id=member,
                                 experiment_seed=0, member_seed=seeds.member_seed,
                                 ensemble_mode="stratified_3fold", fold_id=member,
@@ -198,11 +205,18 @@ def _preserve_incomplete_task(root: Path, task_id: int) -> None:
 
 def run_member(args: argparse.Namespace) -> None:
     if args.member_id not in (0, 1, 2) or args.memory_budget != 27778:
-        raise ValueError("DER++ full run requires member 0/1/2 and 4%=27,778 slots per member.")
+        raise ValueError("DER++ requires member 0/1/2 and 4%=27,778 slots per member.")
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    if (config.get("kind") != "p3_derpp_online_full8"
+    balanced_pilot = config.get("kind") == "p3_derpp_equal_class_pilot"
+    buffer_policy = config.get("replay", {}).get("policy")
+    expected_policy = BALANCED_BUFFER_POLICY if balanced_pilot else "online_reservoir_logits_v1"
+    method_protocol = BALANCED_METHOD_PROTOCOL if balanced_pilot else METHOD_PROTOCOL
+    member_ids = config.get("member_ids")
+    if (config.get("kind") not in {"p3_derpp_online_full8", "p3_derpp_equal_class_pilot"}
             or config.get("training", {}).get("epochs_per_task") != 1
-            or config.get("replay", {}).get("policy") != "online_reservoir_logits_v1"):
+            or buffer_policy != expected_policy
+            or member_ids != ([0] if balanced_pilot else [0, 1, 2])
+            or args.member_id not in member_ids):
         raise ValueError("DER++ config must select one online pass and reservoir logit memory.")
     if (config["model"].get("variant") != "tddi_paper_member"
             or config["model"].get("head") != "fixed_178_from_task0"
@@ -252,7 +266,7 @@ def run_member(args: argparse.Namespace) -> None:
         root.mkdir(parents=True)
         run_id = uuid.uuid4().hex
         _json(config_file, {
-            "run_id": run_id, "method": METHOD, "method_protocol": METHOD_PROTOCOL,
+            "run_id": run_id, "method": METHOD, "method_protocol": method_protocol,
             "config_sha256": config_hash, "task_file_sha256": task_hash,
             "assignment_sha256": context.manifest["assignment_sha256"],
             "preprocessing_sha256": prep_hash, "member_id": args.member_id,
@@ -275,8 +289,8 @@ def run_member(args: argparse.Namespace) -> None:
     model = TDDIPaperMember(TDDIPaperMemberConfig(
         input_dim=len(columns), num_classes=178, dropout=float(config["model"]["dropout"]),
         activation=config["model"]["activation"])).to(device)
-    buffer = ReservoirLogitBuffer(args.memory_budget, len(columns), 178,
-                                  seed=seeds.member_seed + 13579)
+    buffer_type = ClassBalancedReservoirLogitBuffer if balanced_pilot else ReservoirLogitBuffer
+    buffer = buffer_type(args.memory_budget, len(columns), 178, seed=seeds.member_seed + 13579)
     checkpoints = sorted((root / "checkpoints").glob("task_*.pt"),
                          key=lambda path: int(path.stem.split("_")[1])) if (root / "checkpoints").exists() else []
     completed = -1
@@ -285,7 +299,7 @@ def run_member(args: argparse.Namespace) -> None:
     if checkpoints:
         checkpoint = torch.load(checkpoints[-1], map_location="cpu", weights_only=False)
         completed = int(checkpoint["task_id"])
-        if (checkpoint["kind"] != METHOD_PROTOCOL or checkpoint["run_id"] != run_id
+        if (checkpoint["kind"] != method_protocol or checkpoint["run_id"] != run_id
                 or checkpoint["config_sha256"] != config_hash
                 or checkpoint["task_file_sha256"] != task_hash
                 or checkpoint["member_id"] != args.member_id
@@ -326,6 +340,12 @@ def run_member(args: argparse.Namespace) -> None:
         current_inputs = _values(current.features, prep, columns, args.member_id)
         raw_labels = np.asarray(current.labels, dtype=np.int64)
         local_labels = np.asarray([full_map[int(raw)] for raw in raw_labels], dtype=np.int64)
+        memory_before = buffer.size
+        if balanced_pilot:
+            quotas = buffer.begin_task(dict(Counter(local_labels.tolist())))
+            _log(root, f"task={task_id} balanced quotas set for {len(quotas)} observed classes; "
+                  f"retained_old={buffer.size}/{buffer.capacity}")
+        memory_after_rebalance = buffer.size
         sample_ids = np.asarray(current.metadata["sample_id"]).astype(np.str_, copy=False)
         if len(np.unique(sample_ids)) != len(sample_ids):
             raise ValueError("Current DER++ stream contains duplicate sample IDs.")
@@ -335,7 +355,6 @@ def run_member(args: argparse.Namespace) -> None:
         model.train()
         totals = defaultdict(float)
         exposure: dict[int, int] = {}
-        memory_before = buffer.size
         for start in range(0, len(order), batch_size):
             picked = order[start:start + batch_size]
             x = torch.from_numpy(current_inputs[picked]).to(device)
@@ -351,6 +370,8 @@ def run_member(args: argparse.Namespace) -> None:
                 _log(root, f"task={task_id} step={start // batch_size + 1} rows={start + len(picked)}/{len(order)} reservoir={buffer.size}")
         for raw, count in Counter(raw_labels.tolist()).items():
             observed_counts[int(raw)] += int(count)
+        if balanced_pilot:
+            buffer.finish_task()
         del current_inputs, current
         validation = load_development_fold_arrays(context, columns, role="validation",
             member_id=args.member_id, validation_fold=args.member_id, class_ids=seen_raw)
@@ -363,6 +384,8 @@ def run_member(args: argparse.Namespace) -> None:
         _export(args, root=root, context=context, task_id=task_id, split="validation",
             outputs=val_outputs, metadata=val_meta, run_id=run_id, seeds=seeds,
             prep_hash=prep_hash, task_hash=task_hash, config_hash=config_hash,
+            method_protocol=method_protocol, buffer_policy=buffer_policy,
+            member_count=len(member_ids),
             all_identity=all_identity)
         frame = load_split_frame(args.test, columns, class_ids=seen_raw,
                                  include_metadata=True, meta_cols=DEFAULT_META_COLS)
@@ -375,7 +398,9 @@ def run_member(args: argparse.Namespace) -> None:
                                              seen_raw, full_map, device, batch_size)
         _export(args, root=root, context=context, task_id=task_id, split="test",
             outputs=test_outputs, metadata=test_meta, run_id=run_id, seeds=seeds,
-            prep_hash=prep_hash, task_hash=task_hash, config_hash=config_hash)
+            prep_hash=prep_hash, task_hash=task_hash, config_hash=config_hash,
+            method_protocol=method_protocol, buffer_policy=buffer_policy,
+            member_count=len(member_ids))
         metrics = ([{"task": task_id, "split": "validation", **row}
                     for row in _groups(val_outputs, new_classes, seen_raw)]
                    + [{"task": task_id, "split": "test", **row}
@@ -384,7 +409,9 @@ def run_member(args: argparse.Namespace) -> None:
         _json(task_root / "metrics.json", metrics)
         rows = len(raw_labels)
         audit = {"task_id": task_id, "train_rows": rows, "optimizer_steps": math.ceil(rows / batch_size),
-                 "epochs": 1, "memory_before": memory_before, "memory_after": buffer.size,
+                 "epochs": 1, "memory_before": memory_before,
+                 "memory_after_rebalance": memory_after_rebalance,
+                 "memory_after": buffer.size,
                  "stream_rows_seen_total": buffer.seen,
                  **{f"mean_{name}": totals[name] / rows for name in
                     ("current_ce", "replay_logit_mse", "replay_label_ce", "total")},
@@ -398,11 +425,13 @@ def run_member(args: argparse.Namespace) -> None:
         raw_order = sorted(all_classes)
         counts = Counter(raw_order[int(index)] for index in buffer.labels[:buffer.size])
         _json(task_root / "buffer_audit.json", {
-            "policy": "online_reservoir_logits_v1", "budget": buffer.capacity,
+            "policy": buffer_policy, "budget": buffer.capacity,
             "retained_count": buffer.size, "stream_rows_seen": buffer.seen,
             "allocation": {str(raw): counts[raw] for raw in seen_raw},
             "observed_counts": {str(raw): observed_counts[raw] for raw in seen_raw},
             "feasible_capacities": {str(raw): observed_counts[raw] for raw in seen_raw},
+            "target_quotas": ({str(raw_order[label]): quota for label, quota in buffer.quotas.items()}
+                              if balanced_pilot else None),
             "retained_ids": buffer.sample_ids[:buffer.size].tolist(),
             "retained_raw_labels": [raw_order[int(index)] for index in buffer.labels[:buffer.size]],
             "stored_logits_width": 178,
@@ -412,13 +441,15 @@ def run_member(args: argparse.Namespace) -> None:
                      columns=["raw_class_id", "replay_draws"]).to_csv(
                           task_root / "replay_exposure.csv", index=False)
         summary = {"task_id": task_id, "head_size": 178, "seen_class_count": len(seen_raw),
-                   "train_rows": rows, "memory_before": memory_before, "memory_after": buffer.size,
+                   "train_rows": rows, "memory_before": memory_before,
+                   "memory_after_rebalance": memory_after_rebalance,
+                   "memory_after": buffer.size,
                    "validation_macro_f1": val_metrics["macro_f1"], "test_macro_f1": test_metrics["macro_f1"],
                    "runtime_seconds": audit["seconds"]}
         _json(task_root / "completed_task.json", summary)
         summary_rows.append(summary)
         _checkpoint(root / "checkpoints" / f"task_{task_id}.pt", {
-            "kind": METHOD_PROTOCOL, "run_id": run_id, "member_id": args.member_id,
+            "kind": method_protocol, "run_id": run_id, "member_id": args.member_id,
             "task_id": task_id, "config_sha256": config_hash, "task_file_sha256": task_hash,
             "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
             "buffer_state": buffer.state_dict(), "summary_rows": summary_rows,
