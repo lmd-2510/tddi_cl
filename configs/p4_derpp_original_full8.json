@@ -1,0 +1,49 @@
+{
+  "kind": "p4_derpp_original_full8",
+  "method_label": "DERPP_ORIGINAL_P4",
+  "experiment_seed": 0,
+  "fold_seed": 42,
+  "member_ids": [0, 1, 2],
+  "protocol": {
+    "id": "P4",
+    "name": "constrained_mass_balanced",
+    "task_file": "study_assets/task_protocols/constrained_mass_balanced_seed0_tasks.json",
+    "sha256": "9d22af8618fe03c40b92e2aabbab8b68a89de83bc0de4f51e24932951cf298f4",
+    "layout": [38, 20, 20, 20, 20, 20, 20, 20],
+    "class_count": 178
+  },
+  "model": {
+    "variant": "tddi_paper_member",
+    "input_dim": 3780,
+    "hidden_dims": [7560, 7560],
+    "activation": "gelu",
+    "dropout": 0.2,
+    "norm": "layernorm",
+    "head": "fixed_178_from_task0"
+  },
+  "training": {
+    "classification_loss": "cross_entropy",
+    "logit_loss": "mean_squared_error_on_stored_full_head_logits",
+    "replay_label_loss": "cross_entropy",
+    "alpha": 0.3,
+    "beta": 0.5,
+    "batch_size": 64,
+    "replay_batch_size": 64,
+    "epochs_per_task": 1,
+    "optimizer": "adamw",
+    "lr": 0.001,
+    "weight_decay": 0.0001
+  },
+  "replay": {
+    "policy": "online_reservoir_logits_v1",
+    "sampling": "uniform_over_retained_slots",
+    "budget_scope": "per_member",
+    "budget_policy": "per_member_4_percent_of_development",
+    "member_budget": 27778,
+    "global_slot_budget": 83334,
+    "draws_per_step": 2,
+    "logit_refresh": false
+  },
+  "preprocessing": "task0_standard_frozen",
+  "evaluation": {"future_class_mask": true}
+}

@@ -254,11 +254,51 @@ class ClassBalancedReservoirLogitBuffer(ReservoirLogitBuffer):
             raise ValueError("Balanced DER++ checkpoint class occupancy mismatch.")
 
 
+class ClassBalancedClassUniformReplayBuffer(ClassBalancedReservoirLogitBuffer):
+    """Equal-class storage with balanced-cycle class-uniform replay.
+
+    Storage remains the water-filled, no-duplication reservoir implemented by
+    :class:`ClassBalancedReservoirLogitBuffer`.  Only replay selection changes:
+    classes are shuffled into cycles and one retained exemplar is selected
+    uniformly within every selected class.  Original DER++ and the earlier
+    equal-buffer pilot therefore keep their slot-uniform sampling semantics.
+    """
+
+    policy = "online_equal_class_reservoir_class_uniform_replay_v1"
+    replay_policy = "balanced_cycle_class_uniform_then_exemplar_uniform_v1"
+
+    def _sample_indices(self, count: int) -> np.ndarray:
+        if count <= 0 or self.size == 0:
+            raise ValueError("Cannot draw from an empty DER++ buffer.")
+        active = np.asarray(sorted(label for label, slots in self._class_slots.items() if slots),
+                            dtype=np.int64)
+        if active.size == 0:
+            raise ValueError("Balanced DER++ buffer has no active retained class.")
+        selected_classes: list[int] = []
+        remaining = int(count)
+        while remaining:
+            cycle = self.rng.permutation(active)
+            take = min(remaining, len(cycle))
+            selected_classes.extend(int(value) for value in cycle[:take])
+            remaining -= take
+        return np.asarray([
+            self._class_slots[label][int(self.rng.integers(len(self._class_slots[label])))]
+            for label in selected_classes
+        ], dtype=np.int64)
+
+    def sample(self, count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        indices = self._sample_indices(count)
+        return (self.features[indices].copy(), self.labels[indices].copy(),
+                self.logits[indices].copy())
+
+
 def observe(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
             current_features: torch.Tensor, current_labels: torch.Tensor,
             current_sample_ids: Sequence[str], buffer: ReservoirLogitBuffer,
             *, alpha: float, beta: float, replay_batch_size: int,
-            exposure: MutableMapping[int, int] | None = None) -> DERPPLosses:
+            exposure: MutableMapping[int, int] | None = None,
+            exposure_logit: MutableMapping[int, int] | None = None,
+            exposure_label: MutableMapping[int, int] | None = None) -> DERPPLosses:
     """Perform one DER++ update, then insert the current stream batch."""
     if alpha < 0 or beta < 0 or replay_batch_size <= 0:
         raise ValueError("DER++ alpha/beta and replay batch size are invalid.")
@@ -278,6 +318,14 @@ def observe(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
         logit_mse = F.mse_loss(model(x_mse_tensor), stored_tensor)
         logit_rows = len(x_mse)
         x_ce, labels_ce, _ = buffer.sample(replay_batch_size)
+        if exposure_logit is not None:
+            for raw_label in labels_mse:
+                key = int(raw_label)
+                exposure_logit[key] = exposure_logit.get(key, 0) + 1
+        if exposure_label is not None:
+            for raw_label in labels_ce:
+                key = int(raw_label)
+                exposure_label[key] = exposure_label.get(key, 0) + 1
         if exposure is not None:
             for raw_label in np.concatenate((labels_mse, labels_ce)):
                 key = int(raw_label)

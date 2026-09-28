@@ -1,4 +1,4 @@
-"""One frozen-fold P3 member trained with online DER++ and a fixed 178-way head."""
+"""One frozen-fold P3/P4 member trained with online DER++ and a fixed 178-way head."""
 
 from __future__ import annotations
 
@@ -32,7 +32,10 @@ from src.eval.predictions import (
     MemberPredictionContext, PredictionProvenance, export_member_prediction_artifact,
     partition_identity_sha256,
 )
-from src.methods.derpp import ClassBalancedReservoirLogitBuffer, ReservoirLogitBuffer, observe
+from src.methods.derpp import (
+    ClassBalancedClassUniformReplayBuffer, ClassBalancedReservoirLogitBuffer,
+    ReservoirLogitBuffer, observe,
+)
 from src.models.tddi_paper_member import TDDIPaperMember, TDDIPaperMemberConfig
 from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 
@@ -42,6 +45,10 @@ METHOD = "derpp"
 METHOD_PROTOCOL = "p3_derpp_online_fixed_head_v1"
 BALANCED_METHOD_PROTOCOL = "p3_derpp_online_equal_class_buffer_v1"
 BALANCED_BUFFER_POLICY = ClassBalancedReservoirLogitBuffer.policy
+P4_ORIGINAL_METHOD_PROTOCOL = "p4_derpp_original_fixed_head_v1"
+P4_CB_METHOD_PROTOCOL = "p4_derpp_cb_class_uniform_replay_v1"
+P4_CB_BUFFER_POLICY = ClassBalancedClassUniformReplayBuffer.policy
+P4_CB_REPLAY_POLICY = ClassBalancedClassUniformReplayBuffer.replay_policy
 
 
 def _sha(data: object) -> str:
@@ -107,6 +114,24 @@ def _groups(outputs: PredictionOutputs, new_classes: list[int], seen_classes: li
     return rows
 
 
+def _classwise(outputs: PredictionOutputs, seen_classes: list[int]) -> pd.DataFrame:
+    from sklearn.metrics import precision_recall_fscore_support
+    precision, recall, f1, support = precision_recall_fscore_support(
+        outputs.labels, outputs.predictions, labels=seen_classes, zero_division=0)
+    return pd.DataFrame([{"raw_class_id": raw, "support": int(support[index]),
+                          "precision": float(precision[index]), "recall": float(recall[index]),
+                          "f1": float(f1[index])}
+                         for index, raw in enumerate(seen_classes)])
+
+
+def _frequency_group(count: int) -> str:
+    if count <= 100:
+        return "tail"
+    if count <= 1000:
+        return "mid"
+    return "head"
+
+
 def _prediction_provenance(args, *, context, prep_hash: str, task_hash: str,
                            config_hash: str, labels: np.ndarray,
                            metadata: dict[str, np.ndarray], member: int,
@@ -130,7 +155,8 @@ def _prediction_provenance(args, *, context, prep_hash: str, task_hash: str,
         fold_manifest_sha256=context.manifest_sha256, task_file_sha256=task_hash,
         study_contract_sha256=_sha(shared), preprocessing_policy="task0_standard_frozen",
         preprocessing_sha256=prep_hash, preprocessing_member_id=member,
-        ranking_policy=("equal_class_quota_random_within_class" if buffer_policy == BALANCED_BUFFER_POLICY
+        ranking_policy=("equal_class_quota_random_within_class" if buffer_policy in
+                        {BALANCED_BUFFER_POLICY, P4_CB_BUFFER_POLICY}
                         else "reservoir_uniform_online"), buffer_policy=buffer_policy,
         member_memory_budget=args.memory_budget,
         global_memory_budget=member_count * args.memory_budget,
@@ -173,7 +199,7 @@ def _checkpoint(path: Path, payload: dict) -> None:
 
 
 def _write_member_summary(root: Path, member_id: int, run_id: str,
-                          summary_rows: list[dict]) -> None:
+                          summary_rows: list[dict], protocol_id: str = "P3") -> None:
     if len(summary_rows) != 8 or [row["task_id"] for row in summary_rows] != list(range(8)):
         raise ValueError("DER++ member summary requires eight completed tasks.")
     _json(root / "run_summary.json", {"method": METHOD, "member_id": member_id,
@@ -181,11 +207,19 @@ def _write_member_summary(root: Path, member_id: int, run_id: str,
            "full_protocol_complete": True, "run_id": run_id})
     pd.DataFrame(summary_rows).to_csv(root / "metrics.csv", index=False)
     (root / "run_summary.md").write_text(
-        "# DER++ P3 member " + str(member_id) + "\n\n"
+        f"# DER++ {protocol_id} member {member_id}\n\n"
         + "Online one pass per task; fixed 178-way head; CE + alpha*MSE(buffer logits) + beta*CE(buffer labels).\n\n"
         + "\n".join(f"- Task {row['task_id']}: validation Macro-F1 {row['validation_macro_f1']:.6f}; "
                      f"test Macro-F1 {row['test_macro_f1']:.6f}; reservoir {row['memory_after']}."
                      for row in summary_rows) + "\n", encoding="utf-8")
+    run_config = json.loads((root / "run_config.json").read_text(encoding="utf-8"))
+    _json(root / "member_manifest.json", {
+        "member_id": member_id, "run_id": run_id, "protocol": protocol_id,
+        "method": METHOD, "method_protocol": run_config["method_protocol"],
+        "buffer_policy": run_config["replay"]["policy"],
+        "replay_policy": run_config["replay"].get("sampling", "uniform_over_retained_slots"),
+        "completed_tasks": list(range(8)), "final_status": "completed",
+    })
 
 
 def _preserve_incomplete_task(root: Path, task_id: int) -> None:
@@ -207,17 +241,32 @@ def run_member(args: argparse.Namespace) -> None:
     if args.member_id not in (0, 1, 2) or args.memory_budget != 27778:
         raise ValueError("DER++ requires member 0/1/2 and 4%=27,778 slots per member.")
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    balanced_pilot = config.get("kind") == "p3_derpp_equal_class_pilot"
+    kind = config.get("kind")
+    balanced_storage = kind in {"p3_derpp_equal_class_pilot", "p4_derpp_cb_class_uniform_full8"}
+    class_uniform = kind == "p4_derpp_cb_class_uniform_full8"
+    p4_original = kind == "p4_derpp_original_full8"
     buffer_policy = config.get("replay", {}).get("policy")
-    expected_policy = BALANCED_BUFFER_POLICY if balanced_pilot else "online_reservoir_logits_v1"
-    method_protocol = BALANCED_METHOD_PROTOCOL if balanced_pilot else METHOD_PROTOCOL
+    if class_uniform:
+        expected_policy, method_protocol = P4_CB_BUFFER_POLICY, P4_CB_METHOD_PROTOCOL
+    elif balanced_storage:
+        expected_policy, method_protocol = BALANCED_BUFFER_POLICY, BALANCED_METHOD_PROTOCOL
+    elif p4_original:
+        expected_policy, method_protocol = "online_reservoir_logits_v1", P4_ORIGINAL_METHOD_PROTOCOL
+    else:
+        expected_policy, method_protocol = "online_reservoir_logits_v1", METHOD_PROTOCOL
     member_ids = config.get("member_ids")
-    if (config.get("kind") not in {"p3_derpp_online_full8", "p3_derpp_equal_class_pilot"}
+    expected_members = [0] if kind == "p3_derpp_equal_class_pilot" else [0, 1, 2]
+    if (kind not in {"p3_derpp_online_full8", "p3_derpp_equal_class_pilot",
+                     "p4_derpp_original_full8", "p4_derpp_cb_class_uniform_full8"}
             or config.get("training", {}).get("epochs_per_task") != 1
             or buffer_policy != expected_policy
-            or member_ids != ([0] if balanced_pilot else [0, 1, 2])
+            or member_ids != expected_members
             or args.member_id not in member_ids):
         raise ValueError("DER++ config must select one online pass and reservoir logit memory.")
+    sampling = config.get("replay", {}).get("sampling")
+    if ((class_uniform and sampling != P4_CB_REPLAY_POLICY)
+            or (p4_original and sampling != "uniform_over_retained_slots")):
+        raise ValueError("DER++ replay sampler does not match the selected method variant.")
     if (config["model"].get("variant") != "tddi_paper_member"
             or config["model"].get("head") != "fixed_178_from_task0"
             or config["model"].get("input_dim") != 3780
@@ -234,16 +283,23 @@ def run_member(args: argparse.Namespace) -> None:
         raise ValueError("DER++ batch sizes must be positive.")
     task_hash = fold_file_sha256(args.task_file)
     if task_hash != config["protocol"]["sha256"]:
-        raise ValueError("P3 task schedule hash does not match the frozen config.")
+        raise ValueError("Task schedule hash does not match the frozen config.")
     spec = json.loads(args.task_file.read_text(encoding="utf-8"))
     tasks = spec["tasks"]
-    if (spec.get("protocol") != "tail_to_head" or len(tasks) != 8
+    expected_protocol = config["protocol"]["name"]
+    if (spec.get("protocol") != expected_protocol
+            or expected_protocol not in {"tail_to_head", "constrained_mass_balanced"}
+            or len(tasks) != 8
             or [len(task["classes"]) for task in tasks] != [38] + [20] * 7):
-        raise ValueError("Expected the frozen eight-task P3 schedule.")
+        raise ValueError("Expected a frozen eight-task P3/P4 schedule.")
     all_classes = [int(raw) for task in tasks for raw in task["classes"]]
     if len(set(all_classes)) != 178:
-        raise ValueError("P3 schedule must contain 178 distinct raw classes.")
+        raise ValueError("Task schedule must contain 178 distinct raw classes.")
     full_map = build_seen_class_map(all_classes)
+    global_counts_series = pd.read_parquet(args.train, columns=["class"])["class"].astype(int).value_counts()
+    global_train_counts = {int(raw): int(count) for raw, count in global_counts_series.items()}
+    if set(global_train_counts) != set(all_classes):
+        raise ValueError("Task class universe does not match the raw TRAIN class universe.")
     columns = load_feature_columns(args.feature_cols)
     if len(columns) != 3780:
         raise ValueError("T-DDI member requires 3,780 descriptors.")
@@ -289,7 +345,12 @@ def run_member(args: argparse.Namespace) -> None:
     model = TDDIPaperMember(TDDIPaperMemberConfig(
         input_dim=len(columns), num_classes=178, dropout=float(config["model"]["dropout"]),
         activation=config["model"]["activation"])).to(device)
-    buffer_type = ClassBalancedReservoirLogitBuffer if balanced_pilot else ReservoirLogitBuffer
+    if class_uniform:
+        buffer_type = ClassBalancedClassUniformReplayBuffer
+    elif balanced_storage:
+        buffer_type = ClassBalancedReservoirLogitBuffer
+    else:
+        buffer_type = ReservoirLogitBuffer
     buffer = buffer_type(args.memory_budget, len(columns), 178, seed=seeds.member_seed + 13579)
     checkpoints = sorted((root / "checkpoints").glob("task_*.pt"),
                          key=lambda path: int(path.stem.split("_")[1])) if (root / "checkpoints").exists() else []
@@ -318,9 +379,11 @@ def run_member(args: argparse.Namespace) -> None:
             torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
         _log(root, f"Resumed after task={completed}; reservoir={buffer.size}/{buffer.capacity}")
     else:
-        _log(root, f"Started DER++ member={args.member_id}; P3; fixed_head=178; one_pass_per_task")
+        _log(root, f"Started DER++ member={args.member_id}; {config['protocol']['id']}; "
+              "fixed_head=178; one_pass_per_task")
     if completed == 7:
-        _write_member_summary(root, args.member_id, run_id, summary_rows)
+        _write_member_summary(root, args.member_id, run_id, summary_rows,
+                              config["protocol"]["id"])
         _log(root, "Verified task 7 checkpoint already exists; no retraining.")
         return
     _preserve_incomplete_task(root, completed + 1)
@@ -341,7 +404,7 @@ def run_member(args: argparse.Namespace) -> None:
         raw_labels = np.asarray(current.labels, dtype=np.int64)
         local_labels = np.asarray([full_map[int(raw)] for raw in raw_labels], dtype=np.int64)
         memory_before = buffer.size
-        if balanced_pilot:
+        if balanced_storage:
             quotas = buffer.begin_task(dict(Counter(local_labels.tolist())))
             _log(root, f"task={task_id} balanced quotas set for {len(quotas)} observed classes; "
                   f"retained_old={buffer.size}/{buffer.capacity}")
@@ -355,13 +418,16 @@ def run_member(args: argparse.Namespace) -> None:
         model.train()
         totals = defaultdict(float)
         exposure: dict[int, int] = {}
+        exposure_logit: dict[int, int] = {}
+        exposure_label: dict[int, int] = {}
         for start in range(0, len(order), batch_size):
             picked = order[start:start + batch_size]
             x = torch.from_numpy(current_inputs[picked]).to(device)
             y = torch.from_numpy(local_labels[picked]).to(device)
             losses = observe(model, optimizer, x, y, sample_ids[picked].tolist(), buffer,
                 alpha=float(train_cfg["alpha"]), beta=float(train_cfg["beta"]),
-                replay_batch_size=replay_batch_size, exposure=exposure)
+                replay_batch_size=replay_batch_size, exposure=exposure,
+                exposure_logit=exposure_logit, exposure_label=exposure_label)
             for name in ("current_ce", "replay_logit_mse", "replay_label_ce", "total"):
                 totals[name] += getattr(losses, name) * len(picked)
             totals["replay_logit_rows"] += losses.replay_logit_rows
@@ -370,7 +436,7 @@ def run_member(args: argparse.Namespace) -> None:
                 _log(root, f"task={task_id} step={start // batch_size + 1} rows={start + len(picked)}/{len(order)} reservoir={buffer.size}")
         for raw, count in Counter(raw_labels.tolist()).items():
             observed_counts[int(raw)] += int(count)
-        if balanced_pilot:
+        if balanced_storage:
             buffer.finish_task()
         del current_inputs, current
         validation = load_development_fold_arrays(context, columns, role="validation",
@@ -407,6 +473,8 @@ def run_member(args: argparse.Namespace) -> None:
                       for row in _groups(test_outputs, new_classes, seen_raw)])
         pd.DataFrame(metrics).to_csv(task_root / "metrics.csv", index=False)
         _json(task_root / "metrics.json", metrics)
+        _classwise(val_outputs, seen_raw).to_csv(task_root / "classwise_validation.csv", index=False)
+        _classwise(test_outputs, seen_raw).to_csv(task_root / "classwise_test.csv", index=False)
         rows = len(raw_labels)
         audit = {"task_id": task_id, "train_rows": rows, "optimizer_steps": math.ceil(rows / batch_size),
                  "epochs": 1, "memory_before": memory_before,
@@ -431,15 +499,27 @@ def run_member(args: argparse.Namespace) -> None:
             "observed_counts": {str(raw): observed_counts[raw] for raw in seen_raw},
             "feasible_capacities": {str(raw): observed_counts[raw] for raw in seen_raw},
             "target_quotas": ({str(raw_order[label]): quota for label, quota in buffer.quotas.items()}
-                              if balanced_pilot else None),
+                              if balanced_storage else None),
             "retained_ids": buffer.sample_ids[:buffer.size].tolist(),
             "retained_raw_labels": [raw_order[int(index)] for index in buffer.labels[:buffer.size]],
             "stored_logits_width": 178,
         })
-        pd.DataFrame([{"raw_class_id": raw_order[label], "replay_draws": count}
-                      for label, count in sorted(exposure.items())],
-                     columns=["raw_class_id", "replay_draws"]).to_csv(
-                          task_root / "replay_exposure.csv", index=False)
+        total_draws = sum(exposure.values())
+        pd.DataFrame([{
+            "raw_class_id": raw,
+            "frequency_group": _frequency_group(global_train_counts[raw]),
+            "global_train_rows": global_train_counts[raw],
+            "observed_train_rows": observed_counts[raw],
+            "target_buffer_quota": (buffer.quotas.get(full_map[raw], 0)
+                                    if balanced_storage else ""),
+            "retained_exemplars": counts[raw],
+            "replay_draws_logit": exposure_logit.get(full_map[raw], 0),
+            "replay_draws_label": exposure_label.get(full_map[raw], 0),
+            "total_replay_draws": exposure.get(full_map[raw], 0),
+            "replay_draws": exposure.get(full_map[raw], 0),
+            "empirical_replay_probability": (exposure.get(full_map[raw], 0) / total_draws
+                                              if total_draws else 0.0),
+        } for raw in seen_raw]).to_csv(task_root / "replay_exposure.csv", index=False)
         summary = {"task_id": task_id, "head_size": 178, "seen_class_count": len(seen_raw),
                    "train_rows": rows, "memory_before": memory_before,
                    "memory_after_rebalance": memory_after_rebalance,
@@ -454,13 +534,18 @@ def run_member(args: argparse.Namespace) -> None:
             "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
             "buffer_state": buffer.state_dict(), "summary_rows": summary_rows,
             "observed_counts": dict(observed_counts),
+            "buffer_policy": buffer_policy,
+            "replay_policy": config["replay"].get("sampling", "uniform_over_retained_slots"),
+            "memory_budget": args.memory_budget,
+            "member_seed": seeds.member_seed,
             "torch_rng_state": torch.random.get_rng_state(),
             "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         })
         _log(root, f"task={task_id} complete val_macro_f1={val_metrics['macro_f1']:.6f} "
               f"test_macro_f1={test_metrics['macro_f1']:.6f} reservoir={buffer.size}")
         del validation, val_inputs, val_outputs, frame, test_values, test_outputs
-    _write_member_summary(root, args.member_id, run_id, summary_rows)
+    _write_member_summary(root, args.member_id, run_id, summary_rows,
+                          config["protocol"]["id"])
 
 
 def main() -> None:

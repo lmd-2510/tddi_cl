@@ -6,12 +6,29 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+import json
+from pathlib import Path
+from types import SimpleNamespace
 
 from src.methods.derpp import (
-    ClassBalancedReservoirLogitBuffer, ReservoirLogitBuffer, equal_class_quotas, observe,
+    ClassBalancedClassUniformReplayBuffer, ClassBalancedReservoirLogitBuffer,
+    ReservoirLogitBuffer, equal_class_quotas, observe,
 )
 from src.training.derpp_fold import _preserve_incomplete_task
 from scripts.run_p3_derpp_equal_buffer_pilot import _summarize
+from scripts.run_p4_derpp_cb_replay_full import _check as check_p4_runner
+
+
+def test_p4_original_and_cb_variant_are_explicitly_separate() -> None:
+    original = json.loads(Path("configs/p4_derpp_original_full8.json").read_text(encoding="utf-8"))
+    variant = json.loads(Path("configs/p4_derpp_cb_class_uniform_full8.json").read_text(encoding="utf-8"))
+    assert original["kind"] == "p4_derpp_original_full8"
+    assert original["replay"]["policy"] == "online_reservoir_logits_v1"
+    assert original["replay"]["sampling"] == "uniform_over_retained_slots"
+    assert variant["kind"] == "p4_derpp_cb_class_uniform_full8"
+    assert variant["replay"]["policy"] == ClassBalancedClassUniformReplayBuffer.policy
+    assert variant["replay"]["sampling"] == ClassBalancedClassUniformReplayBuffer.replay_policy
+    assert original["training"] == variant["training"]
 
 
 def test_reservoir_checkpoint_restores_future_sampling() -> None:
@@ -34,6 +51,49 @@ def test_reservoir_checkpoint_restores_future_sampling() -> None:
 def test_equal_class_quotas_redistribute_unfilled_tail_capacity() -> None:
     assert equal_class_quotas({0: 3, 1: 100, 2: 100}, 23) == {0: 3, 1: 10, 2: 10}
     assert equal_class_quotas({0: 2, 1: 4}, 10) == {0: 2, 1: 4}
+
+
+def test_waterfill_never_duplicates_and_uses_full_budget() -> None:
+    buffer = ClassBalancedClassUniformReplayBuffer(100, 2, 3, seed=23)
+    quotas = buffer.begin_task({0: 5, 1: 100, 2: 100})
+    assert quotas == {0: 5, 1: 48, 2: 47}
+    labels = np.asarray([0] * 5 + [1] * 100 + [2] * 100)
+    ids = np.arange(len(labels), dtype=np.float32)
+    features = np.column_stack((ids, labels.astype(np.float32)))
+    logits = np.column_stack((ids, ids + 1, ids + 2)).astype(np.float32)
+    buffer.add_batch(features, labels, logits, [f"sample-{i}" for i in range(len(labels))])
+    buffer.finish_task()
+    assert buffer.size == 100
+    np.testing.assert_array_equal(np.bincount(buffer.labels[:buffer.size], minlength=3), [5, 48, 47])
+    assert len(set(buffer.sample_ids[:buffer.size])) == 100
+
+
+def test_class_uniform_replay_is_not_slot_uniform_and_preserves_rows() -> None:
+    buffer = ClassBalancedClassUniformReplayBuffer(155, 2, 3, seed=31)
+    buffer.begin_task({0: 5, 1: 50, 2: 100})
+    labels = np.asarray([0] * 5 + [1] * 50 + [2] * 100)
+    ids = np.arange(155, dtype=np.float32)
+    features = np.column_stack((ids, labels.astype(np.float32)))
+    logits = np.column_stack((ids, ids + 1000, ids + 2000)).astype(np.float32)
+    buffer.add_batch(features, labels, logits, [f"row-{i}" for i in range(155)])
+    buffer.finish_task()
+    integrity_indices = buffer._sample_indices(24)
+    for slot in integrity_indices:
+        row_id = int(buffer.features[slot, 0])
+        assert buffer.sample_ids[slot] == f"row-{row_id}"
+        assert int(buffer.features[slot, 1]) == int(buffer.labels[slot])
+        assert buffer.logits[slot, 0] == row_id
+    sampled_x, sampled_y, sampled_logits = buffer.sample(3000)
+    np.testing.assert_array_equal(np.bincount(sampled_y, minlength=3), [1000, 1000, 1000])
+    np.testing.assert_array_equal(sampled_x[:, 1].astype(np.int64), sampled_y)
+    np.testing.assert_allclose(sampled_logits[:, 0], sampled_x[:, 0])
+    np.testing.assert_allclose(sampled_logits[:, 1], sampled_x[:, 0] + 1000)
+    state = buffer.state_dict()
+    assert state["policy"] == "online_equal_class_reservoir_class_uniform_replay_v1"
+    restored = ClassBalancedClassUniformReplayBuffer(155, 2, 3, seed=999)
+    restored.load_state_dict(state)
+    for left, right in zip(buffer.sample(21), restored.sample(21), strict=True):
+        np.testing.assert_array_equal(left, right)
 
 
 def test_balanced_reservoir_retains_old_classes_and_restores_state() -> None:
@@ -111,6 +171,88 @@ def test_observe_stores_pre_update_logits_and_two_replay_terms() -> None:
         second.current_ce + 0.3 * second.replay_logit_mse
         + 0.5 * second.replay_label_ce, rel=1e-5)
     assert exposure == {1: 2}
+
+
+def test_observe_uses_class_uniform_sampler_for_both_replay_losses() -> None:
+    model = torch.nn.Linear(2, 3, bias=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    buffer = ClassBalancedClassUniformReplayBuffer(6, 2, 3, seed=17)
+    buffer.begin_task({0: 2, 1: 2, 2: 2})
+    features = np.arange(12, dtype=np.float32).reshape(6, 2)
+    labels = np.repeat(np.arange(3), 2)
+    buffer.add_batch(features, labels, np.zeros((6, 3), dtype=np.float32),
+                     [f"stored-{i}" for i in range(6)])
+    buffer.finish_task()
+    logit_draws: dict[int, int] = {}
+    label_draws: dict[int, int] = {}
+    observe(model, optimizer, torch.tensor([[0.5, 1.5]]), torch.tensor([0]), ["new"], buffer,
+            alpha=0.3, beta=0.5, replay_batch_size=6,
+            exposure_logit=logit_draws, exposure_label=label_draws)
+    assert logit_draws == {0: 2, 1: 2, 2: 2}
+    assert label_draws == {0: 2, 1: 2, 2: 2}
+
+
+def test_p4_derpp_task0_to_task1_replay_smoke() -> None:
+    model = torch.nn.Linear(2, 3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.0001)
+    buffer = ClassBalancedClassUniformReplayBuffer(12, 2, 3, seed=101)
+    buffer.begin_task({0: 10, 1: 10})
+    labels0 = torch.tensor([0] * 10 + [1] * 10)
+    values0 = torch.arange(40, dtype=torch.float32).reshape(20, 2) / 40
+    for start in range(0, 20, 5):
+        observe(model, optimizer, values0[start:start + 5], labels0[start:start + 5],
+                [f"t0-{i}" for i in range(start, start + 5)], buffer,
+                alpha=0.3, beta=0.5, replay_batch_size=5)
+    buffer.finish_task()
+    assert buffer.size == 12
+    buffer.begin_task({2: 10})
+    logit_draws: dict[int, int] = {}
+    label_draws: dict[int, int] = {}
+    values1 = torch.arange(20, dtype=torch.float32).reshape(10, 2) / 20
+    for start in range(0, 10, 5):
+        observe(model, optimizer, values1[start:start + 5], torch.full((5,), 2),
+                [f"t1-{i}" for i in range(start, start + 5)], buffer,
+                alpha=0.3, beta=0.5, replay_batch_size=6,
+                exposure_logit=logit_draws, exposure_label=label_draws)
+    buffer.finish_task()
+    assert buffer.size == 12
+    np.testing.assert_array_equal(np.bincount(buffer.labels[:buffer.size], minlength=3), [4, 4, 4])
+    assert logit_draws[0] > 0 and logit_draws[1] > 0
+    assert label_draws[0] > 0 and label_draws[1] > 0
+
+
+def test_p4_runner_check_with_train_only_synthetic_audit(tmp_path) -> None:
+    task_file = Path("study_assets/task_protocols/constrained_mass_balanced_seed0_tasks.json").resolve()
+    spec = json.loads(task_file.read_text(encoding="utf-8"))
+    labels = []
+    for task in spec["tasks"]:
+        for index, raw in enumerate(task["classes"]):
+            labels.extend([int(raw)] * (1, 101, 1001)[index % 3])
+    train = tmp_path / "train.parquet"
+    validation = tmp_path / "validation.parquet"
+    test = tmp_path / "test.parquet"
+    pd.DataFrame({"class": labels}).to_parquet(train)
+    all_classes = [int(raw) for task in spec["tasks"] for raw in task["classes"]]
+    pd.DataFrame({"class": all_classes}).to_parquet(validation)
+    pd.DataFrame({"class": all_classes}).to_parquet(test)
+    fold = tmp_path / "folds"
+    fold.mkdir()
+    (fold / "fold_assignments.parquet").write_bytes(b"placeholder")
+    (fold / "fold_manifest.json").write_text("{}", encoding="utf-8")
+    features = tmp_path / "features.json"
+    features.write_text(json.dumps([f"feature_{index}" for index in range(3780)]),
+                        encoding="utf-8")
+    args = SimpleNamespace(
+        config=Path("configs/p4_derpp_cb_class_uniform_full8.json").resolve(),
+        task_file=task_file, train=train, validation=validation, test=test,
+        feature_cols=features, fold_root=fold, output_root=tmp_path / "outputs/run",
+        device="cpu",
+    )
+    config, audit = check_p4_runner(args)
+    assert config["protocol"]["id"] == "P4"
+    assert len(audit["tasks"]) == 8
+    assert all(row["tail_classes"] and row["mid_classes"] and row["head_classes"]
+               for row in audit["tasks"])
 
 
 def test_preserve_partial_task_before_resume(tmp_path) -> None:

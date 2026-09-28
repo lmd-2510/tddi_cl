@@ -155,7 +155,7 @@ def validate_p3_spec(spec, context):
     tasks = spec.get("tasks", [])
     protocol = spec.get("protocol")
     if protocol not in SUPPORTED_TASK_PROTOCOLS or len(tasks) != 8:
-        raise ValueError("Use a full P2/P3/P4 supported file, not a two-task smoke protocol.")
+        raise ValueError("Use a full P3 or supported full P2/P4 file, not a two-task smoke protocol.")
     expected_seed = 0 if protocol == "constrained_mass_balanced" else None
     if spec.get("seed") != expected_seed:
         raise ValueError(
