@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 from src.methods.derpp import (
     ClassBalancedClassUniformReplayBuffer, ClassBalancedReservoirLogitBuffer,
-    ReservoirLogitBuffer, equal_class_quotas, observe,
+    ClassBalancedTemperedReplayBuffer, ReservoirLogitBuffer, equal_class_quotas, observe,
 )
 from src.training.derpp_fold import _preserve_incomplete_task
 from scripts.run_p3_derpp_equal_buffer_pilot import _summarize
@@ -32,6 +32,24 @@ def test_p4_original_and_cb_variant_are_explicitly_separate() -> None:
     assert variant["replay"]["policy"] == ClassBalancedClassUniformReplayBuffer.policy
     assert variant["replay"]["sampling"] == ClassBalancedClassUniformReplayBuffer.replay_policy
     assert original["training"] == variant["training"]
+
+
+def test_p4_sqrt_pilot_changes_only_sampler_and_member_scope() -> None:
+    strict = json.loads(Path("configs/p4_derpp_cb_class_uniform_full8.json")
+                        .read_text(encoding="utf-8"))
+    soft = json.loads(Path("configs/p4_derpp_cb_sqrt_replay_pilot.json")
+                      .read_text(encoding="utf-8"))
+    assert soft["kind"] == "p4_derpp_cb_sqrt_replay_pilot"
+    assert soft["member_ids"] == [0]
+    assert soft["protocol"] == strict["protocol"]
+    assert soft["model"] == strict["model"]
+    assert soft["training"] == strict["training"]
+    assert soft["replay"]["storage"] == strict["replay"]["storage"]
+    assert soft["replay"]["policy"] == ClassBalancedTemperedReplayBuffer.policy
+    assert soft["replay"]["sampling"] == ClassBalancedTemperedReplayBuffer.replay_policy
+    assert soft["replay"]["class_sampling_exponent"] == 0.5
+    assert soft["replay"]["member_budget"] == 27778
+    assert soft["replay"]["global_slot_budget"] == 27778
 
 
 def test_reservoir_checkpoint_restores_future_sampling() -> None:
@@ -97,6 +115,36 @@ def test_class_uniform_replay_is_not_slot_uniform_and_preserves_rows() -> None:
     restored.load_state_dict(state)
     for left, right in zip(buffer.sample(21), restored.sample(21), strict=True):
         np.testing.assert_array_equal(left, right)
+
+
+def test_sqrt_replay_softens_class_uniform_and_restores_exactly() -> None:
+    buffer = ClassBalancedTemperedReplayBuffer(155, 2, 3, seed=37, exponent=0.5)
+    buffer.begin_task({0: 5, 1: 50, 2: 100})
+    labels = np.asarray([0] * 5 + [1] * 50 + [2] * 100)
+    ids = np.arange(155, dtype=np.float32)
+    features = np.column_stack((ids, labels.astype(np.float32)))
+    logits = np.column_stack((ids, ids + 1000, ids + 2000)).astype(np.float32)
+    buffer.add_batch(features, labels, logits, [f"row-{i}" for i in range(155)])
+    buffer.finish_task()
+    sampled_x, sampled_y, sampled_logits = buffer.sample(60000)
+    empirical = np.bincount(sampled_y, minlength=3) / len(sampled_y)
+    expected = np.sqrt(np.asarray([5, 50, 100], dtype=float))
+    expected /= expected.sum()
+    np.testing.assert_allclose(empirical, expected, atol=0.007)
+    assert empirical[0] < 1 / 3 < empirical[2]
+    assert empirical[0] > 5 / 155 and empirical[2] < 100 / 155
+    np.testing.assert_array_equal(sampled_x[:, 1].astype(np.int64), sampled_y)
+    np.testing.assert_allclose(sampled_logits[:, 0], sampled_x[:, 0])
+    state = buffer.state_dict()
+    assert state["policy"] == ClassBalancedTemperedReplayBuffer.policy
+    assert state["replay_exponent"] == 0.5
+    restored = ClassBalancedTemperedReplayBuffer(155, 2, 3, seed=999, exponent=0.5)
+    restored.load_state_dict(state)
+    for left, right in zip(buffer.sample(31), restored.sample(31), strict=True):
+        np.testing.assert_array_equal(left, right)
+    mismatch = ClassBalancedTemperedReplayBuffer(155, 2, 3, seed=999, exponent=0.25)
+    with pytest.raises(ValueError, match="exponent"):
+        mismatch.load_state_dict(state)
 
 
 def test_balanced_reservoir_retains_old_classes_and_restores_state() -> None:

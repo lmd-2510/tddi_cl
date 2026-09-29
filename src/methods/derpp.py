@@ -7,6 +7,7 @@ sample.  The reservoir processes each training row once, in stream order.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import MutableMapping, Sequence
 
 import numpy as np
@@ -290,6 +291,66 @@ class ClassBalancedClassUniformReplayBuffer(ClassBalancedReservoirLogitBuffer):
         indices = self._sample_indices(count)
         return (self.features[indices].copy(), self.labels[indices].copy(),
                 self.logits[indices].copy())
+
+
+class ClassBalancedTemperedReplayBuffer(ClassBalancedReservoirLogitBuffer):
+    """Equal-class storage with softened class-balanced replay.
+
+    A class containing ``n_c`` retained exemplars is selected with probability
+    proportional to ``n_c ** exponent``.  ``exponent=0`` is class-uniform,
+    while ``exponent=1`` is equivalent in expectation to slot-uniform replay.
+    The frozen pilot uses the midpoint ``exponent=0.5`` (square-root replay),
+    then samples one retained exemplar uniformly inside the selected class.
+
+    Sampling is with replacement across replay draws, matching DER++'s online
+    replay semantics and allowing rare classes to be revisited without making
+    them as dominant as strict class-uniform replay.
+    """
+
+    policy = "online_equal_class_reservoir_sqrt_replay_v1"
+    replay_policy = "tempered_class_then_exemplar_uniform_tau_0p5_v1"
+
+    def __init__(self, capacity: int, feature_dim: int, class_count: int, *, seed: int,
+                 exponent: float = 0.5):
+        if not np.isfinite(exponent) or not 0.0 <= float(exponent) <= 1.0:
+            raise ValueError("Tempered replay exponent must be finite and in [0, 1].")
+        super().__init__(capacity, feature_dim, class_count, seed=seed)
+        self.exponent = float(exponent)
+
+    def _sample_indices(self, count: int) -> np.ndarray:
+        if count <= 0 or self.size == 0:
+            raise ValueError("Cannot draw from an empty DER++ buffer.")
+        active = np.asarray(sorted(label for label, slots in self._class_slots.items() if slots),
+                            dtype=np.int64)
+        if active.size == 0:
+            raise ValueError("Balanced DER++ buffer has no active retained class.")
+        retained = np.asarray([len(self._class_slots[int(label)]) for label in active],
+                              dtype=np.float64)
+        weights = np.power(retained, self.exponent)
+        probabilities = weights / weights.sum()
+        selected = self.rng.choice(active, size=int(count), replace=True, p=probabilities)
+        return np.asarray([
+            self._class_slots[int(label)][
+                int(self.rng.integers(len(self._class_slots[int(label)])))
+            ]
+            for label in selected
+        ], dtype=np.int64)
+
+    def sample(self, count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        indices = self._sample_indices(count)
+        return (self.features[indices].copy(), self.labels[indices].copy(),
+                self.logits[indices].copy())
+
+    def state_dict(self) -> dict:
+        state = super().state_dict()
+        state["replay_exponent"] = self.exponent
+        return state
+
+    def load_state_dict(self, state: dict) -> None:
+        if not math.isclose(float(state.get("replay_exponent", float("nan"))), self.exponent,
+                            rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError("Tempered DER++ replay exponent checkpoint mismatch.")
+        super().load_state_dict(state)
 
 
 def observe(model: torch.nn.Module, optimizer: torch.optim.Optimizer,

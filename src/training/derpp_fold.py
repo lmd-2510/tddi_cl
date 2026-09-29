@@ -34,7 +34,7 @@ from src.eval.predictions import (
 )
 from src.methods.derpp import (
     ClassBalancedClassUniformReplayBuffer, ClassBalancedReservoirLogitBuffer,
-    ReservoirLogitBuffer, observe,
+    ClassBalancedTemperedReplayBuffer, ReservoirLogitBuffer, observe,
 )
 from src.models.tddi_paper_member import TDDIPaperMember, TDDIPaperMemberConfig
 from src.utils.seed import resolve_seed_configuration, set_configured_seeds
@@ -49,6 +49,9 @@ P4_ORIGINAL_METHOD_PROTOCOL = "p4_derpp_original_fixed_head_v1"
 P4_CB_METHOD_PROTOCOL = "p4_derpp_cb_class_uniform_replay_v1"
 P4_CB_BUFFER_POLICY = ClassBalancedClassUniformReplayBuffer.policy
 P4_CB_REPLAY_POLICY = ClassBalancedClassUniformReplayBuffer.replay_policy
+P4_SQRT_METHOD_PROTOCOL = "p4_derpp_cb_sqrt_replay_pilot_v1"
+P4_SQRT_BUFFER_POLICY = ClassBalancedTemperedReplayBuffer.policy
+P4_SQRT_REPLAY_POLICY = ClassBalancedTemperedReplayBuffer.replay_policy
 
 
 def _sha(data: object) -> str:
@@ -156,7 +159,7 @@ def _prediction_provenance(args, *, context, prep_hash: str, task_hash: str,
         study_contract_sha256=_sha(shared), preprocessing_policy="task0_standard_frozen",
         preprocessing_sha256=prep_hash, preprocessing_member_id=member,
         ranking_policy=("equal_class_quota_random_within_class" if buffer_policy in
-                        {BALANCED_BUFFER_POLICY, P4_CB_BUFFER_POLICY}
+                        {BALANCED_BUFFER_POLICY, P4_CB_BUFFER_POLICY, P4_SQRT_BUFFER_POLICY}
                         else "reservoir_uniform_online"), buffer_policy=buffer_policy,
         member_memory_budget=args.memory_budget,
         global_memory_budget=member_count * args.memory_budget,
@@ -242,11 +245,15 @@ def run_member(args: argparse.Namespace) -> None:
         raise ValueError("DER++ requires member 0/1/2 and 4%=27,778 slots per member.")
     config = json.loads(args.config.read_text(encoding="utf-8"))
     kind = config.get("kind")
-    balanced_storage = kind in {"p3_derpp_equal_class_pilot", "p4_derpp_cb_class_uniform_full8"}
+    sqrt_replay = kind == "p4_derpp_cb_sqrt_replay_pilot"
+    balanced_storage = kind in {"p3_derpp_equal_class_pilot", "p4_derpp_cb_class_uniform_full8",
+                                "p4_derpp_cb_sqrt_replay_pilot"}
     class_uniform = kind == "p4_derpp_cb_class_uniform_full8"
     p4_original = kind == "p4_derpp_original_full8"
     buffer_policy = config.get("replay", {}).get("policy")
-    if class_uniform:
+    if sqrt_replay:
+        expected_policy, method_protocol = P4_SQRT_BUFFER_POLICY, P4_SQRT_METHOD_PROTOCOL
+    elif class_uniform:
         expected_policy, method_protocol = P4_CB_BUFFER_POLICY, P4_CB_METHOD_PROTOCOL
     elif balanced_storage:
         expected_policy, method_protocol = BALANCED_BUFFER_POLICY, BALANCED_METHOD_PROTOCOL
@@ -255,16 +262,21 @@ def run_member(args: argparse.Namespace) -> None:
     else:
         expected_policy, method_protocol = "online_reservoir_logits_v1", METHOD_PROTOCOL
     member_ids = config.get("member_ids")
-    expected_members = [0] if kind == "p3_derpp_equal_class_pilot" else [0, 1, 2]
+    expected_members = ([0] if kind in {"p3_derpp_equal_class_pilot",
+                                       "p4_derpp_cb_sqrt_replay_pilot"}
+                        else [0, 1, 2])
     if (kind not in {"p3_derpp_online_full8", "p3_derpp_equal_class_pilot",
-                     "p4_derpp_original_full8", "p4_derpp_cb_class_uniform_full8"}
+                     "p4_derpp_original_full8", "p4_derpp_cb_class_uniform_full8",
+                     "p4_derpp_cb_sqrt_replay_pilot"}
             or config.get("training", {}).get("epochs_per_task") != 1
             or buffer_policy != expected_policy
             or member_ids != expected_members
             or args.member_id not in member_ids):
         raise ValueError("DER++ config must select one online pass and reservoir logit memory.")
     sampling = config.get("replay", {}).get("sampling")
-    if ((class_uniform and sampling != P4_CB_REPLAY_POLICY)
+    if ((sqrt_replay and (sampling != P4_SQRT_REPLAY_POLICY
+                          or float(config["replay"].get("class_sampling_exponent", -1)) != 0.5))
+            or (class_uniform and sampling != P4_CB_REPLAY_POLICY)
             or (p4_original and sampling != "uniform_over_retained_slots")):
         raise ValueError("DER++ replay sampler does not match the selected method variant.")
     if (config["model"].get("variant") != "tddi_paper_member"
@@ -345,13 +357,18 @@ def run_member(args: argparse.Namespace) -> None:
     model = TDDIPaperMember(TDDIPaperMemberConfig(
         input_dim=len(columns), num_classes=178, dropout=float(config["model"]["dropout"]),
         activation=config["model"]["activation"])).to(device)
-    if class_uniform:
+    if sqrt_replay:
+        buffer_type = ClassBalancedTemperedReplayBuffer
+    elif class_uniform:
         buffer_type = ClassBalancedClassUniformReplayBuffer
     elif balanced_storage:
         buffer_type = ClassBalancedReservoirLogitBuffer
     else:
         buffer_type = ReservoirLogitBuffer
-    buffer = buffer_type(args.memory_budget, len(columns), 178, seed=seeds.member_seed + 13579)
+    buffer_kwargs = ({"exponent": float(config["replay"]["class_sampling_exponent"])}
+                     if sqrt_replay else {})
+    buffer = buffer_type(args.memory_budget, len(columns), 178,
+                         seed=seeds.member_seed + 13579, **buffer_kwargs)
     checkpoints = sorted((root / "checkpoints").glob("task_*.pt"),
                          key=lambda path: int(path.stem.split("_")[1])) if (root / "checkpoints").exists() else []
     completed = -1
