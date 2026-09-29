@@ -218,15 +218,28 @@ def _train_members(args: argparse.Namespace, config_path: Path) -> None:
             raise RuntimeError(f"Member {member} returned without a valid task-7 completion.")
 
 
+def _predictions(artifact) -> np.ndarray:
+    """Return raw-class predictions for member or offline ensemble artifacts."""
+    stored = getattr(artifact, "predictions", None)
+    if stored is not None:
+        return np.asarray(stored, dtype=np.int64)
+    probabilities = np.asarray(artifact.probabilities)
+    raw_class_ids = np.asarray(artifact.raw_class_ids, dtype=np.int64)
+    if (probabilities.ndim != 2 or raw_class_ids.ndim != 1
+            or probabilities.shape[1] != len(raw_class_ids)):
+        raise ValueError("Prediction artifact probability/class shape mismatch.")
+    return raw_class_ids[probabilities.argmax(axis=1)]
+
+
 def _metrics(artifact) -> dict[str, float]:
-    return compute_classification_metrics(artifact.labels, artifact.predictions,
+    return compute_classification_metrics(artifact.labels, _predictions(artifact),
                                           labels=artifact.raw_class_ids.astype(int).tolist())
 
 
 def _classwise(artifact, train_counts: dict[int, int], origin: dict[int, int]) -> pd.DataFrame:
     labels = artifact.raw_class_ids.astype(int).tolist()
     precision, recall, f1, support = precision_recall_fscore_support(
-        artifact.labels, artifact.predictions, labels=labels, zero_division=0)
+        artifact.labels, _predictions(artifact), labels=labels, zero_division=0)
     return pd.DataFrame([{"raw_class_id": raw, "task_origin": origin[raw],
                           "frequency_group": _group(train_counts[raw]),
                           "train_samples": train_counts[raw], "test_support": int(support[i]),
@@ -236,7 +249,8 @@ def _classwise(artifact, train_counts: dict[int, int], origin: dict[int, int]) -
 
 def _subset_metrics(artifact, classes: list[int]) -> dict[str, float]:
     mask = np.isin(artifact.labels, classes)
-    return compute_classification_metrics(artifact.labels[mask], artifact.predictions[mask], labels=classes)
+    predictions = _predictions(artifact)
+    return compute_classification_metrics(artifact.labels[mask], predictions[mask], labels=classes)
 
 
 def _ensemble(args: argparse.Namespace) -> dict[int, dict[str, Any]]:

@@ -16,7 +16,10 @@ from src.methods.derpp import (
 )
 from src.training.derpp_fold import _preserve_incomplete_task
 from scripts.run_p3_derpp_equal_buffer_pilot import _summarize
-from scripts.run_p4_derpp_cb_replay_full import _check as check_p4_runner
+from scripts.run_p4_derpp_cb_replay_full import (
+    _check as check_p4_runner, _classwise as p4_classwise,
+    _metrics as p4_metrics, _subset_metrics as p4_subset_metrics,
+)
 
 
 def test_p4_original_and_cb_variant_are_explicitly_separate() -> None:
@@ -253,6 +256,22 @@ def test_p4_runner_check_with_train_only_synthetic_audit(tmp_path) -> None:
     assert len(audit["tasks"]) == 8
     assert all(row["tail_classes"] and row["mid_classes"] and row["head_classes"]
                for row in audit["tasks"])
+
+
+def test_p4_review_reconstructs_member_predictions_from_probabilities() -> None:
+    artifact = SimpleNamespace(
+        labels=np.asarray([10, 20, 10, 20], dtype=np.int64),
+        raw_class_ids=np.asarray([10, 20], dtype=np.int64),
+        probabilities=np.asarray([[0.9, 0.1], [0.2, 0.8], [0.4, 0.6], [0.7, 0.3]],
+                                 dtype=np.float32),
+    )
+    metrics = p4_metrics(artifact)
+    assert metrics["accuracy"] == pytest.approx(0.5)
+    subset = p4_subset_metrics(artifact, [10])
+    assert subset["macro_f1"] == pytest.approx(2 / 3)
+    classwise = p4_classwise(artifact, {10: 5, 20: 50}, {10: 0, 20: 1})
+    assert classwise.raw_class_id.tolist() == [10, 20]
+    assert classwise.test_support.tolist() == [2, 2]
 
 
 def test_preserve_partial_task_before_resume(tmp_path) -> None:
