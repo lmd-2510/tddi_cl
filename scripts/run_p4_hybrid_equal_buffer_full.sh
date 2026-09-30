@@ -64,20 +64,26 @@ check_static_inputs() {
 }
 
 prepare_preprocessing() {
-  local log="$1" member target
+  local log="$1" member target target_dir
   mkdir -p "$(dirname "$log")"
   for member in 0 1 2; do
     target="$PREP_ROOT/member_${member}/B/fold_preprocessing.json"
+    target_dir="$(dirname "$target")"
     if [[ -s "$target" ]]; then
       echo "[SKIP] P4 preprocessing member $member already exists." | tee -a "$log"
       continue
     fi
-    if [[ -d "$(dirname "$target")" ]] && find "$(dirname "$target")" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
-      die "Partial preprocessing namespace requires inspection: $(dirname "$target")"
+    if [[ -d "$target_dir" ]] && find "$target_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      die "Partial preprocessing namespace requires inspection: $target_dir"
     fi
-    mkdir -p "$(dirname "$target")"
+    # prepare_fold_preprocessing.py deliberately rejects an existing outdir.
+    # A failed earlier attempt may have left the directory present but empty.
+    if [[ -d "$target_dir" ]]; then
+      rmdir "$target_dir" || die "Cannot remove empty preprocessing directory: $target_dir"
+    fi
+    mkdir -p "$(dirname "$target_dir")"
     echo "[RUN] Preparing frozen P4 task-0 scaler for member $member." | tee -a "$log"
-    "$PYTHON_BIN" "$ROOT/scripts/prepare_fold_preprocessing.py" \
+    if ! "$PYTHON_BIN" "$ROOT/scripts/prepare_fold_preprocessing.py" \
       --assignments "$FOLD_ROOT/fold_assignments.parquet" \
       --manifest "$FOLD_ROOT/fold_manifest.json" \
       --train "$ROOT/train_extracted.parquet" \
@@ -88,8 +94,10 @@ prepare_preprocessing() {
       --member-id "$member" --validation-fold "$member" \
       --experiment-seed 0 --fold-seed 42 \
       --policy task0_standard_frozen --batch-size 2048 \
-      --outdir "$(dirname "$target")" >> "$log" 2>&1 \
-      || die "P4 preprocessing failed for member $member; see $log"
+      --outdir "$target_dir" >> "$log" 2>&1; then
+      tail -n 40 "$log" >&2
+      die "P4 preprocessing failed for member $member; see $log"
+    fi
     [[ -s "$target" ]] || die "Preprocessing command completed without artifact: $target"
     echo "[OK] P4 preprocessing member $member completed." | tee -a "$log"
   done
