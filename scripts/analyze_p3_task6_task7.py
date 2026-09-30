@@ -25,17 +25,29 @@ MEMBERS = (0, 1, 2)
 BOUNDARIES = (6, 7)
 
 
-def _load_tasks(path: Path) -> list[list[int]]:
+SUPPORTED_PROTOCOLS = {
+    "head_to_tail": "P2",
+    "tail_to_head": "P3",
+    "constrained_mass_balanced": "P4",
+}
+
+
+def _load_tasks(path: Path) -> tuple[str, list[list[int]]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("protocol") != "tail_to_head":
-        raise ValueError(f"Expected P3 tail_to_head task file: {path}")
+    protocol_name = payload.get("protocol")
+    protocol_id = SUPPORTED_PROTOCOLS.get(protocol_name)
+    if protocol_id is None:
+        raise ValueError(
+            f"Unsupported task protocol {protocol_name!r}; expected one of "
+            f"{sorted(SUPPORTED_PROTOCOLS)}: {path}"
+        )
     tasks = payload.get("tasks")
     if not isinstance(tasks, list) or len(tasks) != 8:
-        raise ValueError("P3 diagnostics require all eight frozen tasks.")
+        raise ValueError(f"{protocol_id} diagnostics require all eight frozen tasks.")
     result = [[int(value) for value in task["classes"]] for task in tasks]
     if any(not group for group in result) or len({raw for group in result for raw in group}) != 178:
-        raise ValueError("P3 task file must define 178 unique raw class IDs.")
-    return result
+        raise ValueError(f"{protocol_id} task file must define 178 unique raw class IDs.")
+    return protocol_id, result
 
 
 def _load_prediction(root: Path, scope: str, task_id: int, split: str) -> dict[str, Any]:
@@ -145,7 +157,7 @@ def _ordered_common_old_rows(
 
 
 def analyze(full_root: Path, task_file: Path, outdir: Path) -> dict[str, Path]:
-    tasks = _load_tasks(task_file)
+    protocol_id, tasks = _load_tasks(task_file)
     outdir.mkdir(parents=True, exist_ok=True)
     boundary_rows: list[dict[str, Any]] = []
     class_rows: list[dict[str, Any]] = []
@@ -261,7 +273,7 @@ def analyze(full_root: Path, task_file: Path, outdir: Path) -> dict[str, Path]:
 
     ensemble = boundary_frame[boundary_frame["scope"] == "ensemble"]
     report_lines = [
-        "# P3 task 6 → task 7 diagnostic",
+        f"# {protocol_id} task 6 → task 7 diagnostic",
         "",
         "Compares task-6 and task-7 models on aligned sample IDs. Validation is the development diagnostic; test is a final descriptive check and must not be used to tune the next run.",
         "Macro-F1 for `seen_all` changes its class set from task 6 to 7. The fixed old-class comparison is task-6 `seen_all` against task-7 `previous_tasks`.",

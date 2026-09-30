@@ -27,6 +27,9 @@ P3_HYBRID_DISTILL_CONFIG = Path("configs/p3_hybrid_distill_full8.json")
 FOCAL_EQUAL_BUFFER_CONFIG = Path("configs/p3_focal_equal_buffer_pilot.json")
 HYBRID_NODISTILL_FULL_CONFIG = Path("configs/p3_hybrid_full8_e30_mem4_nodistill.json")
 HYBRID_EQUAL_BUFFER_FULL_CONFIG = Path("configs/p3_hybrid_equal_buffer_full8_e30_mem4.json")
+P4_HYBRID_EQUAL_BUFFER_FULL_CONFIG = Path(
+    "configs/p4_hybrid_equal_buffer_full8_e30_mem4.json"
+)
 ER_ACE_EQUAL_BUFFER_FULL_CONFIG = Path("configs/p3_er_ace_equal_buffer_full8_e30_mem4.json")
 
 
@@ -230,6 +233,45 @@ def test_hybrid_equal_buffer_full_changes_only_requested_historical_settings(
         assert _arg(member.command, "--buffer-policy") == "fold_equal_class_capacity_v1"
         assert _arg(member.command, "--epochs") == "30"
         assert _arg(member.command, "--stop-after-task") == "7"
+
+
+def test_p4_hybrid_equal_buffer_changes_only_protocol_preprocessing_and_namespace(
+    tmp_path: Path,
+) -> None:
+    p3 = load_full_config(
+        HYBRID_EQUAL_BUFFER_FULL_CONFIG,
+        overrides={"output_root": tmp_path / "p3"},
+    )
+    p4 = load_full_config(
+        P4_HYBRID_EQUAL_BUFFER_FULL_CONFIG,
+        overrides={"output_root": tmp_path / "p4"},
+    )
+    plan = shared.build_pilot_plan(
+        p4,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+
+    assert p4["protocol"]["id"] == "P4"
+    assert p4["protocol"]["name"] == "constrained_mass_balanced"
+    assert p4["protocol"]["sha256"] == (
+        "9d22af8618fe03c40b92e2aabbab8b68a89de83bc0de4f51e24932951cf298f4"
+    )
+    assert p4["training"] == p3["training"]
+    assert p4["replay"] == p3["replay"]
+    assert p4["model"] == p3["model"]
+    assert p4["member_budgets"] == {"0": 27778, "1": 27778, "2": 27778}
+    assert p4["global_slot_budget"] == 83334
+    assert "preprocessing_p4_seed0_fold42" in p4["preprocessing"]["artifact_template"]
+    assert len(plan.members) == 3
+    for member in plan.members:
+        assert member.command is not None
+        assert _arg(member.command, "--task-file").endswith(
+            "constrained_mass_balanced_seed0_tasks.json"
+        )
+        assert _arg(member.command, "--loss-variant") == "hybrid"
+        assert _arg(member.command, "--buffer-policy") == "fold_equal_class_capacity_v1"
+        assert _arg(member.command, "--epochs") == "30"
 
 
 def test_er_ace_full_config_uses_fresh_namespace_and_full_ensemble(tmp_path: Path) -> None:

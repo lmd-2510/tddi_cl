@@ -9,6 +9,15 @@ import pandas as pd
 from scripts import analyze_p3_task6_task7 as diagnostic
 
 
+def test_diagnostic_accepts_locked_p4_protocol() -> None:
+    protocol_id, tasks = diagnostic._load_tasks(
+        Path("study_assets/task_protocols/constrained_mass_balanced_seed0_tasks.json")
+    )
+    assert protocol_id == "P4"
+    assert [len(task) for task in tasks] == [38, 20, 20, 20, 20, 20, 20, 20]
+    assert len({raw for task in tasks for raw in task}) == 178
+
+
 def test_aligned_boundary_diagnostic_counts_old_to_new_errors(tmp_path: Path, monkeypatch) -> None:
     classes = list(range(178))
     groups = [classes[:38]] + [classes[start:start + 20] for start in range(38, 178, 20)]

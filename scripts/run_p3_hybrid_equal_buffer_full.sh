@@ -12,7 +12,9 @@ EXPERIMENT_SLUG="${P3_EXPERIMENT_SLUG:-p3_hybrid_equal_buffer_full8_e30_mem4}"
 DISPLAY_LABEL="${P3_DISPLAY_LABEL:-P3 Hybrid + equal-class buffer full8 e30 mem4}"
 LOSS_LABEL="${P3_LOSS_LABEL:-Hybrid (Focal current + CE replay)}"
 CONFIG="${P3_CONFIG:-$ROOT/configs/p3_hybrid_equal_buffer_full8_e30_mem4.json}"
-TASK_FILE="$ROOT/study_assets/task_protocols/tail_to_head_tasks.json"
+PROTOCOL_LABEL="${P3_PROTOCOL_LABEL:-P3}"
+TASK_FILE="${P3_TASK_FILE:-$ROOT/study_assets/task_protocols/tail_to_head_tasks.json}"
+TASK_SHA256="${P3_TASK_SHA256:-0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79}"
 THRESHOLD="$ROOT/configs/eval_tddi_p3_ensemble_entropy_threshold.json"
 MONITOR_ROOT="${P3_MONITOR_ROOT:-$ROOT/outputs/p3_experiments/hybrid_equal_buffer}"
 LATEST="$MONITOR_ROOT/latest.txt"
@@ -33,7 +35,7 @@ find_fold_root() {
 
 find_prep_root() {
   if [[ -n "${P3_PREP_ROOT:-}" ]]; then printf '%s\n' "$P3_PREP_ROOT"; return 0; fi
-  local preferred="$ROOT/study_assets/preprocessing_p3_seed0_fold42"
+  local preferred="${P3_PREP_PREFERRED:-$ROOT/study_assets/preprocessing_p3_seed0_fold42}"
   if [[ -s "$preferred/member_0/B/fold_preprocessing.json" && -s "$preferred/member_1/B/fold_preprocessing.json" && -s "$preferred/member_2/B/fold_preprocessing.json" ]]; then
     printf '%s\n' "$preferred"; return 0
   fi
@@ -75,8 +77,8 @@ check_inputs() {
   for member in 0 1 2; do
     [[ -s "$PREP_ROOT/member_${member}/B/fold_preprocessing.json" ]] || die "Missing preprocessing member $member"
   done
-  [[ "$(sha256sum "$TASK_FILE" | awk '{print $1}')" == "0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79" ]] || die "P3 task protocol hash mismatch"
-  echo "[OK] P3 inputs; 3 members sequential; 4% memory/member (27,778 slots); equal-class buffer; loss=$LOSS_LABEL; replay=12.5%, cap=3."
+  [[ "$(sha256sum "$TASK_FILE" | awk '{print $1}')" == "$TASK_SHA256" ]] || die "$PROTOCOL_LABEL task protocol hash mismatch"
+  echo "[OK] $PROTOCOL_LABEL inputs; 3 members sequential; 4% memory/member (27,778 slots); equal-class buffer; loss=$LOSS_LABEL; replay=12.5%, cap=3."
   echo "[OK] Fold root: $FOLD_ROOT"
   echo "[OK] Preprocessing root: $PREP_ROOT"
 }
@@ -125,7 +127,7 @@ run_experiment() {
   OUT_ROOT="${P3_OUT:-$ROOT/outputs/${EXPERIMENT_SLUG}_seed0_$run_tag}"
   mkdir -p "$RUN_HOME" "$OUT_ROOT"
   make_common_args "$OUT_ROOT"
-  echo "[RUN] Starting three-member full P3 run ($DISPLAY_LABEL): $OUT_ROOT"
+  echo "[RUN] Starting three-member full $PROTOCOL_LABEL run ($DISPLAY_LABEL): $OUT_ROOT"
   if "$PYTHON_BIN" src/training/fold_ensemble3_full.py "${COMMON_ARGS[@]}" --execute \
     > "$RUN_HOME/training_and_offline.log" 2>&1; then
     TRAIN_STATUS=0
@@ -142,7 +144,7 @@ run_experiment() {
     if "$PYTHON_BIN" src/eval/report.py --full-root "$OUT_ROOT" --task-file "$TASK_FILE" \
       --outdir "$OUT_ROOT/final_results" > "$RUN_HOME/final_report.log" 2>&1; then
       REPORT_STATUS=0
-      echo "[OK] Full P3 final report generated."
+      echo "[OK] Full $PROTOCOL_LABEL final report generated."
     else
       REPORT_STATUS=$?
       echo "[WARN] Final report failed (exit=$REPORT_STATUS)."
