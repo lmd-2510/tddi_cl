@@ -24,6 +24,12 @@ find_prep() {
     printf '%s\n' "$P4_PREP_ROOT/member_0/B/fold_preprocessing.json"
     return 0
   fi
+  # Prefer the canonical current P4 artifact over archived/old copies.
+  local preferred="$ROOT/study_assets/preprocessing_p4_seed0_fold42/member_0/B/fold_preprocessing.json"
+  if [[ -s "$preferred" ]]; then
+    printf '%s\n' "$preferred"
+    return 0
+  fi
   mapfile -t p4_found < <(find "$ROOT/study_assets" "$ROOT/outputs" -type f \
     -path '*preprocessing_p4*/*/B/fold_preprocessing.json' 2>/dev/null | sort -u)
   if (( ${#p4_found[@]} == 1 )); then
@@ -102,7 +108,9 @@ status() {
 
 start() {
   mkdir -p "$MONITOR_BASE"
-  local run_id="$(new_run_id)" monitor="$MONITOR_BASE/run_$run_id"
+  local run_id monitor
+  run_id="$(new_run_id)"
+  monitor="$MONITOR_BASE/run_$run_id"
   mkdir -p "$monitor"
   echo "$run_id" > "$monitor/run_id.txt"
   nohup bash "$0" run --run-id "$run_id" > "$monitor/nohup.log" 2>&1 &
@@ -113,7 +121,7 @@ start() {
 
 cmd="${1:-status}"
 case "$cmd" in
-  check) validate_inputs; echo "[OK] P4 preprocessing: $(find_prep)"; echo "[OK] EWC pilot inputs ready." ;;
+  check) validate_inputs; prep_path="$(find_prep)"; echo "[OK] P4 preprocessing: $prep_path"; echo "[OK] EWC pilot inputs ready." ;;
   start) start ;;
   run) shift; [[ "${1:-}" == "--run-id" ]] && { RUN_ID="$2"; } || true; run_training ;;
   status) status ;;
