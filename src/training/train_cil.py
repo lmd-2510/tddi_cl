@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 import uuid
@@ -192,6 +193,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument(
+        "--evaluation-batch-size",
+        type=int,
+        default=512,
+        help=(
+            "Reporting-only inference batch size for frozen-fold validation/test. "
+            "It does not change the training microbatch or effective batch size."
+        ),
+    )
+    parser.add_argument(
         "--effective-batch-size",
         type=int,
         default=None,
@@ -272,6 +282,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
+    parser.add_argument(
+        "--ewc-classification-loss",
+        choices=["ce", "focal"],
+        default="focal",
+        help=(
+            "Classification loss for EWC tasks. The paper-faithful EWC pilot "
+            "uses CE; focal is retained as the backward-compatible default."
+        ),
+    )
     parser.add_argument(
         "--resume-ewc-checkpoint",
         type=Path,
@@ -576,6 +595,7 @@ def build_ewc_checkpoint_config(
         "norm": args.norm,
         "patience": args.patience,
         "ewc_lambda": args.ewc_lambda,
+        "ewc_classification_loss": args.ewc_classification_loss,
         "focal_gamma": args.focal_gamma,
         "max_train_rows_per_task": args.max_train_rows_per_task,
         "max_validation_rows_per_task": args.max_validation_rows_per_task,
@@ -879,6 +899,15 @@ def _sha256_file(path: Path) -> str:
 
 
 def _git_state(project_root: Path) -> dict[str, str | bool | None]:
+    snapshot_commit = os.environ.get("CIL_SOURCE_COMMIT")
+    if snapshot_commit:
+        if len(snapshot_commit) != 40 or any(char not in "0123456789abcdef" for char in snapshot_commit):
+            raise ValueError("CIL_SOURCE_COMMIT must be a lowercase 40-character Git commit.")
+        return {
+            "commit": snapshot_commit,
+            "dirty": False,
+            "snapshot": os.environ.get("CIL_SOURCE_SNAPSHOT"),
+        }
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -2274,7 +2303,10 @@ def main() -> None:
             )
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        criterion = FocalLoss(gamma=args.focal_gamma)
+        if args.method == "ewc" and args.ewc_classification_loss == "ce":
+            criterion: nn.Module = nn.CrossEntropyLoss()
+        else:
+            criterion = FocalLoss(gamma=args.focal_gamma)
 
         teacher_model = None
         if (

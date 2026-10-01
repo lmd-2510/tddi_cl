@@ -4,14 +4,24 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
+source "$ROOT/scripts/lib/source_snapshot.sh"
 ACTION="${1:-start}"
 PYTHON_BIN="${DERPP_PYTHON:-python}"
 GPU_ID="${DERPP_GPU_ID:-0}"
 CONFIG="$ROOT/configs/p3_derpp_full8_mem4.json"
-MONITOR_ROOT="$ROOT/outputs/p3_experiments/derpp"
+MONITOR_ROOT="${DERPP_MONITOR_ROOT:-$ROOT/outputs/p3_experiments/derpp}"
 LATEST="$MONITOR_ROOT/latest.txt"
 
 die() { echo "[STOP] $*" >&2; exit 2; }
+
+latest_home() {
+  [[ -s "$LATEST" ]] || die "No DER++ run is registered."
+  local value
+  value="$(<"$LATEST")"
+  [[ -d "$value" && "$value" == "$MONITOR_ROOT"/run_* ]] \
+    || die "Invalid latest DER++ run pointer: $value"
+  printf '%s\n' "$value"
+}
 
 find_fold_root() {
   if [[ -n "${DERPP_FOLD_ROOT:-}" ]]; then printf '%s\n' "$DERPP_FOLD_ROOT"; return; fi
@@ -35,8 +45,7 @@ find_prep_root() {
 }
 
 if [[ "$ACTION" == "status" || "$ACTION" == "follow" ]]; then
-  [[ -s "$LATEST" ]] || die "No DER++ run is registered."
-  RUN_HOME="$(<"$LATEST")"
+  RUN_HOME="$(latest_home)"
   [[ -s "$RUN_HOME/job.pid" ]] || die "Missing DER++ PID file."
   PID="$(<"$RUN_HOME/job.pid")"
   if [[ "$ACTION" == "follow" ]]; then
@@ -57,8 +66,8 @@ fi
 FOLD_ROOT="$(find_fold_root)" || die "Cannot find one frozen fold root; set DERPP_FOLD_ROOT."
 PREP_ROOT="$(find_prep_root)" || die "Cannot find P3 preprocessing; set DERPP_PREP_ROOT."
 TAG="${2:-${DERPP_RUN_TAG:-$(date -u +%Y%m%dT%H%M%SZ)}}"
-RUN_HOME="$MONITOR_ROOT/run_$TAG"
-OUT_ROOT="$ROOT/outputs/p3_derpp_full8_mem4_seed0_$TAG"
+RUN_HOME="${DERPP_RUN_HOME:-$MONITOR_ROOT/run_$TAG}"
+OUT_ROOT="${DERPP_OUT_ROOT:-$ROOT/outputs/p3_derpp_full8_mem4_seed0_$TAG}"
 COMMON=(
   "$PYTHON_BIN" "$ROOT/scripts/run_p3_derpp_full.py"
   --config "$CONFIG" --train "$ROOT/train_extracted.parquet"
@@ -74,6 +83,12 @@ case "$ACTION" in
     ;;
   run)
     mkdir -p "$RUN_HOME" "$OUT_ROOT"
+    for provenance in source_snapshot_manifest.json source_commit.txt source_tree.txt \
+      source_archive_sha256.txt source_snapshot_files_sha256.txt; do
+      if [[ -s "$RUN_HOME/$provenance" ]]; then
+        cp "$RUN_HOME/$provenance" "$OUT_ROOT/$provenance"
+      fi
+    done
     printf '%s\n' "$OUT_ROOT" > "$RUN_HOME/output_root.txt"
     train_status=0
     "${COMMON[@]}" run > "$RUN_HOME/training_and_offline.log" 2>&1 || train_status=$?
@@ -98,23 +113,45 @@ case "$ACTION" in
     ;;
   start)
     [[ ! -e "$RUN_HOME" && ! -e "$OUT_ROOT" ]] || die "Run tag already exists; choose a fresh tag."
+    cil_assert_snapshot_source_clean "$ROOT" || exit $?
     mkdir -p "$RUN_HOME"
     "${COMMON[@]}" check > "$RUN_HOME/preflight.log" 2>&1 || {
       tail -n 30 "$RUN_HOME/preflight.log" >&2
       die "DER++ preflight failed."
     }
+    SNAPSHOT_ROOT="$(cil_create_source_snapshot "$ROOT" "$RUN_HOME")" || exit $?
     printf '%s\n' "$OUT_ROOT" > "$RUN_HOME/output_root.txt"
     printf '%s\n' "$RUN_HOME" > "$LATEST"
-    nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 \
+    nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
       DERPP_FOLD_ROOT="$FOLD_ROOT" DERPP_PREP_ROOT="$PREP_ROOT" DERPP_PYTHON="$PYTHON_BIN" \
-      bash "$ROOT/scripts/run_p3_derpp_full.sh" run "$TAG" \
+      DERPP_MONITOR_ROOT="$MONITOR_ROOT" DERPP_RUN_HOME="$RUN_HOME" DERPP_OUT_ROOT="$OUT_ROOT" \
+      CIL_SOURCE_COMMIT="$(<"$RUN_HOME/source_commit.txt")" CIL_SOURCE_SNAPSHOT="$SNAPSHOT_ROOT" \
+      bash "$SNAPSHOT_ROOT/scripts/run_p3_derpp_full.sh" run "$TAG" \
       > "$RUN_HOME/nohup.log" 2>&1 < /dev/null &
     echo $! > "$RUN_HOME/job.pid"
     echo "[STARTED] PID=$(<"$RUN_HOME/job.pid"); P3 DER++, members 0→1→2, tasks 0–7."
     echo "[LOG] $RUN_HOME/training_and_offline.log"
     echo "[OUTPUT] $OUT_ROOT"
     ;;
+  resume)
+    RUN_HOME="$(latest_home)"
+    OUT_ROOT="$(<"$RUN_HOME/output_root.txt")"
+    TAG="${RUN_HOME##*/run_}"
+    if [[ -s "$RUN_HOME/job.pid" ]] && kill -0 "$(<"$RUN_HOME/job.pid")" 2>/dev/null; then
+      die "Run is already live: PID=$(<"$RUN_HOME/job.pid")"
+    fi
+    SNAPSHOT_ROOT="$(cil_load_source_snapshot "$RUN_HOME")" || exit $?
+    nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+      DERPP_FOLD_ROOT="$FOLD_ROOT" DERPP_PREP_ROOT="$PREP_ROOT" DERPP_PYTHON="$PYTHON_BIN" \
+      DERPP_MONITOR_ROOT="$MONITOR_ROOT" DERPP_RUN_HOME="$RUN_HOME" DERPP_OUT_ROOT="$OUT_ROOT" \
+      CIL_SOURCE_COMMIT="$(<"$RUN_HOME/source_commit.txt")" CIL_SOURCE_SNAPSHOT="$SNAPSHOT_ROOT" \
+      bash "$SNAPSHOT_ROOT/scripts/run_p3_derpp_full.sh" run "$TAG" \
+      > "$RUN_HOME/nohup.log" 2>&1 < /dev/null &
+    printf '%s\n' "$!" > "$RUN_HOME/job.pid"
+    echo "[STARTED] Resume P3 DER++ from frozen source; PID=$(<"$RUN_HOME/job.pid")"
+    echo "[OUTPUT] $OUT_ROOT"
+    ;;
   *)
-    die "Usage: bash scripts/run_p3_derpp_full.sh [check|start|run|status|follow]"
+    die "Usage: bash scripts/run_p3_derpp_full.sh [check|start|run|resume|status|follow]"
     ;;
 esac

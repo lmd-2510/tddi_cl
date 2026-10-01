@@ -4,12 +4,13 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
+source "$ROOT/scripts/lib/source_snapshot.sh"
 ACTION="${1:-start}"
 PYTHON_BIN="${P4_DERPP_PYTHON:-python}"
 GPU_ID="${P4_DERPP_GPU_ID:-0}"
 CONFIG="$ROOT/configs/p4_derpp_cb_class_uniform_full8.json"
 TASK="$ROOT/study_assets/task_protocols/constrained_mass_balanced_seed0_tasks.json"
-MONITOR="$ROOT/outputs/p4_derpp_cb_class_uniform_monitor"
+MONITOR="${P4_DERPP_MONITOR:-$ROOT/outputs/p4_derpp_cb_class_uniform_monitor}"
 LATEST="$MONITOR/latest.txt"
 
 die() { echo "[STOP] $*" >&2; exit 2; }
@@ -33,10 +34,14 @@ latest_home() {
 FOLD_ROOT="$(find_fold_root)" || die "Cannot resolve one fold root; export P4_DERPP_FOLD_ROOT=/absolute/path/to/folds."
 
 launch() {
-  local run_home="$1" tag="$2" out="$3"
+  local run_home="$1" tag="$2" out="$3" execution_root="$4" commit
+  commit="$(<"$run_home/source_commit.txt")"
   nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 \
-    P4_DERPP_FOLD_ROOT="$FOLD_ROOT" P4_DERPP_PYTHON="$PYTHON_BIN" \
-    bash "$ROOT/scripts/run_p4_derpp_cb_replay_full.sh" run "$tag" \
+    PYTHONDONTWRITEBYTECODE=1 P4_DERPP_FOLD_ROOT="$FOLD_ROOT" \
+    P4_DERPP_PYTHON="$PYTHON_BIN" P4_DERPP_MONITOR="$MONITOR" \
+    P4_DERPP_RUN_HOME="$run_home" P4_DERPP_OUT_ROOT="$out" \
+    CIL_SOURCE_COMMIT="$commit" CIL_SOURCE_SNAPSHOT="$execution_root" \
+    bash "$execution_root/scripts/run_p4_derpp_cb_replay_full.sh" run "$tag" \
     > "$run_home/nohup.log" 2>&1 < /dev/null &
   printf '%s\n' "$!" > "$run_home/job.pid"
   echo "[STARTED] PID=$(<"$run_home/job.pid")"
@@ -69,8 +74,8 @@ case "$ACTION" in
 esac
 
 TAG="${2:-${P4_DERPP_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}}"
-RUN_HOME="$MONITOR/run_$TAG"
-OUT_ROOT="$ROOT/outputs/p4_derpp_cb_class_uniform/$TAG"
+RUN_HOME="${P4_DERPP_RUN_HOME:-$MONITOR/run_$TAG}"
+OUT_ROOT="${P4_DERPP_OUT_ROOT:-$ROOT/outputs/p4_derpp_cb_class_uniform/$TAG}"
 COMMON=(
   "$PYTHON_BIN" "$ROOT/scripts/run_p4_derpp_cb_replay_full.py"
   --config "$CONFIG" --task-file "$TASK"
@@ -87,6 +92,12 @@ case "$ACTION" in
     ;;
   run)
     mkdir -p "$RUN_HOME" "$OUT_ROOT/logs"
+    for provenance in source_snapshot_manifest.json source_commit.txt source_tree.txt \
+      source_archive_sha256.txt source_snapshot_files_sha256.txt; do
+      if [[ -s "$RUN_HOME/$provenance" ]]; then
+        cp "$RUN_HOME/$provenance" "$OUT_ROOT/$provenance"
+      fi
+    done
     printf '%s\n' "$OUT_ROOT" > "$RUN_HOME/output_root.txt"
     attempt=1
     if [[ -s "$OUT_ROOT/runner_attempts.txt" ]]; then
@@ -103,14 +114,16 @@ case "$ACTION" in
     ;;
   start)
     [[ ! -e "$RUN_HOME" && ! -e "$OUT_ROOT" ]] || die "Run ID already exists: $TAG"
+    cil_assert_snapshot_source_clean "$ROOT" || exit $?
     mkdir -p "$RUN_HOME"
     "${COMMON[@]}" check > "$RUN_HOME/preflight.log" 2>&1 || {
       tail -n 40 "$RUN_HOME/preflight.log" >&2
       die "Preflight failed."
     }
+    SNAPSHOT_ROOT="$(cil_create_source_snapshot "$ROOT" "$RUN_HOME")" || exit $?
     printf '%s\n' "$OUT_ROOT" > "$RUN_HOME/output_root.txt"
     printf '%s\n' "$RUN_HOME" > "$LATEST"
-    launch "$RUN_HOME" "$TAG" "$OUT_ROOT"
+    launch "$RUN_HOME" "$TAG" "$OUT_ROOT" "$SNAPSHOT_ROOT"
     ;;
   resume)
     RUN_HOME="$(latest_home)"
@@ -123,7 +136,8 @@ case "$ACTION" in
       echo "[OK] Run is already completed: $OUT_ROOT"
       exit 0
     fi
-    launch "$RUN_HOME" "$TAG" "$OUT_ROOT"
+    SNAPSHOT_ROOT="$(cil_load_source_snapshot "$RUN_HOME")" || exit $?
+    launch "$RUN_HOME" "$TAG" "$OUT_ROOT" "$SNAPSHOT_ROOT"
     ;;
   *)
     die "Usage: bash scripts/run_p4_derpp_cb_replay_full.sh [check|start|resume|status|follow]"

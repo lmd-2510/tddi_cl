@@ -29,7 +29,10 @@ class PredictionOutputs:
     probabilities: np.ndarray
     predictions: np.ndarray
     labels: np.ndarray
-    latent_features: np.ndarray
+    # Member-prediction artifacts used by the offline ensemble do not persist
+    # latent features.  Keeping this optional lets reporting-only inference
+    # avoid copying the 7,560-wide hidden representation back to CPU.
+    latent_features: np.ndarray | None
     class_ids: np.ndarray
 
 
@@ -59,6 +62,7 @@ def evaluate_model(
     evaluation_class_indices: list[int] | None = None,
     include_classwise: bool = False,
     collect_outputs: bool = False,
+    collect_latent: bool = True,
 ) -> EvaluationResult:
     """Evaluate a model and optionally retain prediction-level arrays.
 
@@ -68,7 +72,7 @@ def evaluate_model(
 
     if torch is None or F is None:
         raise ImportError("torch is required to evaluate CIL models.")
-    if collect_outputs and not hasattr(model, "forward_with_latent"):
+    if collect_outputs and collect_latent and not hasattr(model, "forward_with_latent"):
         raise TypeError("collect_outputs requires model.forward_with_latent().")
 
     class_ids = _ordered_raw_class_ids(inverse_seen_map)
@@ -88,7 +92,7 @@ def evaluate_model(
             for features, labels in loader:
                 features = features.to(device)
                 labels = labels.to(device)
-                if collect_outputs:
+                if collect_outputs and collect_latent:
                     logits, latent = model.forward_with_latent(features)
                 else:
                     logits = model(features)
@@ -105,9 +109,10 @@ def evaluate_model(
                     all_probabilities.append(probabilities.cpu().numpy())
                 if collect_outputs:
                     all_logits.append(logits.cpu().numpy())
-                    if latent is None:  # pragma: no cover - guarded by branch above
+                    if collect_latent and latent is None:  # pragma: no cover - guarded by branch above
                         raise RuntimeError("Latent outputs were not returned by the model.")
-                    all_latent.append(latent.cpu().numpy())
+                    if collect_latent:
+                        all_latent.append(latent.cpu().numpy())
     finally:
         torch.random.set_rng_state(cpu_rng_state)
         if cuda_rng_states is not None:
@@ -154,7 +159,10 @@ def evaluate_model(
             probabilities=probabilities_array,
             predictions=class_ids[y_pred],
             labels=class_ids[y_true],
-            latent_features=np.concatenate(all_latent).astype(np.float32, copy=False),
+            latent_features=(
+                np.concatenate(all_latent).astype(np.float32, copy=False)
+                if collect_latent else None
+            ),
             class_ids=class_ids,
         )
 

@@ -5,6 +5,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
+source "$ROOT/scripts/lib/source_snapshot.sh"
 PYTHON_BIN="${P3_PYTHON:-python}"
 GPU_ID="${P3_GPU_ID:-0}"
 ACTION="${1:-start}"
@@ -15,11 +16,20 @@ CONFIG="${P3_CONFIG:-$ROOT/configs/p3_hybrid_equal_buffer_full8_e30_mem4.json}"
 PROTOCOL_LABEL="${P3_PROTOCOL_LABEL:-P3}"
 TASK_FILE="${P3_TASK_FILE:-$ROOT/study_assets/task_protocols/tail_to_head_tasks.json}"
 TASK_SHA256="${P3_TASK_SHA256:-0d64c465b0c4bd34f66e6c76088b6b73fd60839ade3e56017b5fd36c21a26e79}"
-THRESHOLD="$ROOT/configs/eval_tddi_p3_ensemble_entropy_threshold.json"
+THRESHOLD="${P3_THRESHOLD_CONFIG:-$ROOT/configs/eval_tddi_p3_ensemble_entropy_threshold.json}"
 MONITOR_ROOT="${P3_MONITOR_ROOT:-$ROOT/outputs/p3_experiments/hybrid_equal_buffer}"
 LATEST="$MONITOR_ROOT/latest.txt"
 
 die() { echo "[STOP] $*" >&2; exit 2; }
+
+latest_home() {
+  [[ -s "$LATEST" ]] || die "No detached run registered under $MONITOR_ROOT"
+  local value
+  value="$(<"$LATEST")"
+  [[ -d "$value" && "$value" == "$MONITOR_ROOT"/run_* ]] \
+    || die "Invalid latest run pointer: $value"
+  printf '%s\n' "$value"
+}
 
 find_fold_root() {
   if [[ -n "${P3_FOLD_ROOT:-}" ]]; then printf '%s\n' "$P3_FOLD_ROOT"; return 0; fi
@@ -126,6 +136,12 @@ run_experiment() {
   RUN_HOME="${P3_RUN_HOME:-$MONITOR_ROOT/run_$run_tag}"
   OUT_ROOT="${P3_OUT:-$ROOT/outputs/${EXPERIMENT_SLUG}_seed0_$run_tag}"
   mkdir -p "$RUN_HOME" "$OUT_ROOT"
+  for provenance in source_snapshot_manifest.json source_commit.txt source_tree.txt \
+    source_archive_sha256.txt source_snapshot_files_sha256.txt; do
+    if [[ -s "$RUN_HOME/$provenance" ]]; then
+      cp "$RUN_HOME/$provenance" "$OUT_ROOT/$provenance"
+    fi
+  done
   make_common_args "$OUT_ROOT"
   echo "[RUN] Starting three-member full $PROTOCOL_LABEL run ($DISPLAY_LABEL): $OUT_ROOT"
   if "$PYTHON_BIN" src/training/fold_ensemble3_full.py "${COMMON_ARGS[@]}" --execute \
@@ -190,6 +206,32 @@ run_experiment() {
   return 0
 }
 
+launch() {
+  local run_home="$1" run_tag="$2" out_root="$3" execution_root="$4" commit
+  local execution_config execution_task execution_threshold
+  commit="$(<"$run_home/source_commit.txt")"
+  execution_config="$(cil_snapshot_path "$ROOT" "$execution_root" "$CONFIG")"
+  execution_task="$(cil_snapshot_path "$ROOT" "$execution_root" "$TASK_FILE")"
+  execution_threshold="$(cil_snapshot_path "$ROOT" "$execution_root" "$THRESHOLD")"
+  nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    P3_PYTHON="$PYTHON_BIN" P3_GPU_ID="$GPU_ID" \
+    P3_EXPERIMENT_SLUG="$EXPERIMENT_SLUG" P3_DISPLAY_LABEL="$DISPLAY_LABEL" \
+    P3_LOSS_LABEL="$LOSS_LABEL" P3_CONFIG="$execution_config" \
+    P3_PROTOCOL_LABEL="$PROTOCOL_LABEL" P3_TASK_FILE="$execution_task" \
+    P3_TASK_SHA256="$TASK_SHA256" P3_THRESHOLD_CONFIG="$execution_threshold" \
+    P3_FOLD_ROOT="$FOLD_ROOT" P3_PREP_ROOT="$PREP_ROOT" \
+    P3_MONITOR_ROOT="$MONITOR_ROOT" P3_RUN_HOME="$run_home" \
+    P3_OUT="$out_root" P3_RUN_TAG="$run_tag" \
+    CIL_SOURCE_COMMIT="$commit" CIL_SOURCE_SNAPSHOT="$execution_root" \
+    bash "$execution_root/scripts/run_p3_hybrid_equal_buffer_full.sh" run "$run_tag" \
+    > "$run_home/nohup.log" 2>&1 < /dev/null &
+  printf '%s\n' "$!" > "$run_home/job.pid"
+  echo "[STARTED] $DISPLAY_LABEL; full 8 tasks, 3 members; PID=$(<"$run_home/job.pid")"
+  echo "[LOG] $run_home/nohup.log"
+  echo "[OUTPUT] $out_root"
+}
+
 case "$ACTION" in
   check)
     check_inputs
@@ -207,26 +249,36 @@ case "$ACTION" in
     TAG="${2:-$(date -u +%Y%m%dT%H%M%SZ)}"
     RUN_HOME="$MONITOR_ROOT/run_$TAG"
     OUT_ROOT="$ROOT/outputs/${EXPERIMENT_SLUG}_seed0_$TAG"
+    [[ ! -e "$RUN_HOME" && ! -e "$OUT_ROOT" ]] || die "Run ID already exists: $TAG"
+    cil_assert_snapshot_source_clean "$ROOT" || exit $?
     mkdir -p "$RUN_HOME"
     preflight "$OUT_ROOT" > "$RUN_HOME/preflight.log" 2>&1 || {
       tail -n 30 "$RUN_HOME/preflight.log" >&2
       die "Preflight failed; no training started."
     }
-    printf '%s\n' "$RUN_HOME" > "$LATEST"
+    SNAPSHOT_ROOT="$(cil_create_source_snapshot "$ROOT" "$RUN_HOME")" || exit $?
     printf '%s\n' "$OUT_ROOT" > "$RUN_HOME/output_root.txt"
-    nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 \
-      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-      P3_RUN_HOME="$RUN_HOME" P3_OUT="$OUT_ROOT" P3_RUN_TAG="$TAG" \
-      bash "$ROOT/scripts/run_p3_hybrid_equal_buffer_full.sh" run "$TAG" \
-      > "$RUN_HOME/nohup.log" 2>&1 < /dev/null &
-    echo $! > "$RUN_HOME/job.pid"
-    echo "[STARTED] $DISPLAY_LABEL; full 8 tasks, 3 members; PID=$(<"$RUN_HOME/job.pid")"
-    echo "[LOG] $RUN_HOME/nohup.log"
-    echo "[OUTPUT] $OUT_ROOT"
+    printf '%s\n' "$RUN_HOME" > "$LATEST"
+    launch "$RUN_HOME" "$TAG" "$OUT_ROOT" "$SNAPSHOT_ROOT"
+    ;;
+  resume)
+    RUN_HOME="$(latest_home)"
+    OUT_ROOT="$(<"$RUN_HOME/output_root.txt")"
+    TAG="${RUN_HOME##*/run_}"
+    if [[ -s "$RUN_HOME/job.pid" ]] && kill -0 "$(<"$RUN_HOME/job.pid")" 2>/dev/null; then
+      die "Run is already live: PID=$(<"$RUN_HOME/job.pid")"
+    fi
+    if [[ -s "$OUT_ROOT/full_manifest.json" ]] \
+      && grep -q '"final_status": "completed"' "$OUT_ROOT/full_manifest.json" \
+      && compgen -G "$OUT_ROOT/review/${EXPERIMENT_SLUG}_review_*.zip" > /dev/null; then
+      echo "[OK] Run is already completed: $OUT_ROOT"
+      exit 0
+    fi
+    SNAPSHOT_ROOT="$(cil_load_source_snapshot "$RUN_HOME")" || exit $?
+    launch "$RUN_HOME" "$TAG" "$OUT_ROOT" "$SNAPSHOT_ROOT"
     ;;
   status|follow)
-    [[ -s "$LATEST" ]] || die "No detached run registered under $MONITOR_ROOT"
-    RUN_HOME="$(<"$LATEST")"
+    RUN_HOME="$(latest_home)"
     [[ -s "$RUN_HOME/job.pid" ]] || die "PID file missing: $RUN_HOME/job.pid"
     PID="$(<"$RUN_HOME/job.pid")"
     if [[ "$ACTION" == "follow" ]]; then
@@ -239,7 +291,7 @@ case "$ACTION" in
     fi
     ;;
   *)
-    echo "Usage: bash scripts/run_p3_hybrid_equal_buffer_full.sh [start|run|check|status|follow] [run_tag]" >&2
+    echo "Usage: bash scripts/run_p3_hybrid_equal_buffer_full.sh [start|run|check|resume|status|follow] [run_tag]" >&2
     exit 2
     ;;
 esac

@@ -300,6 +300,64 @@ def test_actual_accumulation_steps_and_tail_matches_large_batch(tiny):
         torch.testing.assert_close(a, b, atol=1e-6, rtol=1e-6)
 
 
+def test_single_reporting_pass_matches_separate_group_metrics():
+    torch.manual_seed(7)
+    values = np.random.default_rng(7).normal(size=(12, 2)).astype(np.float32)
+    labels = np.asarray([10, 20, 30, 40] * 3, dtype=np.int64)
+    seen_map = {10: 0, 20: 1, 30: 2, 40: 3}
+    new_classes = [30, 40]
+    model = torch.nn.Linear(2, 4).eval()
+    criterion = engine.FocalLoss(1.0)
+
+    optimized, outputs = pilot._evaluate_fold_split(
+        engine=engine,
+        model=model,
+        values=values,
+        labels=labels,
+        seen_map=seen_map,
+        new_classes=new_classes,
+        criterion=criterion,
+        device="cpu",
+        batch_size=5,
+    )
+    assert outputs.latent_features is None
+
+    expected = {}
+    groups = {
+        "seen_all": sorted(seen_map),
+        "old": [10, 20],
+        "current": new_classes,
+    }
+    inverse = {index: raw for raw, index in seen_map.items()}
+    for group, classes in groups.items():
+        keep = np.isin(labels, classes)
+        loader = torch.utils.data.DataLoader(
+            engine.build_tensor_dataset(
+                values[keep],
+                np.asarray([seen_map[int(raw)] for raw in labels[keep]], dtype=np.int64),
+            ),
+            batch_size=5,
+            shuffle=False,
+        )
+        result = engine.evaluate_model(
+            model,
+            loader,
+            criterion,
+            "cpu",
+            inverse,
+            evaluation_class_indices=[seen_map[raw] for raw in classes],
+        )
+        expected[group] = result.metrics
+
+    for row in optimized:
+        reference = expected[row["group"]]
+        for metric in (
+            "accuracy", "macro_precision", "macro_recall", "macro_f1",
+            "weighted_f1", "weighted_precision", "balanced_accuracy", "loss",
+        ):
+            assert row[metric] == pytest.approx(reference[metric], abs=1e-7)
+
+
 def test_early_stopping_passes_best_not_last_to_teacher(data, monkeypatch, tiny):
     command = cli(data, suffix="_early", extra=["--epochs", "5", "--patience", "1"])
     monkeypatch.setattr(sys, "argv", command)

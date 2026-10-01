@@ -5,16 +5,26 @@ set -uo pipefail
 # then common task-7 test ensemble, detailed report, visualizations and review ZIP.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
+source "$ROOT/scripts/lib/source_snapshot.sh"
 PYTHON_BIN="${PDE_PYTHON:-python}"
 GPU_ID="${PDE_GPU_ID:-0}"
 ACTION="${1:-start}"
 TAG="${2:-$(date -u +%Y%m%dT%H%M%SZ)}"
-RUN_HOME="$ROOT/outputs/p3_experiments/protocol_diverse/run_$TAG"
+MONITOR_ROOT="${PDE_MONITOR_ROOT:-$ROOT/outputs/p3_experiments/protocol_diverse}"
+RUN_HOME="${PDE_RUN_HOME:-$MONITOR_ROOT/run_$TAG}"
 OUT_ROOT="${PDE_OUT:-$ROOT/outputs/protocol_diverse_ensemble_seed0_$TAG}"
-MONITOR_ROOT="$ROOT/outputs/p3_experiments/protocol_diverse"
 LATEST="$MONITOR_ROOT/latest.txt"
 
 die() { echo "[STOP] $*" >&2; exit 2; }
+
+latest_home() {
+  [[ -s "$LATEST" ]] || die "No detached protocol-diverse run registered."
+  local value
+  value="$(<"$LATEST")"
+  [[ -d "$value" && "$value" == "$MONITOR_ROOT"/run_* ]] \
+    || die "Invalid latest protocol-diverse run pointer: $value"
+  printf '%s\n' "$value"
+}
 
 find_fold_root() {
   if [[ -n "${PDE_FOLD_ROOT:-${P3_FOLD_ROOT:-}}" ]]; then
@@ -59,6 +69,13 @@ preflight() {
 
 run_all() {
   mkdir -p "$RUN_HOME" "$OUT_ROOT"
+  local provenance
+  for provenance in source_snapshot_manifest.json source_commit.txt source_tree.txt \
+    source_archive_sha256.txt source_snapshot_files_sha256.txt; do
+    if [[ -s "$RUN_HOME/$provenance" ]]; then
+      cp "$RUN_HOME/$provenance" "$OUT_ROOT/$provenance"
+    fi
+  done
   local train_status=0 report_status=1 visualization_status=1 package_status=1
   "${COMMON[@]}" run > "$RUN_HOME/protocol_diverse.log" 2>&1 || train_status=$?
   [[ -s "$OUT_ROOT/final_results/PROTOCOL_DIVERSE_ENSEMBLE_RESULTS.md" ]] && report_status=0
@@ -97,26 +114,49 @@ case "$ACTION" in
     run_all
     ;;
   start)
+    [[ ! -e "$RUN_HOME" && ! -e "$OUT_ROOT" ]] || die "Run ID already exists: $TAG"
+    cil_assert_snapshot_source_clean "$ROOT" || exit $?
     mkdir -p "$RUN_HOME"
     preflight > "$RUN_HOME/preflight.log" 2>&1 || {
       tail -n 40 "$RUN_HOME/preflight.log" >&2
       die "Preflight failed; no model training started."
     }
+    SNAPSHOT_ROOT="$(cil_create_source_snapshot "$ROOT" "$RUN_HOME")" || exit $?
     printf '%s\n' "$RUN_HOME" > "$LATEST"
     printf '%s\n' "$OUT_ROOT" > "$RUN_HOME/output_root.txt"
     nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 \
-      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+      PYTHONDONTWRITEBYTECODE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
       PDE_FOLD_ROOT="$FOLD_ROOT" PDE_OUT="$OUT_ROOT" PDE_PYTHON="$PYTHON_BIN" \
-      bash "$ROOT/scripts/run_protocol_diverse_ensemble.sh" run "$TAG" \
+      PDE_MONITOR_ROOT="$MONITOR_ROOT" PDE_RUN_HOME="$RUN_HOME" \
+      CIL_SOURCE_COMMIT="$(<"$RUN_HOME/source_commit.txt")" CIL_SOURCE_SNAPSHOT="$SNAPSHOT_ROOT" \
+      bash "$SNAPSHOT_ROOT/scripts/run_protocol_diverse_ensemble.sh" run "$TAG" \
       > "$RUN_HOME/nohup.log" 2>&1 < /dev/null &
     echo $! > "$RUN_HOME/job.pid"
     echo "[STARTED] P2/member0 -> P3/member1 -> P4/member2; full 8-task trajectories. PID=$(<"$RUN_HOME/job.pid")"
     echo "[LOG] $RUN_HOME/nohup.log"
     echo "[OUTPUT] $OUT_ROOT"
     ;;
+  resume)
+    RUN_HOME="$(latest_home)"
+    OUT_ROOT="$(<"$RUN_HOME/output_root.txt")"
+    TAG="${RUN_HOME##*/run_}"
+    if [[ -s "$RUN_HOME/job.pid" ]] && kill -0 "$(<"$RUN_HOME/job.pid")" 2>/dev/null; then
+      die "Run is already live: PID=$(<"$RUN_HOME/job.pid")"
+    fi
+    SNAPSHOT_ROOT="$(cil_load_source_snapshot "$RUN_HOME")" || exit $?
+    nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 \
+      PYTHONDONTWRITEBYTECODE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+      PDE_FOLD_ROOT="$FOLD_ROOT" PDE_OUT="$OUT_ROOT" PDE_PYTHON="$PYTHON_BIN" \
+      PDE_MONITOR_ROOT="$MONITOR_ROOT" PDE_RUN_HOME="$RUN_HOME" \
+      CIL_SOURCE_COMMIT="$(<"$RUN_HOME/source_commit.txt")" CIL_SOURCE_SNAPSHOT="$SNAPSHOT_ROOT" \
+      bash "$SNAPSHOT_ROOT/scripts/run_protocol_diverse_ensemble.sh" run "$TAG" \
+      > "$RUN_HOME/nohup.log" 2>&1 < /dev/null &
+    printf '%s\n' "$!" > "$RUN_HOME/job.pid"
+    echo "[STARTED] Resume protocol-diverse run from frozen source; PID=$(<"$RUN_HOME/job.pid")"
+    echo "[OUTPUT] $OUT_ROOT"
+    ;;
   status|follow)
-    [[ -s "$LATEST" ]] || die "No detached protocol-diverse run registered."
-    RUN_HOME="$(<"$LATEST")"
+    RUN_HOME="$(latest_home)"
     [[ -s "$RUN_HOME/job.pid" ]] || die "PID file missing: $RUN_HOME/job.pid"
     PID="$(<"$RUN_HOME/job.pid")"
     if [[ "$ACTION" == follow ]]; then
@@ -129,7 +169,7 @@ case "$ACTION" in
     fi
     ;;
   *)
-    echo "Usage: bash scripts/run_protocol_diverse_ensemble.sh [check|start|run|status|follow] [run_tag]" >&2
+    echo "Usage: bash scripts/run_protocol_diverse_ensemble.sh [check|start|run|resume|status|follow] [run_tag]" >&2
     exit 2
     ;;
 esac

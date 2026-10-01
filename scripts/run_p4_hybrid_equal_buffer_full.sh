@@ -6,6 +6,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
+source "$ROOT/scripts/lib/source_snapshot.sh"
 ACTION="${1:-start}"
 PYTHON_BIN="${P4_HYBRID_PYTHON:-python}"
 GPU_ID="${P4_HYBRID_GPU_ID:-0}"
@@ -14,7 +15,7 @@ TASK_FILE="$ROOT/study_assets/task_protocols/constrained_mass_balanced_seed0_tas
 TASK_SHA256="9d22af8618fe03c40b92e2aabbab8b68a89de83bc0de4f51e24932951cf298f4"
 EXPERIMENT_SLUG="p4_hybrid_equal_buffer_full8_e30_mem4"
 DISPLAY_LABEL="P4 Hybrid + equal-class buffer full8 e30 mem4"
-MONITOR_ROOT="$ROOT/outputs/p4_experiments/hybrid_equal_buffer"
+MONITOR_ROOT="${P4_HYBRID_MONITOR_ROOT:-$ROOT/outputs/p4_experiments/hybrid_equal_buffer}"
 LATEST="$MONITOR_ROOT/latest.txt"
 PREP_ROOT="${P4_HYBRID_PREP_ROOT:-$ROOT/study_assets/preprocessing_p4_seed0_fold42}"
 
@@ -119,12 +120,16 @@ export_generic_environment() {
 }
 
 launch() {
-  local run_home="$1" tag="$2" out_root="$3"
+  local run_home="$1" tag="$2" out_root="$3" execution_root="$4" commit
+  commit="$(<"$run_home/source_commit.txt")"
   nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     P4_HYBRID_FOLD_ROOT="$FOLD_ROOT" P4_HYBRID_PREP_ROOT="$PREP_ROOT" \
-    P4_HYBRID_PYTHON="$PYTHON_BIN" \
-    bash "$ROOT/scripts/run_p4_hybrid_equal_buffer_full.sh" run "$tag" \
+    P4_HYBRID_PYTHON="$PYTHON_BIN" P4_HYBRID_MONITOR_ROOT="$MONITOR_ROOT" \
+    P4_HYBRID_RUN_HOME="$run_home" P4_HYBRID_OUT_ROOT="$out_root" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    CIL_SOURCE_COMMIT="$commit" CIL_SOURCE_SNAPSHOT="$execution_root" \
+    bash "$execution_root/scripts/run_p4_hybrid_equal_buffer_full.sh" run "$tag" \
     > "$run_home/nohup.log" 2>&1 < /dev/null &
   printf '%s\n' "$!" > "$run_home/job.pid"
   echo "[STARTED] $DISPLAY_LABEL; PID=$(<"$run_home/job.pid")"
@@ -157,8 +162,8 @@ case "$ACTION" in
 esac
 
 TAG="${2:-${P4_HYBRID_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}}"
-RUN_HOME="$MONITOR_ROOT/run_$TAG"
-OUT_ROOT="$ROOT/outputs/${EXPERIMENT_SLUG}_seed0_$TAG"
+RUN_HOME="${P4_HYBRID_RUN_HOME:-$MONITOR_ROOT/run_$TAG}"
+OUT_ROOT="${P4_HYBRID_OUT_ROOT:-$ROOT/outputs/${EXPERIMENT_SLUG}_seed0_$TAG}"
 
 case "$ACTION" in
   check)
@@ -187,10 +192,12 @@ case "$ACTION" in
   start)
     [[ ! -e "$RUN_HOME" && ! -e "$OUT_ROOT" ]] || die "Run ID already exists: $TAG"
     check_static_inputs
+    cil_assert_snapshot_source_clean "$ROOT" || exit $?
     mkdir -p "$RUN_HOME"
+    SNAPSHOT_ROOT="$(cil_create_source_snapshot "$ROOT" "$RUN_HOME")" || exit $?
     printf '%s\n' "$OUT_ROOT" > "$RUN_HOME/output_root.txt"
     printf '%s\n' "$RUN_HOME" > "$LATEST"
-    launch "$RUN_HOME" "$TAG" "$OUT_ROOT"
+    launch "$RUN_HOME" "$TAG" "$OUT_ROOT" "$SNAPSHOT_ROOT"
     ;;
   resume)
     RUN_HOME="$(latest_home)"
@@ -205,7 +212,8 @@ case "$ACTION" in
       echo "[OK] Run is already completed: $OUT_ROOT"
       exit 0
     fi
-    launch "$RUN_HOME" "$TAG" "$OUT_ROOT"
+    SNAPSHOT_ROOT="$(cil_load_source_snapshot "$RUN_HOME")" || exit $?
+    launch "$RUN_HOME" "$TAG" "$OUT_ROOT" "$SNAPSHOT_ROOT"
     ;;
   *)
     die "Usage: bash scripts/run_p4_hybrid_equal_buffer_full.sh [check|start|run|resume|status|follow]"

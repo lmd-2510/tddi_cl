@@ -5,6 +5,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
+source "$REPO_ROOT/scripts/lib/source_snapshot.sh"
 
 PYTHON_BIN="${P4_PYTHON:-python}"
 GPU_ID="${P4_GPU_ID:-0}"
@@ -197,43 +198,75 @@ start_run() {
   command -v nvidia-smi >/dev/null || die "Không tìm thấy nvidia-smi"
   command -v /usr/bin/time >/dev/null || die "Không tìm thấy /usr/bin/time"
   ensure_no_live_controller
+  cil_assert_snapshot_source_clean "$REPO_ROOT" || exit $?
   mkdir -p "$MONITOR_ROOT"
-  local log_dir pid
+  local log_dir snapshot_root
   log_dir="$(next_log_dir)"
   mkdir "$log_dir" || die "Không tạo được log directory: $log_dir"
+  snapshot_root="$(cil_create_source_snapshot "$REPO_ROOT" "$log_dir")" || exit $?
   printf '%s\n' "$log_dir" > "$MONITOR_ROOT/latest_run.txt"
+  launch_snapshot_controller "$log_dir" "$snapshot_root"
+}
+
+launch_snapshot_controller() {
+  local log_dir="$1" snapshot_root="$2" pid commit execution_config execution_threshold
+  commit="$(<"$log_dir/source_commit.txt")"
+  execution_config="$(cil_snapshot_path "$REPO_ROOT" "$snapshot_root" "$FULL_CONFIG")"
+  execution_threshold="$(cil_snapshot_path "$REPO_ROOT" "$snapshot_root" "$THRESHOLD_CONFIG")"
   nohup env CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1 \
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    bash -c '
-      set -uo pipefail
-      log_dir="$1"; repo_root="$2"; gpu_id="$3"
-      python_bin="$4"; full_root="$5"; task_file="$6"; shift 6
-      cd "$repo_root" || exit 1
-      nvidia-smi --id="$gpu_id" \
-        --query-gpu=timestamp,index,memory.used,memory.free,utilization.gpu,power.draw \
-        --format=csv -l 2 > "$log_dir/gpu.csv" 2> "$log_dir/gpu_monitor.err" &
-      monitor_pid=$!
-      trap "kill ${monitor_pid} 2>/dev/null || true; wait ${monitor_pid} 2>/dev/null || true" EXIT
-      /usr/bin/time -v "$@"
-      status=$?
-      if (( status == 0 )); then
-        "$python_bin" src/eval/report.py \
-          --full-root "$full_root" --task-file "$task_file" --overwrite
-        status=$?
-      fi
-      printf "%s\n" "$status" > "$log_dir/exit_code.txt"
-      exit "$status"
-    ' p4-job "$log_dir" "$REPO_ROOT" "$GPU_ID" \
-      "$PYTHON_BIN" "$FULL_ROOT" "$TASK_FILE" \
-      "$PYTHON_BIN" src/training/fold_ensemble3_full.py \
-      --config "$FULL_CONFIG" "${COMMON_P4[@]}" \
-      --member-id 0 --member-id 1 --member-id 2 --execute \
-      > "$log_dir/nohup.log" 2>&1 < /dev/null &
+    PYTHONDONTWRITEBYTECODE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    P4_PYTHON="$PYTHON_BIN" P4_GPU_ID="$GPU_ID" \
+    P4_FOLD_ROOT="$FOLD_ROOT" P4_PREP_ROOT="$PREP_ROOT" \
+    P4_FULL_CONFIG="$execution_config" P4_THRESHOLD_CONFIG="$execution_threshold" \
+    P4_FULL_ROOT="$FULL_ROOT" P4_MONITOR_ROOT="$MONITOR_ROOT" \
+    P4_CONTROLLER_SCRIPT="$CONTROLLER_SCRIPT" \
+    CIL_SOURCE_COMMIT="$commit" CIL_SOURCE_SNAPSHOT="$snapshot_root" \
+    bash "$snapshot_root/scripts/run_p4_ensemble3.sh" execute "$log_dir" \
+    > "$log_dir/nohup.log" 2>&1 < /dev/null &
   pid=$!
   printf '%s\n' "$pid" > "$log_dir/job.pid"
   echo "[STARTED] PID=$pid"
   echo "[LOG] $log_dir/nohup.log"
   echo "Theo dõi: bash $CONTROLLER_SCRIPT follow"
+}
+
+execute_run() {
+  local log_dir="$1" status=0 monitor_pid provenance
+  [[ -d "$log_dir" ]] || die "Không tìm thấy log directory: $log_dir"
+  mkdir -p "$FULL_ROOT"
+  for provenance in source_snapshot_manifest.json source_commit.txt source_tree.txt \
+    source_archive_sha256.txt source_snapshot_files_sha256.txt; do
+    if [[ -s "$log_dir/$provenance" ]]; then
+      cp "$log_dir/$provenance" "$FULL_ROOT/$provenance"
+    fi
+  done
+  nvidia-smi --id="$GPU_ID" \
+    --query-gpu=timestamp,index,memory.used,memory.free,utilization.gpu,power.draw \
+    --format=csv -l 2 > "$log_dir/gpu.csv" 2> "$log_dir/gpu_monitor.err" &
+  monitor_pid=$!
+  trap "kill $monitor_pid 2>/dev/null || true; wait $monitor_pid 2>/dev/null || true" EXIT
+  /usr/bin/time -v "$PYTHON_BIN" src/training/fold_ensemble3_full.py \
+    --config "$FULL_CONFIG" "${COMMON_P4[@]}" \
+    --member-id 0 --member-id 1 --member-id 2 --execute || status=$?
+  if (( status == 0 )); then
+    "$PYTHON_BIN" src/eval/report.py \
+      --full-root "$FULL_ROOT" --task-file "$TASK_FILE" --overwrite || status=$?
+  fi
+  printf '%s\n' "$status" > "$log_dir/exit_code.txt"
+  return "$status"
+}
+
+resume_run() {
+  local log_dir snapshot_root pid
+  log_dir="$(latest_log_dir)"
+  if [[ -s "$log_dir/job.pid" ]]; then
+    pid="$(<"$log_dir/job.pid")"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      die "Controller PID $pid vẫn đang chạy: $log_dir"
+    fi
+  fi
+  snapshot_root="$(cil_load_source_snapshot "$log_dir")" || exit $?
+  launch_snapshot_controller "$log_dir" "$snapshot_root"
 }
 
 show_status() {
@@ -308,6 +341,7 @@ Usage: bash scripts/run_p4_ensemble3.sh ACTION
   prepare    Tạo/skip scaler P4 cho member 0, 1, 2.
   dry-run    Hiện kế hoạch; không train và không ghi output.
   start      Nohup member 0 -> 1 -> 2 -> ensemble/UE; tự resume/skip.
+  resume     Tiếp tục run gần nhất bằng đúng source snapshot ban đầu.
   status     Xem PID, exit code và log cuối.
   follow     Theo dõi log; Ctrl+C chỉ thoát tail.
   verify     Kiểm tra artifacts sau khi toàn bộ run hoàn tất.
@@ -325,6 +359,8 @@ case "$action" in
   prepare) prepare_preprocessing ;;
   dry-run) check_inputs; check_preprocessing; orchestrator_command ;;
   start) start_run ;;
+  execute) [[ $# -eq 2 ]] || die "execute cần log directory"; execute_run "$2" ;;
+  resume) resume_run ;;
   status) show_status ;;
   follow) follow_log ;;
   verify) verify_results ;;

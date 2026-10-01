@@ -53,6 +53,7 @@ from src.eval.predictions import (
     export_member_prediction_artifact,
     partition_identity_sha256,
 )
+from src.eval.metrics import compute_classification_metrics
 from src.utils.logging import RunLogger
 from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 from src.training.replay_checkpoint import (
@@ -115,6 +116,8 @@ def validate_fold_options(args):
         raise ValueError("Legacy fixed 6800 budgets cannot be used in frozen-fold mode.")
     if args.batch_size not in (8, 16, 32, 64) or args.effective_batch_size != 1024:
         raise ValueError("This pilot contract uses microbatch 64 (OOM: 32/16/8), effective target 1024.")
+    if args.evaluation_batch_size <= 0:
+        raise ValueError("--evaluation-batch-size must be positive.")
     if args.stop_after_task is not None and args.stop_after_task not in range(8):
         raise ValueError("--stop-after-task must be between 0 and 7.")
     if args.epochs <= 0 or args.patience <= 0:
@@ -249,24 +252,14 @@ def _prediction_provenance(prepared, *, metadata, labels, all_oof=None):
 
 
 def _export_fold_prediction(
-    prepared, *, engine, model, values, labels, metadata, seen_map, criterion,
-    run_id, task_id, split, root, device, batch_size, all_oof=None,
+    prepared, *, outputs, labels, metadata, run_id, task_id, split, root,
+    all_oof=None,
 ):
-    loader = DataLoader(
-        engine.build_tensor_dataset(values, remap_labels(labels, seen_map)),
-        batch_size=batch_size, shuffle=False, drop_last=False,
-        generator=torch.Generator().manual_seed(0),
-    )
-    result = engine.evaluate_model(
-        model, loader, criterion, device, invert_class_map(seen_map),
-        evaluation_class_indices=list(range(len(seen_map))), collect_outputs=True,
-    )
-    if result.outputs is None:
-        raise RuntimeError("Fold prediction collection did not return outputs.")
+    """Publish outputs already collected by the single reporting pass."""
     member_id = prepared["seeds"].member_id
     artifact_path = root / "member_predictions" / f"task_{task_id}" / f"{split}.npz"
     export_member_prediction_artifact(
-        result.outputs, metadata,
+        outputs, metadata,
         MemberPredictionContext(
             run_id=run_id, method=prepared["resolved"]["method"],
             method_protocol=TRAINING_POLICY, task_id=task_id, split=split,
@@ -282,21 +275,59 @@ def _export_fold_prediction(
     return artifact_path
 
 
-def _eval_groups(engine, model, values, labels, seen_map, new_classes, criterion, device, batch_size=64):
+def _group_metrics_from_outputs(outputs, seen_map, new_classes, criterion):
+    """Compute reporting groups without running the model again.
+
+    ``old`` and ``current`` partition ``seen_all``.  Metrics are therefore
+    derived by masking the one aligned prediction table.  Only the inexpensive
+    loss reduction is repeated; no feature tensor is sent through the model.
+    """
     results = []
     old_classes = sorted(set(seen_map) - set(new_classes))
     for group, classes in (("seen_all", sorted(seen_map)), ("old", old_classes), ("current", new_classes)):
-        keep = np.isin(labels, classes)
+        keep = np.isin(outputs.labels, classes)
         if not keep.any():
             results.append({"group": group, "sample_count": 0, "status": "empty"})
             continue
-        loader = DataLoader(engine.build_tensor_dataset(values[keep], remap_labels(labels[keep], seen_map)),
-                            batch_size=batch_size, shuffle=False, drop_last=False,
-                            generator=torch.Generator().manual_seed(0))
-        result = engine.evaluate_model(model, loader, criterion, device, invert_class_map(seen_map),
-                                       evaluation_class_indices=[seen_map[c] for c in classes])
-        results.append({"group": group, "sample_count": int(keep.sum()), "status": "ok", **result.metrics})
+        labels = np.asarray(outputs.labels[keep], dtype=np.int64)
+        predictions = np.asarray(outputs.predictions[keep], dtype=np.int64)
+        local_labels = remap_labels(labels, seen_map)
+        with torch.no_grad():
+            loss = float(criterion(
+                torch.from_numpy(np.asarray(outputs.logits[keep], dtype=np.float32)),
+                torch.from_numpy(local_labels),
+            ).item())
+        group_metrics = compute_classification_metrics(labels, predictions, labels=classes)
+        results.append({
+            "group": group,
+            "sample_count": int(keep.sum()),
+            "status": "ok",
+            **group_metrics,
+            "loss": loss,
+        })
     return results
+
+
+def _evaluate_fold_split(
+    *, engine, model, values, labels, seen_map, new_classes, criterion,
+    device, batch_size,
+):
+    """Run one reporting inference pass and reuse it for metrics and export."""
+    loader = DataLoader(
+        engine.build_tensor_dataset(values, remap_labels(labels, seen_map)),
+        batch_size=batch_size, shuffle=False, drop_last=False,
+        generator=torch.Generator().manual_seed(0),
+    )
+    result = engine.evaluate_model(
+        model, loader, criterion, device, invert_class_map(seen_map),
+        evaluation_class_indices=list(range(len(seen_map))),
+        collect_outputs=True, collect_latent=False,
+    )
+    if result.outputs is None:
+        raise RuntimeError("Fold reporting evaluation did not return prediction outputs.")
+    return _group_metrics_from_outputs(
+        result.outputs, seen_map, new_classes, criterion
+    ), result.outputs
 
 
 def prepare_fold_run(args, *, engine, context=None):
@@ -367,6 +398,12 @@ def prepare_fold_run(args, *, engine, context=None):
             else "no_rng_frozen_preprocessed_input_class_mean_sample_ID_tie"
         ),
         "microbatch": args.batch_size, "gradient_accumulation": 1024 // args.batch_size, "effective_batch_target": 1024,
+        "reporting_batch_size": args.evaluation_batch_size,
+        "reporting_policy": "single_inference_pass_metrics_and_prediction_export_v1",
+        "core_reporting_metrics": [
+            "macro_f1", "balanced_accuracy", "accuracy", "weighted_f1",
+            "sample_count",
+        ],
         "drop_last": False, "optimizer": "AdamW_new_each_task", "scheduler": None,
         "classification_weight": 1.0, "logit_distillation_weight": args.distill_alpha,
         "feature_distillation_weight": args.feature_distill_weight, "temperature": args.temperature,
@@ -407,7 +444,8 @@ def prepare_fold_run(args, *, engine, context=None):
         "checkpoint_policy": "immutable_frozen_fold_task_boundary_v1",
         "model": paper_member_manifest(dropout=args.dropout, activation=args.activation), "device": device,
         "implementation_sha256": {name: fold_file_sha256(Path(__file__).parents[1] / name) for name in (
-            "training/fold_pilot_training.py", "training/train_cil.py", "data/ddi_dataset.py",
+            "training/fold_pilot_training.py", "training/train_cil.py", "eval/evaluation.py",
+            "eval/metrics.py", "eval/predictions.py", "data/ddi_dataset.py",
             "data/fold_preprocessing.py", "data/fold_replay_buffer.py", "data/fold_replay_sampler.py",
             "methods/weight_alignment.py")},
     }
@@ -633,8 +671,19 @@ def run_fold_training(args, *, engine):
         # From this point on, evaluation, prediction export, the next teacher,
         # and the task-boundary checkpoint all use the same aligned state.
         best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        metrics = [{"task": task_id, "split": "validation", **m} for m in
-                   _eval_groups(engine, model, val_inputs, validation.labels, seen_map, new_classes, criterion, device, args.batch_size)]
+        reporting_timings = {}
+        stage_started = time.perf_counter()
+        validation_group_metrics, validation_outputs = _evaluate_fold_split(
+            engine=engine, model=model, values=val_inputs,
+            labels=validation.labels, seen_map=seen_map,
+            new_classes=new_classes, criterion=criterion, device=device,
+            batch_size=args.evaluation_batch_size,
+        )
+        reporting_timings["validation_inference_seconds"] = time.perf_counter() - stage_started
+        metrics = [
+            {"task": task_id, "split": "validation", **row}
+            for row in validation_group_metrics
+        ]
         selected_seen_metrics = next(row for row in metrics if row["group"] == "seen_all")
         weight_alignment.update({
             "selection_validation_macro_f1": best_validation_metrics["macro_f1"],
@@ -656,18 +705,20 @@ def run_fold_training(args, *, engine):
                         "weight_alignment": weight_alignment}, handle))
         prediction_paths = []
         if args.export_member_predictions and "validation" in args.member_prediction_splits:
+            stage_started = time.perf_counter()
             all_oof = load_development_fold_identity(
                 context, role="all", member_id=args.member_id,
                 validation_fold=args.member_id, class_ids=list(seen_map),
             )
             prediction_paths.append(_export_fold_prediction(
-                prepared, engine=engine, model=model, values=val_inputs,
+                prepared, outputs=validation_outputs,
                 labels=validation.labels, metadata=validation.metadata,
-                seen_map=seen_map, criterion=criterion, run_id=run_id,
-                task_id=task_id, split="validation", root=root, device=device,
-                batch_size=args.batch_size, all_oof=all_oof,
+                run_id=run_id, task_id=task_id, split="validation",
+                root=root, all_oof=all_oof,
             ))
+            reporting_timings["validation_export_seconds"] = time.perf_counter() - stage_started
         if not args.validation_only:
+            stage_started = time.perf_counter()
             context.assert_unchanged()
             frame = load_split_frame(
                 args.test, columns, class_ids=list(seen_map),
@@ -675,9 +726,21 @@ def run_fold_training(args, *, engine):
             )
             test_values = _model_values(frame[columns].to_numpy(dtype=np.float64), prep, columns, args.member_id)
             test_labels = frame["class"].to_numpy(dtype=np.int64)
-            metrics.extend({"task": task_id, "split": "test", **m} for m in
-                _eval_groups(engine, model, test_values, test_labels, seen_map, new_classes, criterion, device, args.batch_size))
+            reporting_timings["test_load_transform_seconds"] = time.perf_counter() - stage_started
+            stage_started = time.perf_counter()
+            test_group_metrics, test_outputs = _evaluate_fold_split(
+                engine=engine, model=model, values=test_values,
+                labels=test_labels, seen_map=seen_map,
+                new_classes=new_classes, criterion=criterion, device=device,
+                batch_size=args.evaluation_batch_size,
+            )
+            reporting_timings["test_inference_seconds"] = time.perf_counter() - stage_started
+            metrics.extend(
+                {"task": task_id, "split": "test", **row}
+                for row in test_group_metrics
+            )
             if args.export_member_predictions and "test" in args.member_prediction_splits:
+                stage_started = time.perf_counter()
                 test_metadata = {column: frame[column].to_numpy(copy=False) for column in DEFAULT_META_COLS}
                 test_metadata["sample_id"] = np.char.add(
                     np.char.add(test_metadata[DEFAULT_META_COLS[0]].astype(np.str_), "|"),
@@ -685,14 +748,20 @@ def run_fold_training(args, *, engine):
                 )
                 test_metadata["fold_id"] = np.full(len(frame), -1, dtype=np.int16)
                 prediction_paths.append(_export_fold_prediction(
-                    prepared, engine=engine, model=model, values=test_values,
-                    labels=test_labels, metadata=test_metadata, seen_map=seen_map,
-                    criterion=criterion, run_id=run_id, task_id=task_id,
-                    split="test", root=root, device=device,
-                    batch_size=args.batch_size,
+                    prepared, outputs=test_outputs,
+                    labels=test_labels, metadata=test_metadata, run_id=run_id,
+                    task_id=task_id, split="test", root=root,
                 ))
-            del frame, test_values
+                reporting_timings["test_export_seconds"] = time.perf_counter() - stage_started
+            del frame, test_values, test_outputs
+        del validation_outputs
+        stage_started = time.perf_counter()
         buffer_audit = buffer.update(current, task_id=task_id, feature_columns=columns)
+        reporting_timings["buffer_update_seconds"] = time.perf_counter() - stage_started
+        logger.log(
+            f"task={task_id} reporting_timings="
+            f"{_json({key: round(value, 6) for key, value in reporting_timings.items()})}"
+        )
         after = buffer.get_all()
         if buffer.total_size > budgets[args.member_id] or set(_ids(after)) - set(_ids(current) + _ids(retained)):
             raise RuntimeError("Retained quota/identity/source invariant failed.")
@@ -707,6 +776,7 @@ def run_fold_training(args, *, engine):
             "selection_validation_balanced_accuracy": best_validation_metrics["balanced_accuracy"],
             "validation_macro_f1": selected_seen_metrics["macro_f1"],
             "validation_balanced_accuracy": selected_seen_metrics["balanced_accuracy"],
+            "reporting_timings": reporting_timings,
             "weight_alignment": weight_alignment,
             "memory_before": len(retained.labels), "memory_after": buffer.total_size,
             "runtime_seconds": time.perf_counter() - started,
@@ -725,12 +795,15 @@ def run_fold_training(args, *, engine):
         artifact_hashes.update(fold_artifact_inventory(root, task_root))
         if prediction_paths:
             artifact_hashes.update(fold_artifact_inventory(root, prediction_paths[0].parent))
+        checkpoint_started = time.perf_counter()
         boundary_path = save_fold_replay_checkpoint(root / "checkpoints" / f"task_{task_id}.pt", run_id=run_id,
             completed_task_id=task_id, model_state=best_state, seen_class_map=seen_map, contract=contract,
             buffer=buffer, sampler=sampler, run_config_sha256=config_hash, artifact_hashes=artifact_hashes,
             progress={"metric_rows": all_metrics, "epoch_rows": all_epochs, "task_summaries": task_summaries})
+        checkpoint_seconds = time.perf_counter() - checkpoint_started
         logger.log(f"task={task_id} complete head={len(seen_map)} best_epoch={best_epoch} retained={buffer.total_size} "
-                   f"checkpoint={boundary_path} checkpoint_bytes={boundary_path.stat().st_size}")
+                   f"checkpoint={boundary_path} checkpoint_bytes={boundary_path.stat().st_size} "
+                   f"checkpoint_seconds={checkpoint_seconds:.6f}")
         previous, previous_map = model.cpu(), seen_map
         del teacher, optimizer, model, best_state, current, validation, retained, after, training, loader, val_loader, val_inputs
     report_root = root if not resume_path else root / "reports" / f"through_task_{stop}_{uuid.uuid4().hex}"

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import csv
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
 from src.training.train_cil import (
+    _git_state,
     build_student_old_indices,
     ordered_raw_classes,
 )
@@ -74,6 +77,27 @@ class ClassAlignmentRegressionTest(unittest.TestCase):
 
 
 class RunProvenanceTest(unittest.TestCase):
+    def test_git_state_uses_frozen_source_snapshot_provenance(self) -> None:
+        commit = "a" * 40
+        with patch.dict(
+            os.environ,
+            {
+                "CIL_SOURCE_COMMIT": commit,
+                "CIL_SOURCE_SNAPSHOT": "/frozen/run/source_snapshot",
+            },
+            clear=False,
+        ):
+            state = _git_state(Path("/checkout/may/change"))
+
+        self.assertEqual(state["commit"], commit)
+        self.assertFalse(state["dirty"])
+        self.assertEqual(state["snapshot"], "/frozen/run/source_snapshot")
+
+    def test_git_state_rejects_malformed_snapshot_commit(self) -> None:
+        with patch.dict(os.environ, {"CIL_SOURCE_COMMIT": "not-a-commit"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "lowercase 40-character"):
+                _git_state(Path("/checkout"))
+
     def test_nonempty_run_directory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             outdir = Path(tempdir) / "run"

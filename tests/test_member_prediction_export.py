@@ -235,6 +235,34 @@ def test_evaluation_and_export_preserve_deterministic_sample_order(tmp_path: Pat
     np.testing.assert_allclose(artifacts[0].logits, artifacts[1].logits, rtol=1e-6, atol=1e-7)
 
 
+def test_reporting_outputs_can_skip_unused_latent_features(tmp_path: Path) -> None:
+    model = tiny_tddi_model({10: 0, 30: 1}, input_dim=3, hidden_dim=5).eval()
+    dataset = TensorDataset(torch.randn(4, 3), torch.tensor([0, 1, 0, 1]))
+    result = evaluate_model(
+        model,
+        DataLoader(dataset, batch_size=4, shuffle=False),
+        nn.CrossEntropyLoss(),
+        "cpu",
+        {0: 10, 1: 30},
+        collect_outputs=True,
+        collect_latent=False,
+    )
+    assert result.outputs is not None
+    assert result.outputs.latent_features is None
+
+    metadata = {
+        DRUG_ID_A_COLUMN: np.asarray([f"A{index}" for index in range(4)]),
+        DRUG_ID_B_COLUMN: np.asarray([f"B{index}" for index in range(4)]),
+    }
+    path = export_member_prediction_artifact(
+        result.outputs,
+        metadata,
+        _context(),
+        tmp_path / "reporting-without-latent.npz",
+    )
+    assert load_member_prediction_artifact(path).row_count == 4
+
+
 def test_schema_three_fold_provenance_round_trip_and_assignment_guard(tmp_path: Path) -> None:
     context = replace(
         _context(), ensemble_mode="stratified_3fold", fold_id=0,
