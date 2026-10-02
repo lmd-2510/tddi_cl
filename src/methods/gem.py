@@ -35,6 +35,7 @@ class TaskEpisodicMemory:
     total_budget: int
     total_tasks: int
     random_seed: int = 0
+    selection_policy: str = "seeded_uniform"
     features_by_task: dict[int, np.ndarray] = field(default_factory=dict)
     labels_by_task: dict[int, np.ndarray] = field(default_factory=dict)
 
@@ -47,6 +48,8 @@ class TaskEpisodicMemory:
             raise ValueError(
                 "total_budget must provide at least one memory location per task."
             )
+        if self.selection_policy not in {"seeded_uniform", "last_m"}:
+            raise ValueError("selection_policy must be 'seeded_uniform' or 'last_m'.")
 
     @property
     def task_ids(self) -> list[int]:
@@ -94,6 +97,10 @@ class TaskEpisodicMemory:
             selected = np.arange(features.shape[0], dtype=np.int64)
         elif quota == 0:
             selected = np.empty((0,), dtype=np.int64)
+        elif self.selection_policy == "last_m":
+            selected = np.arange(
+                features.shape[0] - quota, features.shape[0], dtype=np.int64
+            )
         else:
             rng = np.random.default_rng(
                 np.random.SeedSequence([self.random_seed, task_id])

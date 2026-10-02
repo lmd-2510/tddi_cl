@@ -66,7 +66,10 @@ from src.eval.predictions import (
     export_member_prediction_artifact,
 )
 from src.methods.ewc import compute_fisher, ewc_penalty, grow_head_state
-from src.methods.weight_alignment import WEIGHT_ALIGNMENT_POLICIES
+from src.methods.weight_alignment import (
+    WEIGHT_ALIGNMENT_POLICIES,
+    align_new_class_weights_,
+)
 from src.methods.agem import project_agem_gradient
 from src.methods.gem import (
     TaskEpisodicMemory,
@@ -181,6 +184,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=[
             FIXED_BUDGET_METHOD,
             "ewc",
+            "wa",
             "gem",
             "agem",
         ],
@@ -252,6 +256,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=500,
         help="Fixed total number of task-indexed GEM/A-GEM memory examples.",
+    )
+    parser.add_argument(
+        "--gem-memory-selection",
+        choices=["seeded_uniform", "last_m"],
+        default="seeded_uniform",
+        help="GEM episodic-memory selection; last_m matches the original GEM paper.",
     )
     parser.add_argument(
         "--agem-reference-batch-size",
@@ -376,6 +386,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stop-after-task", type=int,
                         help="Execution boundary; does not truncate/change the full task protocol.")
     args = parser.parse_args(argv)
+    if args.method == "wa" and args.weight_alignment == "none":
+        parser.error("--method wa requires an enabled --weight-alignment policy.")
     if args.fold_replay_policy:
         if any(token.split("=")[0] in {"--total-memory-budget", "--replay-draws-per-epoch"}
                for token in (sys.argv[1:] if argv is None else argv)):
@@ -953,6 +965,7 @@ def write_run_config(
         "task_protocol": task_spec.get("protocol"),
         "num_tasks": len(task_spec["tasks"]),
         "task_file_sha256": _sha256_file(args.task_file),
+        "weight_alignment": getattr(args, "weight_alignment", "none"),
     }
     if args.method == FIXED_BUDGET_METHOD:
         resolved.update(
@@ -981,7 +994,7 @@ def write_run_config(
                 "episodic_memory_budget": args.episodic_memory_budget,
                 "episodic_memory_allocation": "known_total_tasks_reserved_equal_quota",
                 "episodic_memory_partition": "separate_by_task",
-                "episodic_exemplar_selection": "seeded_uniform_without_replacement",
+                "episodic_exemplar_selection": args.gem_memory_selection,
                 "current_task_sampling": "natural_shuffle_without_replacement",
                 "reference_model_mode": "eval_to_freeze_dropout_and_normalization_state",
                 "projection_scope": "raw_gradient_before_adamw_preconditioning_and_weight_decay",
@@ -2049,6 +2062,7 @@ def main() -> None:
             total_budget=args.episodic_memory_budget,
             total_tasks=num_tasks,
             random_seed=args.experiment_seed,
+            selection_policy=args.gem_memory_selection,
         )
         if args.method in GRADIENT_EPISODIC_METHODS
         else None
@@ -2303,7 +2317,7 @@ def main() -> None:
             )
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        if args.method == "ewc" and args.ewc_classification_loss == "ce":
+        if args.method in {"ewc", "wa"} and args.ewc_classification_loss == "ce":
             criterion: nn.Module = nn.CrossEntropyLoss()
         else:
             criterion = FocalLoss(gamma=args.focal_gamma)
@@ -2504,6 +2518,33 @@ def main() -> None:
 
         model.load_state_dict(best_state)
         checkpoint_path = checkpoint_dir / f"task_{task_id}_model.pt"
+        weight_alignment_audit: dict[str, Any] | None = None
+        if args.method == "wa":
+            weight_alignment_audit = align_new_class_weights_(
+                model,
+                previous_seen_map or {},
+                current_seen_map,
+                policy=args.weight_alignment,
+            )
+            # WA is a task-boundary operation.  Every subsequent evaluation,
+            # classifier expansion, and saved task model must use the aligned
+            # state rather than the pre-alignment early-stopping state.
+            best_state = {
+                key: value.detach().cpu().clone()
+                for key, value in model.state_dict().items()
+            }
+            torch.save(best_state, checkpoint_path)
+            (run_paths["outdir"] / f"weight_alignment_task_{task_id}.json").write_text(
+                json.dumps(weight_alignment_audit, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            logger.log_event(
+                "weight_alignment_applied",
+                f"task={task_id} policy={args.weight_alignment} "
+                f"applied={weight_alignment_audit['applied']} "
+                f"gamma={weight_alignment_audit['gamma']}",
+                payload_json=json.dumps(weight_alignment_audit, sort_keys=True),
+            )
         if export_validation_member:
             validation_export_result = evaluate_model(
                 model,
