@@ -41,6 +41,10 @@ from src.data.ddi_dataset import (
     load_scaler_payload,
     load_split_arrays,
 )
+from src.data.prepared_cache import (
+    cache_split_path,
+    validate_cache_manifest,
+)
 from src.data.fixed_budget_replay import (
     FixedBudgetReplayBuffer,
     FixedReplaySampler,
@@ -177,6 +181,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--test", required=True, type=Path)
     parser.add_argument("--feature-cols", required=True, type=Path)
     parser.add_argument("--scaler", type=Path)
+    parser.add_argument(
+        "--prepared-cache-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional cache containing train.parquet/validation.parquet whose "
+            "features were already transformed by the frozen scaler. The original "
+            "--scaler is still required for provenance and uncached test data."
+        ),
+    )
     parser.add_argument("--task-file", required=True, type=Path)
     parser.add_argument("--outdir", required=True, type=Path)
     parser.add_argument(
@@ -1050,16 +1064,59 @@ def load_backbone_split(
     include_ranking_features: bool = False,
 ) -> tuple[Any, np.ndarray | None]:
     """Load identical rows in the input representation required by a backbone."""
+    # Prepared-cache splits already contain the frozen task-0 transform.  Raw
+    # test data may still use the legacy scaler in the same run, so decide per
+    # path rather than globally disabling the scaler.
+    effective_scaler = scaler_payload
+    prepared_root = getattr(args, "prepared_cache_root", None)
+    if prepared_root is not None:
+        try:
+            cached_parent = Path(parquet_path).resolve().parent
+            if cached_parent == Path(prepared_root).resolve():
+                effective_scaler = None
+        except OSError:
+            # Let the normal parquet read produce the actionable path error.
+            pass
     arrays = load_split_arrays(
         parquet_path,
         feature_columns,
         class_ids=class_ids,
-        scaler_payload=scaler_payload,
+        scaler_payload=effective_scaler,
         include_metadata=include_metadata,
         meta_cols=[DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN],
         max_rows=max_rows,
     )
     return arrays, arrays.features if include_ranking_features else None
+
+
+def configure_prepared_cache(args: argparse.Namespace) -> None:
+    """Switch development inputs to a validated transformed cache.
+
+    The scaler argument remains part of the immutable run contract.  Only the
+    train/validation paths are replaced; test stays raw unless a test.parquet
+    cache was explicitly materialized.
+    """
+
+    if args.prepared_cache_root is None:
+        return
+    if args.scaler is None:
+        raise ValueError("--prepared-cache-root still requires the frozen --scaler for provenance.")
+    feature_columns = load_feature_columns(args.feature_cols)
+    root = Path(args.prepared_cache_root).resolve()
+    source_paths = {"train": args.train, "validation": args.validation}
+    validate_cache_manifest(
+        root,
+        feature_columns=feature_columns,
+        scaler_path=args.scaler,
+        required_splits=("train", "validation"),
+        source_paths=source_paths,
+    )
+    args.train = cache_split_path(root, "train")
+    args.validation = cache_split_path(root, "validation")
+    cached_test = cache_split_path(root, "test")
+    if cached_test.is_file():
+        args.test = cached_test
+    args.prepared_cache_root = root
 
 
 def load_development_fold_split(
@@ -1816,6 +1873,7 @@ def write_run_summary(
 
 def main() -> None:
     args = parse_args()
+    configure_prepared_cache(args)
     require_torch()
     if getattr(args, "fold_replay_policy", None):
         from src.training.fold_pilot_training import run_fold_training

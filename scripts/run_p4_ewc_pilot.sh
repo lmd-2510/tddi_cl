@@ -11,6 +11,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 CONFIG="$ROOT/configs/p4_ewc_pilot_member0.json"
 OUT_BASE="$ROOT/outputs/p4_ewc_pilot_member0"
 MONITOR_BASE="$ROOT/outputs/p4_experiments/ewc_pilot_member0_monitor"
+CACHE_ROOT="$ROOT/outputs/prepared_cache/p4_seed0_fold42/member_0"
 TASK_FILE="$ROOT/study_assets/task_protocols/constrained_mass_balanced_seed0_tasks.json"
 FEATURE_COLS="$ROOT/study_assets/data_schema/feature_columns.json"
 TRAIN="$ROOT/train_extracted.parquet"
@@ -64,6 +65,16 @@ run_training() {
   mkdir -p "$out" "$monitor"
   scaler="$out/task0_frozen_scaler.pkl"
   "$PYTHON_BIN" scripts/convert_fold_preprocessing_to_scaler.py --input "$prep" --output "$scaler" | tee "$monitor/preprocessing.log"
+  if [[ ! -s "$CACHE_ROOT/prepared_cache_manifest.json" ]]; then
+    echo "[CACHE] Materializing frozen P4 train/validation cache (one-time step)."
+    "$PYTHON_BIN" scripts/materialize_prepared_cache.py \
+      --train "$TRAIN" --validation "$VALIDATION" \
+      --feature-cols "$FEATURE_COLS" --scaler "$scaler" \
+      --scaler-source "$prep" --output "$CACHE_ROOT" \
+      2>&1 | tee "$monitor/cache_materialization.log"
+  else
+    echo "[CACHE] Reusing prepared feature cache: $CACHE_ROOT"
+  fi
   cp "$CONFIG" "$out/run_config.json"
   printf '%s\n' "$prep" > "$out/preprocessing_source.txt"
   set +e
@@ -73,6 +84,7 @@ run_training() {
     "$PYTHON_BIN" src/training/train_cil.py \
       --train "$TRAIN" --validation "$VALIDATION" --test "$TEST" \
       --feature-cols "$FEATURE_COLS" --scaler "$scaler" --task-file "$TASK_FILE" \
+      --prepared-cache-root "$CACHE_ROOT" \
       --outdir "$out/member_0" --method ewc --variant tddi_paper_member \
       --batch-size 64 --effective-batch-size 1024 --epochs 30 --patience 5 \
       --lr 0.001 --weight-decay 0.0001 --dropout 0.2 --activation gelu --norm layernorm \
