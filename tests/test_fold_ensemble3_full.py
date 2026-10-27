@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import hashlib
 from pathlib import Path
 from typing import Sequence
 
-from src.training import fold_ensemble3_pilot as shared
+from src.training import fold_ensemble3_runner as shared
 from src.training.fold_ensemble3_full import (
     MANIFEST_KIND,
     MEMBER_IDS,
@@ -14,23 +13,8 @@ from src.training.fold_ensemble3_full import (
 )
 
 
-CONFIG = Path("configs/full_tddi_p3_fold_ensemble3_seed0.json")
-BASELINE25_CONFIG = Path(
-    "configs/full_tddi_p3_fold_ensemble3_seed0_epochs25.json"
-)
-REPLAY12P5_CONFIG = Path(
-    "configs/full_tddi_p3_fold_ensemble3_seed0_replay12p5.json"
-)
-P4_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0.json")
-P4_WA_CONFIG = Path("configs/full_tddi_p4_fold_ensemble3_seed0_wa.json")
-P3_HYBRID_DISTILL_CONFIG = Path("configs/p3_hybrid_distill_full8.json")
-FOCAL_EQUAL_BUFFER_CONFIG = Path("configs/p3_focal_equal_buffer_pilot.json")
-HYBRID_NODISTILL_FULL_CONFIG = Path("configs/p3_hybrid_full8_e30_mem4_nodistill.json")
-HYBRID_EQUAL_BUFFER_FULL_CONFIG = Path("configs/p3_hybrid_equal_buffer_full8_e30_mem4.json")
-P4_HYBRID_EQUAL_BUFFER_FULL_CONFIG = Path(
-    "configs/p4_hybrid_equal_buffer_full8_e30_mem4.json"
-)
-ER_ACE_EQUAL_BUFFER_FULL_CONFIG = Path("configs/p3_er_ace_equal_buffer_full8_e30_mem4.json")
+ORDERED_CONFIG = Path("configs/ordered_baseline.json")
+SHUFFLED_CONFIG = Path("configs/shuffled_seed0_baseline.json")
 
 
 def _arg(command: Sequence[str], name: str) -> str:
@@ -38,7 +22,10 @@ def _arg(command: Sequence[str], name: str) -> str:
 
 
 def _config(tmp_path: Path):
-    return load_full_config(CONFIG, overrides={"output_root": tmp_path / "full"})
+    return load_full_config(
+        ORDERED_CONFIG,
+        overrides={"output_root": tmp_path / "full"},
+    )
 
 
 def _inspector(states: dict[int, str], resume: Path | None = None):
@@ -53,345 +40,59 @@ def _inspector(states: dict[int, str], resume: Path | None = None):
     return inspect
 
 
-def test_full_config_and_dry_run_are_locked_to_eight_tasks(tmp_path: Path) -> None:
+def test_canonical_baseline_is_locked_to_eight_tasks(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    states = {member: "fresh" for member in MEMBER_IDS}
-    plan = shared.build_pilot_plan(
-        config, python="full-python", inspector=_inspector(states)
+    plan = shared.build_ensemble_plan(
+        config,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
     )
 
     assert config["phase"] == "full"
+    assert config["protocol"]["name"] == "head_to_tail"
     assert config["execution"]["stop_after_task"] == 7
-    assert config["training"]["epochs"] == 20
-    assert config["training"]["patience"] == 5
-    assert config["member_budgets"] == {"0": 9260, "1": 9259, "2": 9259}
-    assert not Path(config["output_root"]).exists()
-    assert len(plan.evaluations) == 8
-    assert [evaluation.task_id for evaluation in plan.evaluations] == list(range(8))
-    for member in plan.members:
-        assert member.command is not None
-        assert _arg(member.command, "--stop-after-task") == "7"
-        assert _arg(member.command, "--member-id") == str(member.member_id)
-        assert _arg(member.command, "--fold-replay-policy") == "stratified_fraction_v1"
-        assert _arg(member.command, "--epochs") == "20"
-        assert _arg(member.command, "--exemplar-ranking-policy") == (
-            "raw_sample_normalized_class_mean_control_v1"
-        )
-        assert "--export-member-predictions" in member.command
-
-
-def test_replay12p5_full_config_selects_rotating_current_and_balanced_threshold(
-    tmp_path: Path,
-) -> None:
-    config = load_full_config(
-        REPLAY12P5_CONFIG,
-        overrides={"output_root": tmp_path / "replay12p5"},
-    )
-    plan = shared.build_pilot_plan(
-        config,
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-
-    assert config["training"]["fold_replay_policy"] == (
-        "stratified_fraction_rotating_current_v2"
-    )
     assert config["training"]["epochs"] == 30
-    assert config["training"]["patience"] == 5
-    assert config["evaluation"]["threshold_config"].endswith(
-        "eval_tddi_p3_ensemble_entropy_threshold.json"
-    )
-    for member in plan.members:
-        assert _arg(member.command, "--fold-replay-policy") == (
-            "stratified_fraction_rotating_current_v2"
-        )
-
-
-def test_baseline25_uses_separate_namespace_and_keeps_original_sampler(
-    tmp_path: Path,
-) -> None:
-    config = load_full_config(
-        BASELINE25_CONFIG,
-        overrides={"output_root": tmp_path / "baseline25"},
-    )
-    plan = shared.build_pilot_plan(
-        config,
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-
-    assert config["training"]["epochs"] == 25
-    assert config["training"]["patience"] == 5
-    assert config["training"]["fold_replay_policy"] == "stratified_fraction_v1"
-    assert config["evaluation"]["threshold_config"].endswith(
-        "eval_tddi_p3_ensemble_entropy_threshold.json"
-    )
-    for member in plan.members:
-        assert _arg(member.command, "--epochs") == "25"
-        assert _arg(member.command, "--fold-replay-policy") == "stratified_fraction_v1"
-
-
-def test_p3_hybrid_distill_config_enables_requested_loss_and_separate_output(
-    tmp_path: Path,
-) -> None:
-    config = load_full_config(
-        P3_HYBRID_DISTILL_CONFIG,
-        overrides={"output_root": tmp_path / "hybrid_distill"},
-    )
-    plan = shared.build_pilot_plan(
-        config,
-        member_ids=[0],
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-
-    assert config["training"]["loss_variant"] == "hybrid_distill"
-    assert config["training"]["distill_alpha"] == 1.0
-    assert config["training"]["feature_distill_weight"] == 0.5
-    assert Path(config["output_root"]).name == "hybrid_distill"
-    assert plan.members[0].command is not None
-    assert _arg(plan.members[0].command, "--loss-variant") == "hybrid_distill"
-    assert plan.members[1].command is None
-    assert plan.members[2].command is None
-
-
-def test_requested_focal_equal_buffer_pilot_is_one_member_full8(tmp_path: Path) -> None:
-    config = load_full_config(
-        FOCAL_EQUAL_BUFFER_CONFIG,
-        overrides={"output_root": tmp_path / "focal_equal_buffer"},
-    )
-    plan = shared.build_pilot_plan(
-        config,
-        member_ids=[0],
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-    assert config["training"]["loss_variant"] == "focal_all"
-    assert config["replay"]["buffer_policy"] == "fold_equal_class_capacity_v1"
-    assert config["execution"]["stop_after_task"] == 7
-    assert plan.members[0].command is not None
-    assert _arg(plan.members[0].command, "--loss-variant") == "focal_all"
-    assert _arg(plan.members[0].command, "--buffer-policy") == "fold_equal_class_capacity_v1"
-    assert plan.members[1].command is None and plan.members[2].command is None
-
-
-def test_hybrid_no_distill_full_uses_fresh_output_and_historical_buffer(tmp_path: Path) -> None:
-    config = load_full_config(
-        HYBRID_NODISTILL_FULL_CONFIG,
-        overrides={"output_root": tmp_path / "hybrid_no_distill"},
-    )
-    plan = shared.build_pilot_plan(
-        config,
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-    assert config["training"]["loss_variant"] == "hybrid"
-    assert config["replay"]["buffer_policy"] == "fold_min_quota_sqrt_capacity_v1"
-    assert config["training"]["epochs"] == 30
-    assert Path(config["output_root"]).name == "hybrid_no_distill"
-    for member in plan.members:
-        assert _arg(member.command, "--loss-variant") == "hybrid"
-        assert _arg(member.command, "--buffer-policy") == "fold_min_quota_sqrt_capacity_v1"
-
-
-def test_hybrid_equal_buffer_full_changes_only_requested_historical_settings(
-    tmp_path: Path,
-) -> None:
-    historical = load_full_config(
-        HYBRID_NODISTILL_FULL_CONFIG,
-        overrides={"output_root": tmp_path / "historical"},
-    )
-    config = load_full_config(
-        HYBRID_EQUAL_BUFFER_FULL_CONFIG,
-        overrides={"output_root": tmp_path / "hybrid_equal_buffer"},
-    )
-    plan = shared.build_pilot_plan(
-        config,
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-
-    assert config["training"]["loss_variant"] == "hybrid"
-    assert config["replay"]["buffer_policy"] == "fold_equal_class_capacity_v1"
+    assert config["training"]["loss_variant"] == "focal_current_ce_replay"
+    assert config["replay"]["buffer_policy"] == "equal_class_fixed_budget"
     assert config["member_budgets"] == {"0": 27778, "1": 27778, "2": 27778}
-    assert config["training"]["epochs"] == 30
-    assert config["execution"]["stop_after_task"] == 7
-    expected_historical = dict(historical)
-    expected_config = dict(config)
-    expected_historical["replay"] = dict(historical["replay"])
-    expected_config["replay"] = dict(config["replay"])
-    expected_historical["replay"]["buffer_policy"] = expected_config["replay"]["buffer_policy"]
-    expected_historical["output_root"] = expected_config["output_root"]
-    for derived_key in ("config_path", "config_sha256"):
-        expected_config.pop(derived_key, None)
-        expected_historical.pop(derived_key, None)
-    assert expected_config == expected_historical
-    assert len(plan.members) == 3
+    assert config["evaluation"]["threshold_config"].endswith(
+        "eval_macro_f1_entropy.json"
+    )
+    assert len(plan.evaluations) == 8
     for member in plan.members:
         assert member.command is not None
-        assert _arg(member.command, "--loss-variant") == "hybrid"
-        assert _arg(member.command, "--buffer-policy") == "fold_equal_class_capacity_v1"
-        assert _arg(member.command, "--epochs") == "30"
         assert _arg(member.command, "--stop-after-task") == "7"
-
-
-def test_p4_hybrid_equal_buffer_changes_only_protocol_preprocessing_and_namespace(
-    tmp_path: Path,
-) -> None:
-    p3 = load_full_config(
-        HYBRID_EQUAL_BUFFER_FULL_CONFIG,
-        overrides={"output_root": tmp_path / "p3"},
-    )
-    p4 = load_full_config(
-        P4_HYBRID_EQUAL_BUFFER_FULL_CONFIG,
-        overrides={"output_root": tmp_path / "p4"},
-    )
-    plan = shared.build_pilot_plan(
-        p4,
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-
-    assert p4["protocol"]["id"] == "P4"
-    assert p4["protocol"]["name"] == "constrained_mass_balanced"
-    assert p4["protocol"]["sha256"] == (
-        "9d22af8618fe03c40b92e2aabbab8b68a89de83bc0de4f51e24932951cf298f4"
-    )
-    assert p4["training"] == p3["training"]
-    assert p4["replay"] == p3["replay"]
-    assert p4["model"] == p3["model"]
-    assert p4["member_budgets"] == {"0": 27778, "1": 27778, "2": 27778}
-    assert p4["global_slot_budget"] == 83334
-    assert "preprocessing_p4_seed0_fold42" in p4["preprocessing"]["artifact_template"]
-    assert len(plan.members) == 3
-    for member in plan.members:
-        assert member.command is not None
-        assert _arg(member.command, "--task-file").endswith(
-            "constrained_mass_balanced_seed0_tasks.json"
-        )
-        assert _arg(member.command, "--loss-variant") == "hybrid"
-        assert _arg(member.command, "--buffer-policy") == "fold_equal_class_capacity_v1"
         assert _arg(member.command, "--epochs") == "30"
+        assert _arg(member.command, "--loss-variant") == "focal_current_ce_replay"
+        assert _arg(member.command, "--buffer-policy") == "equal_class_fixed_budget"
 
 
-def test_er_ace_full_config_uses_fresh_namespace_and_full_ensemble(tmp_path: Path) -> None:
-    config = load_full_config(
-        ER_ACE_EQUAL_BUFFER_FULL_CONFIG,
-        overrides={"output_root": tmp_path / "er_ace"},
+def test_shuffled_changes_only_protocol_preprocessing_and_output(tmp_path: Path) -> None:
+    ordered = load_full_config(
+        ORDERED_CONFIG,
+        overrides={"output_root": tmp_path / "ordered"},
     )
-    plan = shared.build_pilot_plan(
-        config,
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-
-    assert config["training"]["loss_variant"] == "er_ace"
-    assert config["replay"]["buffer_policy"] == "fold_equal_class_capacity_v1"
-    assert config["training"]["epochs"] == 30
-    assert config["execution"]["stop_after_task"] == 7
-    assert Path(config["output_root"]).name == "er_ace"
-    assert len(plan.members) == 3
-    for member in plan.members:
-        assert member.command is not None
-        assert _arg(member.command, "--loss-variant") == "er_ace"
-        assert _arg(member.command, "--buffer-policy") == "fold_equal_class_capacity_v1"
-        assert _arg(member.command, "--epochs") == "30"
-        assert _arg(member.command, "--stop-after-task") == "7"
-
-
-def test_p4_config_changes_only_protocol_preprocessing_namespace_and_threshold(
-    tmp_path: Path,
-) -> None:
-    p3 = load_full_config(
-        CONFIG,
-        overrides={"output_root": tmp_path / "p3"},
-    )
-    p4 = load_full_config(
-        P4_CONFIG,
-        overrides={"output_root": tmp_path / "p4"},
-    )
-    plan = shared.build_pilot_plan(
-        p4,
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    shuffled = load_full_config(
+        SHUFFLED_CONFIG,
+        overrides={"output_root": tmp_path / "shuffled"},
     )
 
-    assert p4["protocol"]["id"] == "P4"
-    assert p4["protocol"]["name"] == "constrained_mass_balanced"
-    assert p4["training"] == p3["training"]
-    assert p4["replay"] == p3["replay"]
-    assert p4["model"] == p3["model"]
-    assert p4["training"]["epochs"] == 20
-    assert "preprocessing_p4_seed0_fold42" in p4["preprocessing"]["artifact_template"]
-    assert p4["evaluation"]["threshold_config"].endswith(
-        "eval_tddi_p3_ensemble_entropy_threshold.json"
-    )
-    for member in plan.members:
-        assert member.command is not None
-        assert _arg(member.command, "--task-file").endswith(
-            "constrained_mass_balanced_seed0_tasks.json"
-        )
-        assert _arg(member.command, "--epochs") == "20"
-
-
-def test_full_config_accepts_locked_p2_head_to_tail_protocol(tmp_path: Path) -> None:
-    payload = {"protocol": "head_to_tail", "seed": None, "num_classes": 178,
-               "tasks": []}
-    start = 0
-    for task_id, width in enumerate([38, 20, 20, 20, 20, 20, 20, 20]):
-        payload["tasks"].append({"task_id": task_id,
-                                 "classes": list(range(start, start + width)),
-                                 "num_classes": width})
-        start += width
-    task_file = tmp_path / "head_to_tail_tasks.json"
-    task_file.write_text(json.dumps(payload), encoding="utf-8")
-    digest = hashlib.sha256(task_file.read_bytes()).hexdigest()
-    config = json.loads(Path("configs/p3_hybrid_equal_buffer_full8_e30_mem4.json").read_text())
-    config["protocol"].update({"id": "P2", "name": "head_to_tail",
-                               "task_file": str(task_file), "sha256": digest})
-    config_path = tmp_path / "p2_config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-    loaded = load_full_config(config_path, project_root=Path.cwd(),
-                              overrides={"output_root": tmp_path / "p2_output"})
-    assert loaded["protocol"]["id"] == "P2"
-    assert loaded["tasks"][0]["classes"] == list(range(38))
-    assert loaded["training"]["loss_variant"] == "hybrid"
-    assert loaded["replay"]["buffer_policy"] == "fold_equal_class_capacity_v1"
-
-
-def test_p4_wa_config_changes_only_alignment_and_output_namespace(tmp_path: Path) -> None:
-    baseline = load_full_config(
-        P4_CONFIG,
-        overrides={"output_root": tmp_path / "baseline"},
-    )
-    wa = load_full_config(
-        P4_WA_CONFIG,
-        overrides={"output_root": tmp_path / "wa"},
-    )
-    plan = shared.build_pilot_plan(
-        wa,
-        python="full-python",
-        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
-    )
-
-    assert baseline["training"]["weight_alignment"] == "none"
-    assert wa["training"]["weight_alignment"] == "new_class_mean_norm_v1"
-    baseline_training = dict(baseline["training"])
-    wa_training = dict(wa["training"])
-    baseline_training.pop("weight_alignment")
-    wa_training.pop("weight_alignment")
-    assert wa_training == baseline_training
-    assert Path(wa["output_root"]).name == "wa"
-    for member in plan.members:
-        assert member.command is not None
-        assert _arg(member.command, "--weight-alignment") == "new_class_mean_norm_v1"
+    assert shuffled["protocol"]["id"] == "SHUFFLED"
+    assert shuffled["protocol"]["name"] == "shuffled"
+    assert shuffled["training"] == ordered["training"]
+    assert shuffled["replay"] == ordered["replay"]
+    assert shuffled["model"] == ordered["model"]
+    assert shuffled["evaluation"] == ordered["evaluation"]
+    assert "preprocessing_shuffled_seed0_fold42" in shuffled["preprocessing"][
+        "artifact_template"
+    ]
 
 
 def test_full_selected_member_skip_and_resume(tmp_path: Path) -> None:
     config = _config(tmp_path)
     resume = tmp_path / "task_4.pt"
     states = {0: "complete", 1: "resume", 2: "fresh"}
-    plan = shared.build_pilot_plan(
+    plan = shared.build_ensemble_plan(
         config,
         member_ids=[0, 1],
         python="full-python",

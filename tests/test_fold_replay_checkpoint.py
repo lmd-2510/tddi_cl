@@ -1,4 +1,4 @@
-"""Task-boundary continuation on synthetic full-layout P3, tiny CPU models only."""
+"""Task-boundary continuation on the synthetic full task layout."""
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -10,14 +10,15 @@ import numpy as np
 import pytest
 import torch
 
-from tests.test_fold_pilot_training import data, tiny, cli
-from src.training import fold_pilot_training as pilot, train_cil as engine
+from tests.test_fold_training import data, tiny, cli
+from src.training import fold_training, train_cil as engine
 from src.training import replay_checkpoint as checkpoint
 
 
 def run(data, monkeypatch, *, policy="raw_identity", suffix="", stop=2, resume=None,
-        ranking=None):
+        ranking=None, method=engine.FIXED_BUDGET_METHOD):
     extra = ["--stop-after-task", str(stop)]
+    extra += ["--method", method]
     if ranking is not None:
         extra += ["--exemplar-ranking-policy", ranking]
     command = cli(data, policy, suffix, extra=extra)
@@ -52,24 +53,14 @@ def test_continuous_vs_resume_three_tasks(data, monkeypatch, tiny, policy, bound
     random.random()
     np.random.rand(11)
     torch.rand(9)
-    teacher_hashes = []
-    original = engine.train_one_epoch
-    def train(model, *a, **kw):
-        teacher = kw["teacher_model"]
-        assert teacher is not None and not any(p.requires_grad for p in teacher.parameters())
-        teacher_hashes.append(checkpoint.fold_state_digest(teacher.state_dict()))
-        return original(model, *a, **kw)
-    monkeypatch.setattr(engine, "train_one_epoch", train)
     run(data, monkeypatch, policy=policy, suffix="_split", resume=split / f"checkpoints/task_{boundary}.pt")
     assert saved == fingerprint(split / f"task_{boundary}")
-    assert saved_summary == (split / "run_summary.json").read_bytes()  # immutable old pilot report
-    first_teacher = checkpoint.fold_state_digest(load(continuous, boundary)["model_state"])
-    assert teacher_hashes[0] == first_teacher
+    assert saved_summary == (split / "run_summary.json").read_bytes()  # immutable previous report
     left, right = load(continuous, 2), load(split, 2)
     assert left["next_task_id"] == right["next_task_id"] == 3
     assert not right["full_trajectory_complete"]
     assert left["seen_class_map"] == right["seen_class_map"] and len(right["seen_class_map"]) == 78
-    for key in ("model_state", "buffer_state", "sampler_state", "rng_state", "next_task_scheduling"):
+    for key in ("model_state", "buffer_state", "sampler_state", "method_state", "rng_state", "next_task_scheduling"):
         assert checkpoint.fold_state_digest(left[key]) == checkpoint.fold_state_digest(right[key]), key
     assert left["progress"]["metric_rows"] == right["progress"]["metric_rows"]
     for a, b in zip(left["progress"]["epoch_rows"], right["progress"]["epoch_rows"], strict=True):
@@ -192,19 +183,19 @@ def test_portable_sources_and_run_directory(data, monkeypatch, tiny):
 @pytest.mark.parametrize("policy", ["raw_identity", "task0_standard_frozen"])
 def test_interrupted_epoch_restarts_task_from_previous_boundary(data, monkeypatch, tiny, policy):
     continuous = run(data, monkeypatch, policy=policy, suffix="_control", stop=1)
-    original = pilot._publish_json
+    original = fold_training._publish_json
     def interrupted(path, value):
         original(path, value)
         if Path(path).name == "epoch_1_audit.json" and Path(path).parent.name == "task_1":
             raise RuntimeError("synthetic interruption after epoch 1")
-    monkeypatch.setattr(pilot, "_publish_json", interrupted)
+    monkeypatch.setattr(fold_training, "_publish_json", interrupted)
     with pytest.raises(RuntimeError, match="synthetic interruption"):
         run(data, monkeypatch, policy=policy, suffix="_interrupted", stop=1)
     root = data["root"] / f"run_{policy}_interrupted"
     old_attempt = fingerprint(root / "task_1")
     assert (root / "checkpoints/task_0.pt").is_file()
     assert not (root / "checkpoints/task_1.pt").exists()
-    monkeypatch.setattr(pilot, "_publish_json", original)
+    monkeypatch.setattr(fold_training, "_publish_json", original)
     run(data, monkeypatch, policy=policy, suffix="_interrupted", stop=1, resume=root / "checkpoints/task_0.pt")
     assert old_attempt == fingerprint(root / "task_1")
     for key in ("model_state", "buffer_state", "sampler_state", "rng_state"):
@@ -223,26 +214,12 @@ def test_missing_completion_evidence_and_model_only_not_resumable(data, monkeypa
         run(data, monkeypatch, stop=1, resume=root / "checkpoints/task_0.pt")
 
 
-def test_pipeline_ranking_checkpoint_roundtrip_and_policy_guard(data, monkeypatch, tiny):
-    from src.data.fold_replay_buffer import PIPELINE_INPUT_RANKING_POLICY
-
-    root = run(data, monkeypatch, policy="task0_standard_frozen", suffix="_pipeline_rank",
-               stop=0, ranking=PIPELINE_INPUT_RANKING_POLICY)
-    state = load(root, 0)
-    ranking = state["contract"]["buffer"]["ranking"]
-    assert ranking["policy"] == PIPELINE_INPUT_RANKING_POLICY
-    assert ranking["preprocessing_sha256"] == state["contract"]["preprocessing_sha256"]
-    run(data, monkeypatch, policy="task0_standard_frozen", suffix="_pipeline_rank",
-        stop=1, resume=root / "checkpoints/task_0.pt", ranking=PIPELINE_INPUT_RANKING_POLICY)
-    assert load(root, 1)["next_task_id"] == 2
-
-    sample_root = run(data, monkeypatch, policy="task0_standard_frozen", suffix="_sample_rank",
-                      stop=0)
-    command = cli(data, "task0_standard_frozen", "_sample_rank", extra=[
-        "--stop-after-task", "1", "--resume-fold-checkpoint",
-        str(sample_root / "checkpoints/task_0.pt"), "--exemplar-ranking-policy",
-        PIPELINE_INPUT_RANKING_POLICY,
-    ])
-    monkeypatch.setattr(sys, "argv", command)
-    with pytest.raises(ValueError, match="contract mismatch"):
-        engine.main()
+@pytest.mark.parametrize("method", ["ewc", "agem"])
+def test_regularization_methods_resume_exactly(data, monkeypatch, tiny, method):
+    control = run(data, monkeypatch, method=method, suffix="_control", stop=1)
+    split = run(data, monkeypatch, method=method, suffix="_split", stop=0)
+    run(data, monkeypatch, method=method, suffix="_split", stop=1,
+        resume=split / "checkpoints/task_0.pt")
+    left, right = load(control, 1), load(split, 1)
+    for key in ("model_state", "buffer_state", "method_state", "sampler_state", "rng_state"):
+        assert checkpoint.fold_state_digest(left[key]) == checkpoint.fold_state_digest(right[key]), key

@@ -72,8 +72,8 @@ def _fold_member(fold_id: int, sample_ids: list[str]) -> MemberPredictionArtifac
     return MemberPredictionArtifact(
         context=MemberPredictionContext(
             run_id=f"fold-{fold_id}",
-            method="replay_distill_fixed_budget_uniform",
-            method_protocol="replay_distill_fixed_budget_uniform",
+            method="class_balanced_fixed_budget_replay",
+            method_protocol="class_balanced_fixed_budget_replay",
             task_id=0,
             split="validation",
             member_id=fold_id,
@@ -111,7 +111,7 @@ def _provenanced_fold_members() -> list[MemberPredictionArtifact]:
             # Per-member scaler hashes are expected to differ.
             preprocessing_sha256=str(fold_id + 1) * 64,
             preprocessing_member_id=fold_id,
-            ranking_policy="raw_sample_normalized_class_mean_control_v1",
+            ranking_policy="sample_normalized_class_mean",
             buffer_policy="stratified_fraction_v1",
             member_memory_budget=9260 if fold_id == 0 else 9259,
             global_memory_budget=27778,
@@ -154,9 +154,9 @@ def test_three_disjoint_validation_folds_become_one_oof_artifact(tmp_path: Path)
                 "low_threshold": 0.5,
                 "candidate_grid": [0.5, 0.9, 0.99],
                 "selection_rule": {
-                    "name": "smallest_threshold_meeting_target_accuracy",
-                    "target_accuracy": 0.95,
-                    "tie_breakers": ["lower_threshold"],
+                    "name": "max_macro_f1_subject_to_min_coverage",
+                    "minimum_coverage": 0.5,
+                    "tie_breakers": ["accuracy", "coverage", "lower_threshold"],
                 },
                 "calibration_bins": 15,
             }
@@ -275,10 +275,9 @@ def test_frozen_oof_threshold_links_to_different_common_test_partition(
                 "low_threshold": 0.5,
                 "candidate_grid": [0.5, 0.9, 0.99],
                 "selection_rule": {
-                    "name": "smallest_threshold_meeting_target_accuracy",
-                    "target_accuracy": 0.95,
-                    "fallback_minimum_coverage": 0.5,
-                    "tie_breakers": ["lower_threshold"],
+                    "name": "max_macro_f1_subject_to_min_coverage",
+                    "minimum_coverage": 0.5,
+                    "tie_breakers": ["accuracy", "coverage", "lower_threshold"],
                 },
                 "calibration_bins": 5,
             }
@@ -324,4 +323,4 @@ def test_frozen_oof_threshold_links_to_different_common_test_partition(
     report = evaluate_with_frozen_threshold(test_ensemble, frozen)
     assert report["evaluation_split"] == "test"
     assert report["threshold"]["source_split"] == "oof"
-    assert report["selection_status"] == "target_met"
+    assert report["selection_status"] == "macro_f1_selected"

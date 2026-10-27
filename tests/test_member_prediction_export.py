@@ -21,7 +21,6 @@ from src.eval.predictions import (
     partition_identity_sha256,
 )
 from src.data.sample_identity import DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN
-from src.training.train_cil import export_member_evaluation
 from src.utils.logging import RunLogger
 from tests.tiny_tddi import tiny_tddi_model
 
@@ -95,37 +94,6 @@ def test_member_prediction_export_load_round_trip(tmp_path: Path) -> None:
         assert "raw_class_ids" in payload.files
 
 
-def test_training_export_helper_writes_namespaced_artifact_and_event(tmp_path: Path) -> None:
-    logger = RunLogger(
-        log_path=tmp_path / "train.log",
-        events_path=tmp_path / "events.csv",
-        run_id="member-2-run",
-    )
-    args = Namespace(
-        member_id=2,
-        experiment_seed=0,
-        member_seed=9876,
-        method="ewc",
-    )
-    export_member_evaluation(
-        EvaluationResult(metrics={}, outputs=_outputs()),
-        _metadata(),
-        run_paths={"outdir": tmp_path},
-        run_id="member-2-run",
-        args=args,
-        task_id=1,
-        split="validation",
-        logger=logger,
-    )
-
-    artifact_path = tmp_path / "member_predictions" / "task_1" / "validation.npz"
-    artifact = load_member_prediction_artifact(artifact_path)
-    assert artifact.context.member_id == 2
-    assert artifact.context.experiment_seed == 0
-    assert artifact.context.member_seed == 9876
-    with (tmp_path / "events.csv").open(newline="", encoding="utf-8") as handle:
-        events = list(csv.DictReader(handle))
-    assert [event["event_type"] for event in events] == ["member_predictions_exported"]
 
 
 def test_member_prediction_rejects_duplicates_and_shape_mismatches(tmp_path: Path) -> None:
@@ -276,7 +244,7 @@ def test_schema_three_fold_provenance_round_trip_and_assignment_guard(tmp_path: 
         task_file_sha256="c" * 64, study_contract_sha256="d" * 64,
         preprocessing_policy="task0_standard_frozen",
         preprocessing_sha256="e" * 64, preprocessing_member_id=0,
-        ranking_policy="raw_sample_normalized_class_mean_control_v1",
+        ranking_policy="sample_normalized_class_mean",
         buffer_policy="stratified_fraction_v1", member_memory_budget=9260,
         global_memory_budget=27778, expected_partition_rows=3,
         expected_partition_sha256=digest, expected_oof_rows=9,

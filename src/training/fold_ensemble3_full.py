@@ -18,14 +18,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.training.fold_ab_study import INPUT_KEYS  # noqa: E402
-from src.training.fold_ensemble3_pilot import (  # noqa: E402
+from src.training.fold_run_setup import INPUT_KEYS  # noqa: E402
+from src.training.fold_ensemble3_runner import (  # noqa: E402
     Inspector,
     MEMBER_IDS,
     Runner,
     _default_runner,
     _load_locked_config,
-    build_pilot_plan,
+    build_ensemble_plan,
     execute_ensemble_study,
     inspect_member,
 )
@@ -68,13 +68,8 @@ def execute_full(
     protocol_id = str(config["protocol"]["id"])
     protocol_name = str(config["protocol"]["name"])
     protocol_limitation = (
-        "P3 tail-to-head results must be reported with per-task/old-class forgetting, "
-        "not final accuracy alone."
-        if protocol_id == "P3"
-        else (
-            f"{protocol_id} {protocol_name} results are a protocol-controlled comparison; "
-            "report per-task/old-class forgetting as well as final metrics."
-        )
+        f"{protocol_id} {protocol_name} results are a protocol-controlled comparison; "
+        "report per-task/old-class forgetting as well as final metrics."
     )
     return execute_ensemble_study(
         config,
@@ -87,13 +82,13 @@ def execute_full(
         limitations=(
             "This is one experiment seed; three ensemble members are not three independent experiment seeds.",
             protocol_limitation,
-            "OOF target accuracy does not guarantee the same selected test accuracy.",
+            "OOF selected Macro-F1 does not guarantee the same selected test Macro-F1.",
         ),
     )
 
 
 def print_dry_run(config: Mapping[str, Any], *, member_ids: Sequence[int] | None, python: str) -> None:
-    plan = build_pilot_plan(config, member_ids=member_ids, python=python)
+    plan = build_ensemble_plan(config, member_ids=member_ids, python=python)
     print(
         "DRY RUN: no model/training/writes. Members run synchronously 0->1->2; "
         "full scope task 0-7."
@@ -126,6 +121,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     ):
         parser.add_argument("--" + name.replace("_", "-"), type=Path)
     parser.add_argument("--device")
+    parser.add_argument("--method", choices=["class_balanced_fixed_budget_replay", "ewc", "agem"])
     args = parser.parse_args(argv)
     override_names = INPUT_KEYS | {
         "task_file",
@@ -133,6 +129,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "output_root",
         "threshold_config",
         "device",
+        "method",
     }
     config = load_full_config(
         args.config,

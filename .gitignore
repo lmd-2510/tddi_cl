@@ -5,6 +5,9 @@ data/*.zip
 outputs/runs*
 outputs/advanced_protocols/
 outputs/full/
+outputs/*_cb_replay_seed0/
+outputs/*_ewc_seed0/
+outputs/*_agem_seed0/
 outputs/pilot/
 outputs/smoke/
 outputs/remote_preflight/

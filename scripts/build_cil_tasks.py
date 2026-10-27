@@ -18,7 +18,6 @@ DEFAULT_BASE_TASK_CLASSES = 38
 DEFAULT_INCREMENT_CLASSES = 20
 DEFAULT_SEEDS = [0, 1, 2, 3, 4]
 RARE_THRESHOLDS = [5, 10, 20]
-FREQUENCY_BINS = ("ultra_tail", "tail", "medium", "head")
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,14 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outdir", required=True, type=Path)
     parser.add_argument(
         "--protocol",
-        choices=[
-            "random",
-            "frequency_balanced",
-            "head_to_tail",
-            "tail_to_head",
-            "constrained_mass_balanced",
-            "all",
-        ],
+        choices=["head_to_tail", "shuffled", "all"],
         default="all",
     )
     parser.add_argument("--num-classes", type=int, default=DEFAULT_NUM_CLASSES)
@@ -98,7 +90,9 @@ def validate_task_sizes(
         raise ValueError("Incremental task size mismatch.")
 
 
-def build_random_order(class_ids: list[int], seed: int) -> list[int]:
+def build_shuffled_order(class_ids: list[int], seed: int) -> list[int]:
+    """Return the paper-style Shuffled LT-CIL class order."""
+
     rng = np.random.default_rng(seed)
     order = class_ids.copy()
     rng.shuffle(order)
@@ -110,200 +104,17 @@ def build_frequency_order(
     *,
     descending: bool,
 ) -> list[int]:
-    """Order classes deterministically by train frequency, then class ID."""
+    """Order classes deterministically by train frequency and class ID.
 
-    ordered = train_counts.sort_values(["count", "class_id"], ascending=[False, True])
-    if not descending:
-        ordered = train_counts.sort_values(["count", "class_id"], ascending=[True, True])
-    return ordered["class_id"].astype(int).tolist()
+    Both keys use the same direction so the head-to-tail order is the exact
+    reverse of the legacy tail-to-head order, including frequency ties.
+    """
 
-
-def build_frequency_balanced_tasks(train_counts: pd.DataFrame, sizes: list[int]) -> list[dict[str, Any]]:
-    ordered = train_counts.sort_values(["count", "class_id"], ascending=[False, True]).reset_index(drop=True)
-    stratum_size = int(np.ceil(len(ordered) / 3))
-    strata = [
-        ordered.iloc[0:stratum_size]["class_id"].astype(int).tolist(),
-        ordered.iloc[stratum_size : 2 * stratum_size]["class_id"].astype(int).tolist(),
-        ordered.iloc[2 * stratum_size :]["class_id"].astype(int).tolist(),
-    ]
-    buckets: list[list[int]] = [[] for _ in sizes]
-    remaining = sizes.copy()
-    cursor = 0
-
-    for stratum in strata:
-        for class_id in stratum:
-            attempts = 0
-            while remaining[cursor % len(sizes)] == 0:
-                cursor += 1
-                attempts += 1
-                if attempts > len(sizes):
-                    raise ValueError("No remaining task capacity while building frequency-balanced tasks.")
-            task_id = cursor % len(sizes)
-            buckets[task_id].append(int(class_id))
-            remaining[task_id] -= 1
-            cursor += 1
-
-    return [
-        {
-            "task_id": task_id,
-            "classes": classes,
-            "num_classes": len(classes),
-        }
-        for task_id, classes in enumerate(buckets)
-    ]
-
-
-def frequency_bin(count: int) -> str:
-    """Return the P4 rarity stratum using train-only sample counts."""
-
-    if count <= 20:
-        return "ultra_tail"
-    if count <= 100:
-        return "tail"
-    if count <= 1000:
-        return "medium"
-    return "head"
-
-
-def proportional_bin_quotas(
-    bin_counts: dict[str, int],
-    sizes: list[int],
-    *,
-    seed: int,
-) -> list[dict[str, int]]:
-    """Apportion every frequency bin across tasks while preserving capacities."""
-
-    total_classes = sum(bin_counts.values())
-    if total_classes != sum(sizes):
-        raise ValueError("Frequency-bin totals must equal total task capacity.")
-    missing = set(FREQUENCY_BINS) - set(bin_counts)
-    if missing:
-        raise ValueError(f"Missing frequency bins: {sorted(missing)}")
-
-    expected = [
-        {name: size * bin_counts[name] / total_classes for name in FREQUENCY_BINS}
-        for size in sizes
-    ]
-    quotas = [
-        {name: int(np.floor(row[name])) for name in FREQUENCY_BINS}
-        for row in expected
-    ]
-    row_remaining = [sizes[i] - sum(quotas[i].values()) for i in range(len(sizes))]
-    col_remaining = {
-        name: bin_counts[name] - sum(row[name] for row in quotas)
-        for name in FREQUENCY_BINS
-    }
-    rng = np.random.default_rng(seed)
-    tie_break = {
-        (task_id, name): float(rng.random())
-        for task_id in range(len(sizes))
-        for name in FREQUENCY_BINS
-    }
-
-    while sum(row_remaining):
-        candidates = [
-            (task_id, name)
-            for task_id in range(len(sizes))
-            for name in FREQUENCY_BINS
-            if row_remaining[task_id] > 0 and col_remaining[name] > 0
-        ]
-        if not candidates:
-            raise RuntimeError("Unable to complete P4 frequency-bin quotas.")
-        task_id, name = max(
-            candidates,
-            key=lambda item: (
-                expected[item[0]][item[1]] - quotas[item[0]][item[1]],
-                tie_break[item],
-            ),
-        )
-        quotas[task_id][name] += 1
-        row_remaining[task_id] -= 1
-        col_remaining[name] -= 1
-
-    if any(col_remaining.values()):
-        raise RuntimeError(f"P4 quota columns are incomplete: {col_remaining}")
-    return quotas
-
-
-def build_constrained_mass_balanced_tasks(
-    train_counts: pd.DataFrame,
-    sizes: list[int],
-    *,
-    seed: int,
-) -> list[dict[str, Any]]:
-    """Build P4: balanced rarity composition and approximately balanced mass."""
-
-    frame = train_counts.copy()
-    frame["frequency_bin"] = frame["count"].astype(int).map(frequency_bin)
-    bin_counts = {
-        name: int((frame["frequency_bin"] == name).sum())
-        for name in FREQUENCY_BINS
-    }
-    quotas = proportional_bin_quotas(bin_counts, sizes, seed=seed)
-    used = [{name: 0 for name in FREQUENCY_BINS} for _ in sizes]
-    buckets: list[list[tuple[int, int, str]]] = [[] for _ in sizes]
-    sample_mass = [0 for _ in sizes]
-    rng = np.random.default_rng(seed)
-    task_priority = rng.permutation(len(sizes)).tolist()
-    task_rank = {task_id: rank for rank, task_id in enumerate(task_priority)}
-    frame["tie_break"] = rng.random(len(frame))
-    ordered = frame.sort_values(
-        ["count", "tie_break", "class_id"],
-        ascending=[False, True, True],
+    ordered = train_counts.sort_values(
+        ["count", "class_id"],
+        ascending=[not descending, not descending],
     )
-
-    for row in ordered.itertuples(index=False):
-        name = str(row.frequency_bin)
-        candidates = [
-            task_id
-            for task_id in range(len(sizes))
-            if used[task_id][name] < quotas[task_id][name]
-        ]
-        if not candidates:
-            raise RuntimeError(f"No P4 quota remains for frequency bin {name}.")
-        task_id = min(
-            candidates,
-            key=lambda candidate: (sample_mass[candidate], task_rank[candidate]),
-        )
-        count = int(row.count)
-        buckets[task_id].append((int(row.class_id), count, name))
-        sample_mass[task_id] += count
-        used[task_id][name] += 1
-
-    # Swapping within the same bin preserves all rarity quotas.  Greedily take
-    # the best mass-balancing swap until reaching a local optimum.
-    for _ in range(1000):
-        best: tuple[int, int, int, int, int] | None = None
-        for left in range(len(buckets)):
-            for right in range(left + 1, len(buckets)):
-                old_score = sample_mass[left] ** 2 + sample_mass[right] ** 2
-                for left_index, (_, left_count, left_bin) in enumerate(buckets[left]):
-                    for right_index, (_, right_count, right_bin) in enumerate(buckets[right]):
-                        if left_bin != right_bin or left_count == right_count:
-                            continue
-                        new_left = sample_mass[left] - left_count + right_count
-                        new_right = sample_mass[right] - right_count + left_count
-                        improvement = old_score - (new_left ** 2 + new_right ** 2)
-                        candidate = (improvement, left, right, left_index, right_index)
-                        if improvement > 0 and (best is None or candidate > best):
-                            best = candidate
-        if best is None:
-            break
-        _, left, right, left_index, right_index = best
-        left_item = buckets[left][left_index]
-        right_item = buckets[right][right_index]
-        buckets[left][left_index], buckets[right][right_index] = right_item, left_item
-        sample_mass[left] += right_item[1] - left_item[1]
-        sample_mass[right] += left_item[1] - right_item[1]
-
-    return [
-        {
-            "task_id": task_id,
-            "classes": [class_id for class_id, _, _ in bucket],
-            "num_classes": len(bucket),
-        }
-        for task_id, bucket in enumerate(buckets)
-    ]
+    return ordered["class_id"].astype(int).tolist()
 
 
 def split_order_into_tasks(order: list[int], sizes: list[int]) -> list[dict[str, Any]]:
@@ -402,6 +213,7 @@ def write_protocol_summary(outpath: Path, summaries: list[pd.DataFrame]) -> None
         "",
         "## Notes",
         "",
+        "- Only the paper-style `head_to_tail` (Ordered LT-CIL) and `shuffled` protocols are generated.",
         "- Task files are built from actual class IDs, not `range(num_classes)`.",
         "- Task 0 contains 38 classes; Tasks 1-7 contain 20 classes each.",
         "- Rare-class counts use train split thresholds `<=5`, `<=10`, and `<=20`.",
@@ -441,44 +253,8 @@ def main() -> None:
 
     summaries: list[pd.DataFrame] = []
 
-    if args.protocol in {"random", "all"}:
-        for seed in args.seeds:
-            print(f"[tasks] Building random protocol for seed={seed}...", flush=True)
-            order = build_random_order(class_ids, seed)
-            tasks = split_order_into_tasks(order, sizes)
-            validate_tasks(tasks, class_ids, sizes)
-            outpath = outdir / f"random_seed{seed}_tasks.json"
-            write_task_json(outpath, "random", seed, args.num_classes, tasks)
-            summaries.append(
-                summarize_tasks(
-                    protocol="random",
-                    seed=seed,
-                    tasks=tasks,
-                    train_counts=train_counts,
-                    validation_counts=validation_counts,
-                    test_counts=test_counts,
-                )
-            )
-
-    if args.protocol in {"frequency_balanced", "all"}:
-        print("[tasks] Building frequency-balanced protocol...", flush=True)
-        tasks = build_frequency_balanced_tasks(train_counts, sizes)
-        validate_tasks(tasks, class_ids, sizes)
-        outpath = outdir / "frequency_balanced_tasks.json"
-        write_task_json(outpath, "frequency_balanced", None, args.num_classes, tasks)
-        summaries.append(
-            summarize_tasks(
-                protocol="frequency_balanced",
-                seed=None,
-                tasks=tasks,
-                train_counts=train_counts,
-                validation_counts=validation_counts,
-                test_counts=test_counts,
-            )
-        )
-
     if args.protocol in {"head_to_tail", "all"}:
-        print("[tasks] Building P2 head-to-tail protocol...", flush=True)
+        print("[tasks] Building Ordered LT-CIL head-to-tail protocol...", flush=True)
         order = build_frequency_order(train_counts, descending=True)
         tasks = split_order_into_tasks(order, sizes)
         validate_tasks(tasks, class_ids, sizes)
@@ -495,40 +271,26 @@ def main() -> None:
             )
         )
 
-    if args.protocol in {"tail_to_head", "all"}:
-        print("[tasks] Building P3 tail-to-head protocol...", flush=True)
-        order = build_frequency_order(train_counts, descending=False)
-        tasks = split_order_into_tasks(order, sizes)
-        validate_tasks(tasks, class_ids, sizes)
-        outpath = outdir / "tail_to_head_tasks.json"
-        write_task_json(outpath, "tail_to_head", None, args.num_classes, tasks)
-        summaries.append(
-            summarize_tasks(
-                protocol="tail_to_head",
-                seed=None,
-                tasks=tasks,
-                train_counts=train_counts,
-                validation_counts=validation_counts,
-                test_counts=test_counts,
-            )
-        )
-
-    if args.protocol in {"constrained_mass_balanced", "all"}:
+    if args.protocol in {"shuffled", "all"}:
+        # The paper first constructs the frequency-ordered long-tail class list,
+        # then randomly permutes that same list before slicing it into tasks.
+        ordered_class_ids = build_frequency_order(train_counts, descending=True)
         for seed in args.seeds:
-            print(f"[tasks] Building P4 constrained mass-balanced seed={seed}...", flush=True)
-            tasks = build_constrained_mass_balanced_tasks(train_counts, sizes, seed=seed)
+            print(f"[tasks] Building Shuffled LT-CIL protocol for seed={seed}...", flush=True)
+            order = build_shuffled_order(ordered_class_ids, seed)
+            tasks = split_order_into_tasks(order, sizes)
             validate_tasks(tasks, class_ids, sizes)
-            outpath = outdir / f"constrained_mass_balanced_seed{seed}_tasks.json"
+            outpath = outdir / f"shuffled_seed{seed}_tasks.json"
             write_task_json(
                 outpath,
-                "constrained_mass_balanced",
+                "shuffled",
                 seed,
                 args.num_classes,
                 tasks,
             )
             summaries.append(
                 summarize_tasks(
-                    protocol="constrained_mass_balanced",
+                    protocol="shuffled",
                     seed=seed,
                     tasks=tasks,
                     train_counts=train_counts,

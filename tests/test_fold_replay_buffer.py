@@ -12,37 +12,12 @@ import pytest
 
 from src.data.ddi_dataset import DDIBatchArrays, load_development_fold_arrays, prepare_development_fold_context
 from src.data.fold_preprocessing import prepare_fold_preprocessing
-from src.data import fold_replay_buffer as replay
+from src.data import class_balanced_replay_buffer as replay
 from src.data.stratified_folds import FOLD_ASSIGNMENT_SCHEMA, describe_fold_source, save_fold_artifact
 
 
-@pytest.mark.parametrize("observed,caps,budget,q,expected", [
-    ({10: 100, 20: 400}, {10: 100, 20: 400}, 50, 10, {10: 20, 20: 30}),
-    ({10: 100, 20: 400, 30: 900}, {10: 11, 20: 100, 30: 100}, 60, 10, {10: 11, 20: 22, 30: 27}),
-    ({10: 4, 20: 100, 30: 100}, {10: 4, 20: 100, 30: 100}, 34, 10, {10: 4, 20: 15, 30: 15}),
-    ({10: 100, 20: 100, 30: 1}, {10: 2, 20: 6, 30: 1}, 8, 10, {10: 2, 20: 5, 30: 1}),
-    ({10: 100, 20: 100, 30: 1}, {10: 100, 20: 100, 30: 1}, 8, 10, {10: 4, 20: 3, 30: 1}),
-    ({10: 1, 20: 9, 30: 9}, {10: 1, 20: 9, 30: 9}, 5, 10, {10: 1, 20: 2, 30: 2}),
-    ({10: 5, 20: 5, 30: 5}, {10: 5, 20: 5, 30: 5}, 2, 10, {10: 1, 20: 1, 30: 0}),
-    ({10: 100, 20: 4}, {10: 0, 20: 2}, 100, 10, {10: 0, 20: 2}),
-    ({10: 100, 20: 100}, {10: 100, 20: 100}, 5, 0, {10: 3, 20: 2}),
-    ({10: 4}, {10: 3}, 0, 10, {10: 0}),
-    ({}, {}, 0, 10, {}),
-])
-def test_allocation_by_hand(observed, caps, budget, q, expected):
-    assert replay.min_quota_sqrt_allocation(observed, caps, budget, base_quota=q) == expected
-    assert replay.min_quota_sqrt_allocation(dict(reversed(list(observed.items()))), dict(reversed(list(caps.items()))), budget, base_quota=q) == expected
 
 
-def test_allocation_invariants_random_small_cases():
-    rng = np.random.default_rng(12)
-    for _ in range(200):
-        observed = {int(c): int(n) for c, n in zip([9, 57, 901, -2], rng.integers(1, 500, 4))}
-        caps = {c: int(rng.integers(0, n + 1)) for c, n in observed.items()}
-        budget = int(rng.integers(0, 1000))
-        result = replay.min_quota_sqrt_allocation(observed, caps, budget, base_quota=int(rng.integers(0, 20)))
-        assert sum(result.values()) == min(budget, sum(caps.values()))
-        assert all(0 <= result[c] <= caps[c] for c in caps)
 
 
 def test_equal_class_allocation_balances_until_capacity_is_exhausted():
@@ -52,15 +27,6 @@ def test_equal_class_allocation_balances_until_capacity_is_exhausted():
     assert replay.equal_class_capacity_allocation({2: 1, 1: 100}, 4) == {1: 3, 2: 1}
 
 
-@pytest.mark.parametrize("observed,caps,budget,q", [
-    ({1: 0}, {1: 0}, 10, 10), ({1: 5}, {1: 6}, 10, 10),
-    ({1: 5}, {2: 5}, 10, 10), ({1: 5}, {1: -1}, 10, 10),
-    ({1: 5}, {1: 2}, -1, 10), ({1: 5}, {1: 2}, 10, -1),
-    ({1: 5.2}, {1: 2}, 10, 10), ({True: 5}, {True: 2}, 10, 10),
-])
-def test_allocation_invalid_inputs(observed, caps, budget, q):
-    with pytest.raises(ValueError):
-        replay.min_quota_sqrt_allocation(observed, caps, budget, base_quota=q)
 
 
 def test_ranking_by_hand_and_input_permutation():
@@ -80,27 +46,6 @@ def test_ranking_by_hand_and_input_permutation():
     np.testing.assert_array_equal(ds, [0, 0])
 
 
-def test_pipeline_input_ranking_by_hand_and_permutation():
-    x = np.array([[0., 0.], [2., 0.], [10., 0.]])
-    ids = np.array(["b", "a", "c"])
-    order, distances = replay.rank_input_class_exemplars(x, ids)
-    assert ids[order].tolist() == ["a", "b", "c"]
-    np.testing.assert_array_equal(distances, [2., 4., 6.])
-    perm = np.array([2, 0, 1])
-    other, other_distances = replay.rank_input_class_exemplars(x[perm], ids[perm])
-    assert ids[perm][other].tolist() == ["a", "b", "c"]
-    np.testing.assert_array_equal(other_distances, distances)
-    # The two candidate spaces are genuinely different ranking functions.
-    raw = np.array([
-        [1.1626641008, 6.4952563575, 1.0248931554],
-        [-4.3842692045, 7.1572402525, 1.3844882337],
-        [-1.8064953921, 4.5939967254, 1.1307682473],
-        [0.9895628984, 0.2246904417, 1.6957007501],
-    ])
-    names = np.array(["a", "b", "c", "d"])
-    sample_order, _ = replay.rank_raw_class_exemplars(raw, names)
-    input_order, _ = replay.rank_input_class_exemplars(raw, names)
-    assert names[sample_order].tolist() != names[input_order].tolist()
 
 
 @pytest.mark.parametrize("x,ids", [([[np.nan, 2]], ["a"]), ([[np.inf, 2]], ["a"]),
@@ -125,7 +70,7 @@ def data(tmp_path):
     save_fold_artifact(tmp_path / "folds", pa.Table.from_pylist(rows, schema=FOLD_ASSIGNMENT_SCHEMA),
                        sources={s: describe_fold_source(p) for s, p in paths.items()}, fold_seed=42)
     tasks = tmp_path / "tasks.json"
-    tasks.write_text(json.dumps({"protocol": "tail_to_head", "tasks": [
+    tasks.write_text(json.dumps({"protocol": "head_to_tail", "tasks": [
         {"task_id": i, "classes": [c]} for i, c in enumerate((10, 57, 901))]}))
     return paths, tmp_path / "folds", tasks
 
@@ -141,14 +86,14 @@ def settings(data, member=0, budget=5, buffer_policy=replay.BUFFER_POLICY):
 
 def test_p4_task_file_is_supported_by_fold_buffer(data, tmp_path):
     payload = json.loads(data[2].read_text())
-    payload["protocol"] = "constrained_mass_balanced"
+    payload["protocol"] = "shuffled"
     payload["seed"] = 0
     p4_task = tmp_path / "p4_tasks.json"
     p4_task.write_text(json.dumps(payload))
     kw = settings(data)
     kw["task_file"] = p4_task
 
-    buffer = replay.FoldSqrtReplayBuffer(**kw)
+    buffer = replay.ClassBalancedReplayBuffer(**kw)
     assert buffer.total_size == 0
     assert buffer.metadata["task_file_sha256"] == replay.hashlib.sha256(
         p4_task.read_bytes()
@@ -174,7 +119,7 @@ def assert_arrays_equal(a, b):
 
 def test_buffer_arrival_counts_trim_prefix_no_old_feature_read(data, monkeypatch):
     kw = settings(data)
-    buffer = replay.FoldSqrtReplayBuffer(**kw)
+    buffer = replay.ClassBalancedReplayBuffer(**kw)
     incoming = [current(kw, task) for task in range(3)]
     def no_read(*a, **kw):
         pytest.fail("Buffer must not reread current/discarded Parquet features")
@@ -206,7 +151,7 @@ def test_buffer_arrival_counts_trim_prefix_no_old_feature_read(data, monkeypatch
 @pytest.mark.parametrize("case", ["heldout", "future", "test", "partial", "duplicate", "label", "source_row", "nan", "wrong_order"])
 def test_invalid_current_rejected_transactionally(data, case):
     kw = settings(data)
-    buffer = replay.FoldSqrtReplayBuffer(**kw)
+    buffer = replay.ClassBalancedReplayBuffer(**kw)
     rows = current(kw, 0)
     if case == "heldout":
         rows = current(kw, 0, "validation")
@@ -238,7 +183,7 @@ def test_invalid_current_rejected_transactionally(data, case):
 
 def test_ab_ids_equal_model_features_can_differ(data):
     kw = settings(data)
-    a, b = replay.FoldSqrtReplayBuffer(**kw), replay.FoldSqrtReplayBuffer(**kw)
+    a, b = replay.ClassBalancedReplayBuffer(**kw), replay.ClassBalancedReplayBuffer(**kw)
     common = {k: v for k, v in kw.items() if k != "total_memory_budget"}
     raw = prepare_fold_preprocessing(**common, validation_fold=0, policy="raw_identity")
     scaler = prepare_fold_preprocessing(**common, validation_fold=0, policy="task0_standard_frozen")
@@ -253,62 +198,19 @@ def test_ab_ids_equal_model_features_can_differ(data):
         assert not np.allclose(av.features, bv.features)
 
 
-def test_two_ranking_spaces_provenance_selection_and_roundtrip(data):
-    kw = settings(data, budget=1)
-    prep_kwargs = {k: v for k, v in kw.items() if k != "total_memory_budget"}
-    scaler = prepare_fold_preprocessing(**prep_kwargs, validation_fold=0,
-                                        policy="task0_standard_frozen")
-    pipeline_kw = {
-        **kw,
-        "ranking_policy": replay.PIPELINE_INPUT_RANKING_POLICY,
-        "ranking_preprocessing": scaler,
-        "ranking_preprocessing_sha256": "a" * 64,
-    }
-    sample_buffer = replay.FoldSqrtReplayBuffer(**kw)
-    pipeline_buffer = replay.FoldSqrtReplayBuffer(**pipeline_kw)
-    rows = current(kw, 0)
-    sample_buffer.update(rows, task_id=0, feature_columns=["x", "y"])
-    pipeline_buffer.update(rows, task_id=0, feature_columns=["x", "y"])
-    metadata = pipeline_buffer.metadata["ranking"]
-    assert metadata["policy"] == replay.PIPELINE_INPUT_RANKING_POLICY
-    assert metadata["preprocessing_policy"] == "task0_standard_frozen"
-    assert metadata["preprocessing_sha256"] == "a" * 64
-    assert metadata["feature_space"] == "frozen_preprocessing_output_before_model_layernorm"
-    class_rows = rows.features[rows.labels == 10]
-    class_ids = rows.metadata["sample_id"][rows.labels == 10]
-    transformed = scaler.transform(class_rows, feature_columns=["x", "y"], member_id=0,
-                                   policy="task0_standard_frozen")
-    expected, _ = replay.rank_input_class_exemplars(transformed, class_ids)
-    assert pipeline_buffer.get_all().metadata["sample_id"].tolist() == [class_ids[expected[0]]]
-    # Candidate spaces may select the same IDs for a particular class; equality is
-    # not forced either way. Provenance, not artificial divergence, distinguishes them.
-    snapshot = pickle.loads(pickle.dumps(pipeline_buffer.state_dict()))
-    restored = replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **pipeline_kw)
-    assert_arrays_equal(restored.get_all(), pipeline_buffer.get_all())
-    with pytest.raises(ValueError, match="metadata mismatch"):
-        replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **kw)
 
 
-def test_pipeline_ranking_requires_approved_frozen_scaler(data):
-    kw = settings(data)
-    common = {k: v for k, v in kw.items() if k != "total_memory_budget"}
-    raw = prepare_fold_preprocessing(**common, validation_fold=0, policy="raw_identity")
-    with pytest.raises(ValueError, match="task0_standard_frozen"):
-        replay.FoldSqrtReplayBuffer(
-            **kw, ranking_policy=replay.PIPELINE_INPUT_RANKING_POLICY,
-            ranking_preprocessing=raw, ranking_preprocessing_sha256="a" * 64,
-        )
 
 
 @pytest.mark.parametrize("save_after,budget", [(-1, 5), (0, 5), (1, 5), (2, 5), (0, 0), (1, 1)])
 def test_state_roundtrip_continuation(data, save_after, budget):
     kw = settings(data, budget=budget)
-    continuous = replay.FoldSqrtReplayBuffer(**kw)
+    continuous = replay.ClassBalancedReplayBuffer(**kw)
     for task in range(save_after + 1):
         update(continuous, kw, task)
     # Exercise serialization rather than relying on shared array references.
     snapshot = pickle.loads(pickle.dumps(continuous.state_dict()))
-    resumed = replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **settings(data, budget=budget))
+    resumed = replay.ClassBalancedReplayBuffer.from_state_dict(snapshot, **settings(data, budget=budget))
     assert resumed.next_task_id == save_after + 1
     for task in range(save_after + 1, 3):
         assert update(continuous, kw, task) == update(resumed, kw, task)
@@ -319,47 +221,48 @@ def test_state_roundtrip_continuation(data, save_after, budget):
 def test_equal_class_buffer_updates_and_roundtrips(data):
     kw = settings(data, budget=5)
     kw["buffer_policy"] = replay.EQUAL_CLASS_BUFFER_POLICY
-    continuous = replay.FoldSqrtReplayBuffer(**kw)
+    continuous = replay.ClassBalancedReplayBuffer(**kw)
     for task in range(2):
         update(continuous, kw, task)
     assert continuous.metadata["policy"] == replay.EQUAL_CLASS_BUFFER_POLICY
     assert continuous.audit_history[-1]["allocation"] == {10: 3, 57: 2}
     snapshot = pickle.loads(pickle.dumps(continuous.state_dict()))
-    resumed = replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **settings(data, budget=5, buffer_policy=replay.EQUAL_CLASS_BUFFER_POLICY))
+    resumed = replay.ClassBalancedReplayBuffer.from_state_dict(snapshot, **settings(data, budget=5, buffer_policy=replay.EQUAL_CLASS_BUFFER_POLICY))
     assert_arrays_equal(resumed.get_all(), continuous.get_all())
-    with pytest.raises(ValueError, match="metadata mismatch"):
-        replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **settings(data, budget=5))
+    with pytest.raises(ValueError, match="buffer_policy"):
+        replay.ClassBalancedReplayBuffer.from_state_dict(
+            snapshot, **settings(data, budget=5, buffer_policy="removed_sqrt_policy"))
 
 
-@pytest.mark.parametrize("change", [{"member_id": 1}, {"total_memory_budget": 6}, {"base_quota": 9},
+@pytest.mark.parametrize("change", [{"member_id": 1}, {"total_memory_budget": 6},
                                     {"experiment_seed": 1}, {"feature_columns": ["y", "x"]}])
 def test_resume_incompatible_config(data, change):
     kw = settings(data)
-    buffer = replay.FoldSqrtReplayBuffer(**kw)
+    buffer = replay.ClassBalancedReplayBuffer(**kw)
     update(buffer, kw, 0)
     kw.update(change)
     with pytest.raises(ValueError, match="metadata mismatch"):
-        replay.FoldSqrtReplayBuffer.from_state_dict(buffer.state_dict(), **kw)
+        replay.ClassBalancedReplayBuffer.from_state_dict(buffer.state_dict(), **kw)
 
 
 def test_resume_corruption_and_capacity_guards(data):
     kw = settings(data)
-    buffer = replay.FoldSqrtReplayBuffer(**kw)
+    buffer = replay.ClassBalancedReplayBuffer(**kw)
     update(buffer, kw, 0)
     snapshot = buffer.state_dict()
     snapshot["entries"][10]["features"][0, 0] += 100
     with pytest.raises(ValueError, match="SHA256"):
-        replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **kw)
+        replay.ClassBalancedReplayBuffer.from_state_dict(snapshot, **kw)
     snapshot = buffer.state_dict()
     snapshot["observed_counts"][10] = 999
     snapshot["state_sha256"] = replay._state_digest(snapshot)
     with pytest.raises(ValueError, match="observed"):
-        replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **kw)
+        replay.ClassBalancedReplayBuffer.from_state_dict(snapshot, **kw)
 
 
 def test_restore_does_not_rerank_or_read_discarded_features(data, monkeypatch):
     kw = settings(data)
-    buffer = replay.FoldSqrtReplayBuffer(**kw)
+    buffer = replay.ClassBalancedReplayBuffer(**kw)
     update(buffer, kw, 0)
     update(buffer, kw, 1)
     snapshot = buffer.state_dict()
@@ -367,7 +270,7 @@ def test_restore_does_not_rerank_or_read_discarded_features(data, monkeypatch):
         pytest.fail("Restore must not rerank or read old feature Parquet")
     monkeypatch.setattr(replay, "rank_raw_class_exemplars", forbidden)
     monkeypatch.setattr(pq, "read_table", forbidden)
-    resumed = replay.FoldSqrtReplayBuffer.from_state_dict(snapshot, **kw)
+    resumed = replay.ClassBalancedReplayBuffer.from_state_dict(snapshot, **kw)
     assert_arrays_equal(buffer.get_all(), resumed.get_all())
     snapshot["entries"][10]["features"][:] = -999
     assert np.all(resumed.get_all().features >= 0)
@@ -376,7 +279,7 @@ def test_restore_does_not_rerank_or_read_discarded_features(data, monkeypatch):
 @pytest.mark.parametrize("target", ["task", "source"])
 def test_source_or_task_mutation_blocks_update(data, target):
     kw = settings(data)
-    buffer = replay.FoldSqrtReplayBuffer(**kw)
+    buffer = replay.ClassBalancedReplayBuffer(**kw)
     rows = current(kw, 0)
     path = data[2] if target == "task" else data[0]["train"]
     with path.open("ab") as handle:
@@ -387,12 +290,12 @@ def test_source_or_task_mutation_blocks_update(data, target):
 
 
 def test_global_budget_overlap_and_no_three_times_budget(data):
-    assert replay.four_percent_member_budgets(694455) == {0: 9260, 1: 9259, 2: 9259}
+    assert replay.four_percent_member_budgets(694455) == {0: 27778, 1: 27778, 2: 27778}
     assert replay.four_percent_member_budgets(10) == {0: 0, 1: 0, 2: 0}
     buffers = []
     for member in range(3):
         kw = settings(data, member=member, budget=4)
-        b = replay.FoldSqrtReplayBuffer(**kw)
+        b = replay.ClassBalancedReplayBuffer(**kw)
         update(b, kw, 0)
         buffers.append(b)
     audit = replay.ensemble_buffer_accounting(buffers, global_budget=12)
@@ -407,7 +310,7 @@ def test_global_budget_overlap_and_no_three_times_budget(data):
 
 def test_relocated_sources_resume_and_wrong_preprocessing(data, tmp_path):
     kw = settings(data)
-    b = replay.FoldSqrtReplayBuffer(**kw)
+    b = replay.ClassBalancedReplayBuffer(**kw)
     update(b, kw, 0)
     moved = tmp_path / "relocated"
     moved.mkdir()
@@ -415,7 +318,7 @@ def test_relocated_sources_resume_and_wrong_preprocessing(data, tmp_path):
     for split, path in data[0].items():
         paths[split] = moved / path.name
         shutil.copyfile(path, paths[split])
-    restored = replay.FoldSqrtReplayBuffer.from_state_dict(b.state_dict(), **settings((paths, data[1], data[2])))
+    restored = replay.ClassBalancedReplayBuffer.from_state_dict(b.state_dict(), **settings((paths, data[1], data[2])))
     assert_arrays_equal(b.get_all(), restored.get_all())
     other = settings(data, member=1)
     artifact = prepare_fold_preprocessing(**{k: v for k, v in other.items() if k != "total_memory_budget"},

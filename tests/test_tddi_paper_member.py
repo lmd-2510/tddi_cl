@@ -19,7 +19,6 @@ from src.models.tddi_paper_member import (
 from src.training.train_cil import (
     expand_model_for_seen_classes,
     parse_args,
-    write_run_config,
 )
 
 
@@ -118,89 +117,10 @@ def test_paper_member_head_expansion_copies_old_class_rows() -> None:
     torch.testing.assert_close(expanded.head.bias[2], previous.head.bias[1], rtol=0, atol=0)
 
 
-def test_paper_member_manifest_records_derived_architecture(tmp_path: Path) -> None:
-    task_file = tmp_path / "tasks.json"
-    task_spec = {
-        "protocol": "tail_to_head",
-        "seed": None,
-        "tasks": [{"task_id": 0, "classes": [10, 30]}],
-    }
-    task_file.write_text(json.dumps(task_spec), encoding="utf-8")
-    args = Namespace(
-        method="ewc",
-        variant="tddi_paper_member",
-        task_file=task_file,
-        experiment_seed=0,
-        member_id=0,
-        member_seed=123,
-        member_seed_derivation="test",
-        seed_mode="member",
-        dropout=0.15,
-        activation="relu",
-    )
-    output_path = tmp_path / "run_config.json"
-
-    write_run_config(
-        output_path,
-        args=args,
-        run_id="paper-member-run",
-        device="cpu",
-        task_spec=task_spec,
-    )
-    payload = json.loads(output_path.read_text(encoding="utf-8"))
-
-    assert payload["resolved"]["model"] == paper_member_manifest(
-        dropout=0.15,
-        activation="relu",
-    )
-    assert payload["resolved"]["model"]["hidden_dims"] == [7560, 7560]
-    assert payload["resolved"]["model"]["input_normalization"] == "layernorm"
-    assert payload["arguments"]["dropout"] == 0.15
-    assert payload["arguments"]["activation"] == "relu"
 
 
-def test_paper_member_cli_and_fixed_input_contract() -> None:
-    required = [
-        "--train",
-        "train.parquet",
-        "--validation",
-        "validation.parquet",
-        "--test",
-        "test.parquet",
-        "--feature-cols",
-        "features.json",
-        "--scaler",
-        "scaler.pkl",
-        "--task-file",
-        "tasks.json",
-        "--outdir",
-        "run",
-        "--variant",
-        "tddi_paper_member",
-    ]
-    with patch("sys.argv", ["train_cil.py", *required]):
-        args = parse_args()
-    assert args.variant == "tddi_paper_member"
 
-    with pytest.raises(ValueError, match="requires input_dim=3780"):
-        expand_model_for_seen_classes(
-            None,
-            None,
-            {10: 0},
-            variant="tddi_paper_member",
-            input_dim=4,
-            dropout=0.2,
-            activation="gelu",
-            norm="layernorm",
-        )
-    with pytest.raises(ValueError, match="fixed input LayerNorm"):
-        expand_model_for_seen_classes(
-            None,
-            None,
-            {10: 0},
-            variant="tddi_paper_member",
-            input_dim=TDDI_PAPER_INPUT_DIM,
-            dropout=0.2,
-            activation="gelu",
-            norm="none",
-        )
+def test_model_manifest_remains_explicit():
+    manifest = paper_member_manifest(dropout=0.2, activation="gelu")
+    assert manifest["input_dim"] == 3780
+    assert manifest["hidden_dims"] == [7560, 7560]

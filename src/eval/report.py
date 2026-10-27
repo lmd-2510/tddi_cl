@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a final P3/P4 ensemble report from completed offline artifacts.
+"""Build a final LT-CIL ensemble report from completed offline artifacts.
 
 This entrypoint is report-only: it never loads a model checkpoint and never trains or
 runs inference. It derives classification, continual-learning, and ensemble-diversity
@@ -9,6 +9,7 @@ metrics from artifacts already exported by the full study.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -36,13 +37,14 @@ from src.eval.ensemble_ue import (  # noqa: E402
 from src.eval.predictions import load_member_prediction_artifact  # noqa: E402
 
 
-DEFAULT_FULL_ROOT = Path(
-    "outputs/full/tddi_ensemble3_replay_distill_p3_seed0_8tasks_v1"
-)
-DEFAULT_TASK_FILE = Path("study_assets/task_protocols/tail_to_head_tasks.json")
+METHOD_NAMES = {
+    "class_balanced_fixed_budget_replay": "CB-Replay",
+    "ewc": "EWC",
+    "agem": "A-GEM",
+}
 SUPPORTED_PROTOCOLS = {
-    "tail_to_head": ("P3", "ensemble3_p3"),
-    "constrained_mass_balanced": ("P4", "ensemble3_p4"),
+    "head_to_tail": ("ORDERED", "ensemble3_ordered"),
+    "shuffled": ("SHUFFLED", "ensemble3_shuffled"),
 }
 EXPECTED_MEMBER_IDS = (0, 1, 2)
 
@@ -138,16 +140,16 @@ def _threshold_mask(
     score_name: str,
     threshold_value: float,
 ) -> np.ndarray:
-    if score_name not in {"entropy_confidence", "max_probability"}:
+    if score_name != "entropy_confidence":
         raise ValueError(f"Unsupported threshold score: {score_name!r}")
     scores = np.asarray(getattr(artifact, score_name), dtype=np.float64)
     mask = scores >= threshold_value
-    if not mask.any():
-        raise ValueError("Threshold selected no test samples; metrics are undefined.")
     return mask
 
 
-def _close(actual: float, expected: object, *, name: str, task_id: int) -> None:
+def _close(actual: float, expected: object, *, name: str, task_id: int, allow_undefined: bool = False) -> None:
+    if allow_undefined and np.isnan(actual) and expected is None:
+        return
     if expected is None or not np.isclose(actual, float(expected), rtol=1e-9, atol=1e-12):
         raise ValueError(
             f"Task {task_id} {name} does not match the frozen-threshold report: "
@@ -161,7 +163,7 @@ def _build_task_row(
     *,
     task_id: int,
     task_classes: Sequence[int] | None = None,
-    protocol_name: str = "tail_to_head",
+    protocol_name: str = "head_to_tail",
 ) -> dict[str, Any]:
     if (
         str(report.get("evaluation_split", "")).casefold() != "test"
@@ -175,12 +177,12 @@ def _build_task_row(
 
     threshold = report.get("threshold")
     full = report.get("full_set")
-    selected = report.get("threshold_score_selective_metrics", report.get("high_confidence"))
+    selected = report.get("threshold_score_selective_metrics")
     if not isinstance(threshold, dict) or not isinstance(full, dict) or not isinstance(selected, dict):
         raise ValueError(f"Threshold report is missing metric sections at task {task_id}.")
-    if threshold.get("source_split") not in {"validation", "oof"}:
+    if threshold.get("source_split") != "oof":
         raise ValueError(
-            f"Task {task_id} threshold did not originate from validation or OOF."
+            f"Task {task_id} threshold did not originate from OOF."
         )
     if threshold.get("probability_source", "raw") != "raw":
         raise ValueError("This report builder expects raw offline ensemble probabilities.")
@@ -192,6 +194,8 @@ def _build_task_row(
         labels=labels,
     )
     score_name = str(threshold.get("score_name", ""))
+    if score_name != "entropy_confidence":
+        raise ValueError("Report requires normalized entropy confidence.")
     selection_applied = bool(threshold.get("selection_applied", True))
     raw_threshold_value = threshold.get("value")
     if selection_applied:
@@ -208,11 +212,10 @@ def _build_task_row(
             raise ValueError(f"Task {task_id} no-selection report invented a threshold.")
         threshold_value = float("nan")
         mask = np.ones(artifact.row_count, dtype=bool)
-    threshold_metrics = compute_classification_metrics(
-        artifact.labels[mask],
-        artifact.predictions[mask],
-        labels=labels,
-    )
+    threshold_metrics = (compute_classification_metrics(
+        artifact.labels[mask], artifact.predictions[mask], labels=labels,
+    ) if mask.any() else {name: float("nan") for name in (
+        "accuracy", "balanced_accuracy", "macro_f1", "weighted_f1")})
     selected_count = int(mask.sum())
     total_count = artifact.row_count
     coverage = float(selected_count / total_count)
@@ -224,12 +227,14 @@ def _build_task_row(
         selected.get("accuracy"),
         name="threshold accuracy",
         task_id=task_id,
+        allow_undefined=selected_count == 0,
     )
     _close(
         threshold_metrics["macro_f1"],
         selected.get("macro_f1"),
         name="threshold Macro-F1",
         task_id=task_id,
+        allow_undefined=selected_count == 0,
     )
     _close(coverage, selected.get("coverage"), name="coverage", task_id=task_id)
     if int(selected.get("selected_count", -1)) != selected_count:
@@ -240,9 +245,9 @@ def _build_task_row(
     task_classes = [int(value) for value in (task_classes or [])]
     new_class_mask = np.isin(artifact.labels, task_classes) if task_classes else np.zeros(artifact.row_count, dtype=bool)
     stage = (
-        "tail" if protocol_name == "tail_to_head" and task_id == 0 else
-        "head" if protocol_name == "tail_to_head" and task_id == 7 else
-        "balanced" if protocol_name == "constrained_mass_balanced" else "mid"
+        "head" if protocol_name == "head_to_tail" and task_id == 0 else
+        "tail" if protocol_name == "head_to_tail" and task_id == 7 else
+        "shuffled" if protocol_name == "shuffled" else "mid"
     )
     return {
         "task_id": task_id,
@@ -446,6 +451,7 @@ def _build_markdown(
     shared_context: Mapping[str, Any],
     protocol_id: str,
     protocol_name: str,
+    backbone_name: str = "tddi_paper_member",
 ) -> str:
     metric_columns = {
         "Full Accuracy": "full_accuracy",
@@ -459,7 +465,8 @@ def _build_markdown(
         "Average Coverage": "coverage",
     }
     average_rows = [
-        {"Metric": label, "Mean across tasks": float(task_summary[column].mean())}
+        {"Metric": label, "Mean across tasks": float(task_summary[column].mean()),
+         "Tasks with defined metric": int(task_summary[column].notna().sum())}
         for label, column in metric_columns.items()
     ]
     average_table = pd.DataFrame(average_rows)
@@ -484,13 +491,13 @@ def _build_markdown(
 
     return "\n".join(
         [
-            f"# Ensemble3 Replay-Distill {protocol_id} Final Report",
+            f"# Ensemble3 {METHOD_NAMES.get(str(shared_context['method']), str(shared_context['method']))} {protocol_id} Final Report",
             "",
             "## Experiment",
             "",
             f"- Protocol: {protocol_id} `{protocol_name}`",
             f"- Method: `{shared_context['method']}`",
-            "- Backbone: `tddi_paper_member`",
+            f"- Backbone: `{backbone_name}`",
             f"- Experiment seed: `{shared_context['experiment_seed']}`",
             f"- Ensemble members: `{list(shared_context['member_ids'])}`",
             f"- Member seeds: `{list(shared_context['member_seeds'])}`",
@@ -499,6 +506,8 @@ def _build_markdown(
             "## Average metrics",
             "",
             "Mỗi task có trọng số bằng nhau trong bảng trung bình này.",
+            "Nếu threshold không giữ mẫu test nào, coverage là 0 và selective metrics là n.a.; "
+            "trung bình selective chỉ tính các task có metric xác định. Full-coverage metrics vẫn được báo cáo đầy đủ.",
             "",
             _markdown_table(average_table),
             "",
@@ -506,7 +515,7 @@ def _build_markdown(
             "",
             "`new_class_test_samples` là số test mẫu thuộc các class mới của task; "
             "`full_samples` là toàn bộ test mẫu của các class đã thấy đến boundary đó.",
-            "Tên `task_0_tail`/`task_7_head` là nhãn diễn giải; raw class ID vẫn là khóa chính.",
+            "Ordered: task 0 chứa head classes, task 7 chứa tail classes; Shuffled giữ thứ tự class seed 0.",
             "",
             _markdown_table(paper_table),
             "",
@@ -610,7 +619,7 @@ def _atomic_write_text(text: str, path: Path) -> None:
 def build_final_report(
     *,
     full_root: str | Path,
-    task_file: str | Path,
+    task_file: str | Path | None = None,
     outdir: str | Path | None = None,
     member_ids: Sequence[int] = EXPECTED_MEMBER_IDS,
     overwrite: bool = False,
@@ -618,12 +627,44 @@ def build_final_report(
     """Build all derived tables and the Markdown report from completed artifacts."""
 
     full_root = Path(full_root)
-    task_file = Path(task_file)
     outdir = full_root / "final_results" if outdir is None else Path(outdir)
     if tuple(member_ids) != EXPECTED_MEMBER_IDS:
         raise ValueError("This Ensemble3 report requires member IDs exactly [0, 1, 2].")
-    task_groups, task_metadata = _load_task_groups(task_file)
+    if task_file is None:
+        manifest_path = full_root / "full_manifest.json"
+        metadata = _read_json(manifest_path).get("protocol") if manifest_path.is_file() else None
+        if metadata is None:
+            run = _read_json(full_root / "member_0" / "run_config.json")
+            metadata = run.get("resolved", {}).get("task_spec")
+        if not isinstance(metadata, dict):
+            raise ValueError("Run lacks task protocol metadata; supply --task-file explicitly.")
+        protocol_name = metadata.get("name", metadata.get("protocol"))
+        if protocol_name not in SUPPORTED_PROTOCOLS:
+            raise ValueError("Expected head_to_tail or shuffled protocol.")
+        task_groups = [[int(c) for c in t["classes"]] for t in metadata["tasks"]]
+        if len(task_groups) != 8 or len({c for g in task_groups for c in g}) != sum(map(len, task_groups)):
+            raise ValueError("Run protocol must contain eight tasks with disjoint classes.")
+        task_metadata = {**metadata, "protocol": protocol_name}
+        task_hash = metadata.get("sha256")
+        if task_hash is None:
+            run = _read_json(full_root / "member_0" / "run_config.json")
+            task_hash = run["resolved"]["task_file_sha256"]
+    else:
+        task_file = Path(task_file)
+        task_groups, task_metadata = _load_task_groups(task_file)
+        task_hash = hashlib.sha256(task_file.read_bytes()).hexdigest()
     protocol_name = str(task_metadata["protocol"])
+    backbone_names: set[str] = set()
+    for member_id in member_ids:
+        run_path = full_root / f"member_{member_id}" / "run_config.json"
+        if run_path.is_file():
+            resolved = _read_json(run_path).get("resolved", {})
+            if resolved.get("model", {}).get("variant"):
+                backbone_names.add(str(resolved["model"]["variant"]))
+            if resolved.get("task_protocol", protocol_name) != protocol_name:
+                raise ValueError("Report protocol differs from the member's frozen run.")
+            if resolved.get("task_file_sha256", task_hash) != task_hash:
+                raise ValueError("Report task hash differs from the member's frozen run.")
     protocol_id, output_prefix = SUPPORTED_PROTOCOLS[protocol_name]
     paths = _prepare_outputs(
         outdir,
@@ -638,6 +679,8 @@ def build_final_report(
     for task_id, task_classes in enumerate(task_groups):
         seen_classes.update(task_classes)
         artifact = load_offline_ensemble_artifact(_ensemble_path(full_root, task_id))
+        if artifact.member_provenance is not None and any(p.task_file_sha256 != task_hash for p in artifact.member_provenance):
+            raise ValueError("Report task protocol hash does not match prediction provenance.")
         shared_context = _validate_ensemble_context(
             artifact,
             task_id=task_id,
@@ -707,6 +750,7 @@ def build_final_report(
         shared_context=shared_context,
         protocol_id=protocol_id,
         protocol_name=protocol_name,
+        backbone_name=", ".join(sorted(backbone_names)) if backbone_names else "tddi_paper_member",
     )
 
     _atomic_write_csv(task_summary, paths["task_summary"])
@@ -722,12 +766,12 @@ def build_final_report(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Build an expanded P3/P4 final report from existing ensemble/threshold/"
+            "Build an expanded Ordered/Shuffled LT-CIL final report from existing ensemble/threshold/"
             "forgetting artifacts; no training or inference is performed."
         )
     )
-    parser.add_argument("--full-root", type=Path, default=DEFAULT_FULL_ROOT)
-    parser.add_argument("--task-file", type=Path, default=DEFAULT_TASK_FILE)
+    parser.add_argument("--full-root", type=Path, required=True)
+    parser.add_argument("--task-file", type=Path, help="Optional override; otherwise read the frozen run protocol.")
     parser.add_argument("--outdir", type=Path)
     parser.add_argument(
         "--overwrite",

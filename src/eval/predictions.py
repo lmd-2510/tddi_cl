@@ -150,7 +150,11 @@ def _validate_provenance(
         raise ValueError("Prediction preprocessing/ranking/buffer provenance must be non-empty.")
     if provenance.preprocessing_member_id != context.member_id:
         raise ValueError("Prediction preprocessing artifact belongs to the wrong member.")
-    if not 0 < provenance.member_memory_budget <= provenance.global_memory_budget:
+    no_memory_ewc = (
+        context.method == "ewc" and provenance.buffer_policy == "ewc_no_examples_v1"
+        and provenance.member_memory_budget == provenance.global_memory_budget == 0
+    )
+    if not no_memory_ewc and not 0 < provenance.member_memory_budget <= provenance.global_memory_budget:
         raise ValueError("Prediction memory budgets are invalid.")
     if provenance.expected_partition_rows != sample_ids.shape[0]:
         raise ValueError("Prediction row coverage does not match expected partition rows.")

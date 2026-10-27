@@ -17,6 +17,7 @@ import uuid
 import numpy as np
 
 from src.data.ddi_dataset import DevelopmentFoldContext, iter_development_fold_arrays
+from src.data.task_protocols import SUPPORTED_PROTOCOLS, expected_seed
 from src.utils.seed import resolve_seed_configuration
 
 
@@ -40,22 +41,15 @@ def _digest(value) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
-SUPPORTED_PROTOCOLS = {
-    "head_to_tail": None,
-    "tail_to_head": None,
-    "constrained_mass_balanced": 0,
-}
-
-
 def _task0(path: str | Path) -> tuple[str, str, list[int]]:
     content = Path(path).read_bytes()
     payload = json.loads(content)
     protocol = payload.get("protocol") if isinstance(payload, dict) else None
     if protocol not in SUPPORTED_PROTOCOLS:
-        raise ValueError("Expected a supported P2 head_to_tail, P3 tail_to_head, or P4 constrained_mass_balanced task file.")
-    expected_seed = SUPPORTED_PROTOCOLS[protocol]
-    if payload.get("seed") != expected_seed:
-        raise ValueError(f"Task-file protocol={protocol} requires seed={expected_seed!r}.")
+        raise ValueError("Expected a head_to_tail or shuffled task file.")
+    protocol_seed = expected_seed(protocol)
+    if payload.get("seed") != protocol_seed:
+        raise ValueError(f"Task-file protocol={protocol} requires seed={protocol_seed!r}.")
     tasks = payload.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("Task file must contain tasks starting at task 0.")
@@ -71,7 +65,7 @@ def _task0(path: str | Path) -> tuple[str, str, list[int]]:
         all_classes.extend(classes)
     if len(all_classes) != len(set(all_classes)):
         raise ValueError("Duplicate class IDs in task file.")
-    # Small synthetic P3/P4-prefix files are supported here; full-study layout guards
+    # Small synthetic task prefixes are supported here; full-study layout guards
     # belong to the later study config, not this general preprocessing primitive.
     return hashlib.sha256(content).hexdigest(), protocol, tasks[0]["classes"]
 

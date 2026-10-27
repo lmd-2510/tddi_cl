@@ -4,6 +4,7 @@ Reference: https://arxiv.org/abs/1812.00420.
 """
 
 from __future__ import annotations
+from typing import Sequence
 
 import torch
 
@@ -47,3 +48,52 @@ def project_agem_gradient(
         # product; this guard only protects against extreme numerical noise.
         return current_gradient.clone()
     return current_gradient - (dot_product / reference_squared_norm) * reference_gradient
+
+
+def trainable_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
+    """Return trainable parameters in the stable order used by gradient vectors."""
+
+    return [parameter for parameter in model.parameters() if parameter.requires_grad]
+
+def flatten_gradients(
+    parameters: Sequence[torch.nn.Parameter],
+    gradients: Sequence[torch.Tensor | None] | None = None,
+) -> torch.Tensor:
+    """Flatten parameter gradients, replacing unused gradients with zeros."""
+
+    if gradients is not None and len(gradients) != len(parameters):
+        raise ValueError("gradients and parameters must have the same length.")
+    blocks: list[torch.Tensor] = []
+    for index, parameter in enumerate(parameters):
+        gradient = parameter.grad if gradients is None else gradients[index]
+        if gradient is None:
+            blocks.append(torch.zeros_like(parameter).reshape(-1))
+        else:
+            blocks.append(gradient.detach().reshape(-1))
+    if not blocks:
+        raise ValueError("Cannot flatten gradients for an empty parameter list.")
+    return torch.cat(blocks).clone()
+
+def assign_gradients(
+    parameters: Sequence[torch.nn.Parameter],
+    gradient_vector: torch.Tensor,
+) -> None:
+    """Copy one flat vector back into ``parameter.grad`` tensors."""
+
+    if gradient_vector.ndim != 1:
+        raise ValueError("gradient_vector must be one-dimensional.")
+    expected = sum(parameter.numel() for parameter in parameters)
+    if gradient_vector.numel() != expected:
+        raise ValueError(
+            f"Gradient length mismatch: expected {expected}, got {gradient_vector.numel()}."
+        )
+
+    offset = 0
+    for parameter in parameters:
+        count = parameter.numel()
+        block = gradient_vector[offset : offset + count].view_as(parameter)
+        if parameter.grad is None:
+            parameter.grad = block.clone()
+        else:
+            parameter.grad.copy_(block)
+        offset += count

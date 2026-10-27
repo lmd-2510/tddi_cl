@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.data.ddi_dataset import prepare_development_fold_context, transform_features
+from src.data.ddi_dataset import prepare_development_fold_context
 from src.data import fold_preprocessing as prep
 from src.data.stratified_folds import FOLD_ASSIGNMENT_SCHEMA, describe_fold_source, fold_file_sha256, save_fold_artifact
 
@@ -34,7 +34,7 @@ def data(tmp_path):
     save_fold_artifact(tmp_path / "folds", pa.Table.from_pylist(rows, schema=FOLD_ASSIGNMENT_SCHEMA),
                        sources={s: describe_fold_source(p) for s, p in paths.items()}, fold_seed=42)
     task = tmp_path / "tasks.json"
-    task.write_text(json.dumps({"protocol": "tail_to_head", "tasks": [
+    task.write_text(json.dumps({"protocol": "head_to_tail", "tasks": [
         {"task_id": 0, "classes": [10]}, {"task_id": 1, "classes": [57, 901]}]}))
     return paths, tmp_path / "folds", task
 
@@ -87,14 +87,14 @@ def test_raw_identity_no_fake_fit_and_same_ab_rows(data):
 
 def test_p4_task_file_fits_and_loads_with_p4_provenance(data, tmp_path):
     payload = json.loads(data[2].read_text())
-    payload["protocol"] = "constrained_mass_balanced"
+    payload["protocol"] = "shuffled"
     payload["seed"] = 0
     p4_task = tmp_path / "p4_tasks.json"
     p4_task.write_text(json.dumps(payload))
     p4_data = data[0], data[1], p4_task
 
     artifact = prep.prepare_fold_preprocessing(**args(p4_data))
-    assert artifact.metadata["provenance"]["protocol"] == "constrained_mass_balanced"
+    assert artifact.metadata["provenance"]["protocol"] == "shuffled"
     path = prep.save_fold_preprocessing(artifact, tmp_path / "p4_preprocessing")
     loaded = prep.load_fold_preprocessing(path, **args(p4_data))
     assert loaded.metadata == artifact.metadata
@@ -149,13 +149,6 @@ def test_streaming_fit_batches_are_bounded(data, monkeypatch):
     assert sum(sizes) == 4 and len(sizes) > 1
 
 
-@pytest.mark.parametrize("kind", ["standard", "robust"])
-def test_legacy_scaler_still_imputes_and_returns_float32(kind):
-    payload = {"scaler_type": kind, "impute_values": [4.0, 6.0],
-               "scale": [2.0, 3.0], "mean": [2.0, 3.0], "center": [2.0, 3.0]}
-    result = transform_features(np.array([[np.nan, np.inf], [6.0, 9.0]]), payload)
-    assert result.dtype == np.float32
-    np.testing.assert_array_equal(result, [[1, 1], [2, 2]])
 
 
 def rewrite_source(data, split, edit):

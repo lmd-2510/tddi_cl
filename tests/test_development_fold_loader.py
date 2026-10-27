@@ -9,7 +9,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from src.data.ddi_dataset import (
-    load_development_fold_arrays, load_development_fold_identity, load_split_arrays,
+    load_development_fold_arrays, load_development_fold_identity,
+    load_development_fold_pair, load_split_arrays,
     prepare_development_fold_context,
 )
 from src.data import stratified_folds as folds
@@ -49,6 +50,31 @@ def load(context, member=0, role="train", **kwargs):
     return load_development_fold_arrays(
         context, ["y", "x"], role=role, member_id=member, validation_fold=member, **kwargs,
     )
+
+
+@pytest.mark.parametrize("member", [0, 1, 2])
+def test_pair_loader_matches_separate_fold_views(frozen, member):
+    paths, assignment, manifest, _ = frozen
+    lookup = folds.load_fold_artifact(
+        assignment, manifest, source_paths=paths,
+    ).to_lookup()
+    current_classes = [10, 57]
+    seen_classes = [10, 57, 901]
+    current, validation = load_development_fold_pair(
+        (paths["train"], paths["validation"]), ["y", "x"], lookup,
+        fold_id=member, current_class_ids=current_classes,
+        seen_class_ids=seen_classes, batch_size=2,
+    )
+    context = prepare(frozen)
+    expected_current = load(context, member, "train", class_ids=current_classes)
+    expected_validation = load(context, member, "validation", class_ids=seen_classes)
+    np.testing.assert_array_equal(current.features, expected_current.features)
+    np.testing.assert_array_equal(current.labels, expected_current.labels)
+    np.testing.assert_array_equal(validation.features, expected_validation.features)
+    np.testing.assert_array_equal(validation.labels, expected_validation.labels)
+    for key in ("drugid-drug_a", "drugid-drug_b"):
+        np.testing.assert_array_equal(current.metadata[key], expected_current.metadata[key])
+        np.testing.assert_array_equal(validation.metadata[key], expected_validation.metadata[key])
 
 
 @pytest.mark.parametrize("member", [0, 1, 2])

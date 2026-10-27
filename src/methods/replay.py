@@ -1,21 +1,23 @@
-"""Replay helper."""
-
+"""Classification objective for Class-Balanced Fixed-Budget Replay (CB-Replay)."""
 from __future__ import annotations
 
-import numpy as np
+import torch
+import torch.nn.functional as F
+
+METHOD_NAME = "class_balanced_fixed_budget_replay"
+LOSS_VARIANT = "focal_current_ce_replay"
 
 
-METHOD_NAME = "replay"
+def classification_loss(logits, labels, old_class_indices=(), *, gamma=1.0):
+    """Mean Focal loss on current examples and CE on retained old examples.
 
-
-def build_training_arrays(
-    current_features: np.ndarray,
-    current_raw_labels: np.ndarray,
-    replay_features: np.ndarray,
-    replay_raw_labels: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    if replay_features.size == 0:
-        return current_features, current_raw_labels
-    features = np.concatenate([current_features, replay_features], axis=0)
-    labels = np.concatenate([current_raw_labels, replay_raw_labels], axis=0)
-    return features, labels
+    Both groups use the full seen-class head. Each draw contributes once to the
+    batch mean, preserving the replay sampler's requested exposure ratio.
+    """
+    log_probs = F.log_softmax(logits, dim=1)
+    target_log_probs = log_probs.gather(1, labels[:, None]).squeeze(1)
+    focal = -((1.0 - target_log_probs.exp()) ** gamma) * target_log_probs
+    old_indices = torch.as_tensor(list(old_class_indices), device=labels.device, dtype=torch.long)
+    replay_mask = torch.isin(labels, old_indices)
+    ce = -target_log_probs
+    return torch.where(replay_mask, ce, focal).mean()

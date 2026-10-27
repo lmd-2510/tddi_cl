@@ -27,8 +27,11 @@ def compute_fisher(model, loader, device: str) -> dict[str, "torch.Tensor"]:
         features = features.to(device)
         labels = labels.to(device)
         model.zero_grad(set_to_none=True)
-        logits = model(features)
-        loss = criterion(logits, labels)
+        if hasattr(model, "classification_loss"):
+            _, loss = model.classification_loss(features, labels, criterion)
+        else:
+            logits = model(features)
+            loss = criterion(logits, labels)
         loss.backward()
         batch_size = labels.shape[0]
         for name, param in model.named_parameters():
@@ -76,6 +79,9 @@ def grow_head_state(
         new_tensor = torch.zeros_like(reference) if zero_new_rows else reference.clone()
         for raw_class_id, previous_index in previous_seen_map.items():
             current_index = current_seen_map[raw_class_id]
-            new_tensor[current_index] = old_state[name][previous_index]
+            if reference_state["head.weight"].ndim == 3:
+                new_tensor[..., current_index] = old_state[name][..., previous_index]
+            else:
+                new_tensor[current_index] = old_state[name][previous_index]
         grown[name] = new_tensor
     return grown

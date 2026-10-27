@@ -18,6 +18,35 @@ from src.eval.ensemble_ue import (
 )
 
 
+def test_zero_test_coverage_reports_undefined_selective_metrics(tmp_path):
+    full_root, task_file = _build_fixture(tmp_path)
+    report_path = full_root / "threshold/task_1/test_report.json"
+    report = json.loads(report_path.read_text())
+    report["threshold"]["value"] = .99999
+    report["threshold_score_selective_metrics"].update(
+        selected_count=0, coverage=0., accuracy=None, macro_f1=None)
+    report_path.write_text(json.dumps(report))
+    paths = build_final_report(full_root=full_root, task_file=task_file)
+    summary = pd.read_csv(paths["task_summary"])
+    row = summary.loc[summary["task_id"] == 1].iloc[0]
+    assert row["coverage"] == 0 and row["selected_count"] == 0
+    assert pd.isna(row["threshold_macro_f1"]) and pd.isna(row["threshold_accuracy"])
+    assert np.isfinite(row["full_macro_f1"])
+    assert "Tasks with defined metric" in paths["report"].read_text(encoding="utf-8")
+
+
+def test_zero_test_coverage_rejects_fabricated_zero_f1(tmp_path):
+    full_root, task_file = _build_fixture(tmp_path)
+    report_path = full_root / "threshold/task_1/test_report.json"
+    report = json.loads(report_path.read_text())
+    report["threshold"]["value"] = .99999
+    report["threshold_score_selective_metrics"].update(
+        selected_count=0, coverage=0., accuracy=None, macro_f1=0.)
+    report_path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="threshold Macro-F1"):
+        build_final_report(full_root=full_root, task_file=task_file)
+
+
 def _member(
     *,
     task_id: int,
@@ -30,8 +59,8 @@ def _member(
     return MemberPredictionArtifact(
         context=MemberPredictionContext(
             run_id=f"member-{member_id}-run",
-            method="replay_distill_fixed_budget_uniform",
-            method_protocol="replay_distill_fixed_budget_uniform",
+            method="class_balanced_fixed_budget_replay",
+            method_protocol="class_balanced_fixed_budget_replay",
             task_id=task_id,
             split="test",
             member_id=member_id,
@@ -101,7 +130,7 @@ def _write_task_artifact(
             "score_name": "entropy_confidence",
             "probability_source": "raw",
             "value": 0.0,
-            "source_split": "validation",
+            "source_split": "oof",
         },
         "full_set": {
             "sample_count": len(labels),
@@ -164,7 +193,7 @@ def _write_member_forgetting(full_root: Path) -> None:
 def _build_fixture(
     tmp_path: Path,
     *,
-    protocol: str = "tail_to_head",
+    protocol: str = "head_to_tail",
 ) -> tuple[Path, Path]:
     full_root = tmp_path / "full"
     task_file = tmp_path / "tasks.json"
@@ -270,16 +299,16 @@ def test_builds_extended_report_without_training(tmp_path: Path) -> None:
 def test_builds_p4_report_with_protocol_specific_names(tmp_path: Path) -> None:
     full_root, task_file = _build_fixture(
         tmp_path,
-        protocol="constrained_mass_balanced",
+        protocol="shuffled",
     )
 
     paths = build_final_report(full_root=full_root, task_file=task_file)
 
-    assert paths["report"].name == "ensemble3_p4_final_report.md"
-    assert paths["task_summary"].name == "ensemble3_p4_task_summary.csv"
+    assert paths["report"].name == "ensemble3_shuffled_final_report.md"
+    assert paths["task_summary"].name == "ensemble3_shuffled_task_summary.csv"
     report = paths["report"].read_text(encoding="utf-8")
-    assert "Replay-Distill P4 Final Report" in report
-    assert "Protocol: P4 `constrained_mass_balanced`" in report
+    assert "CB-Replay SHUFFLED Final Report" in report
+    assert "Protocol: SHUFFLED `shuffled`" in report
 
 
 def test_refuses_existing_outputs_without_explicit_overwrite(tmp_path: Path) -> None:

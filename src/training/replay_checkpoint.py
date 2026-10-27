@@ -1,49 +1,70 @@
-"""Versioned task-boundary checkpointing for fixed-budget replay distillation."""
-
+"""Strict frozen-fold task-boundary checkpoints for CB-Replay, EWC and A-GEM."""
 from __future__ import annotations
-
 import os
+import random
 import uuid
 import hashlib
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-
 import numpy as np
 import torch
 
-from src.data.class_mapping import validate_dense_class_map
-from src.data.fixed_budget_replay import FixedBudgetReplayBuffer
-from src.training.ewc_checkpoint import capture_rng_state, restore_rng_state
+def capture_rng_state() -> dict[str, Any]:
+    """Capture all RNG streams needed to continue at the next task boundary."""
 
+    cuda_states = (
+        [state.detach().cpu().clone() for state in torch.cuda.get_rng_state_all()]
+        if torch.cuda.is_available()
+        else []
+    )
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.random.get_rng_state().detach().cpu().clone(),
+        "torch_cuda": cuda_states,
+        "torch_cuda_device_count": len(cuda_states),
+    }
 
-REPLAY_CHECKPOINT_SCHEMA_VERSION = 1
-REPLAY_CHECKPOINT_KIND = "ddi_cil_replay_distill_task_boundary"
-REPLAY_METHOD = "replay_distill_fixed_budget_uniform"
-REPLAY_SEED_METADATA_KEYS = {
-    "experiment_seed",
-    "member_id",
-    "member_seed",
-    "member_seed_derivation",
-    "seed_mode",
-}
+def restore_rng_state(rng_state: Mapping[str, Any]) -> None:
+    """Restore a state produced by :func:`capture_rng_state`."""
 
+    required = {
+        "python",
+        "numpy",
+        "torch_cpu",
+        "torch_cuda",
+        "torch_cuda_device_count",
+    }
+    missing = sorted(required - set(rng_state))
+    if missing:
+        raise ValueError(f"RNG state is missing keys: {missing}")
+    torch_cpu = rng_state["torch_cpu"]
+    if not isinstance(torch_cpu, torch.Tensor) or torch_cpu.dtype != torch.uint8:
+        raise TypeError("torch_cpu RNG state must be a uint8 tensor.")
+    cuda_states = rng_state["torch_cuda"]
+    if not isinstance(cuda_states, list) or not all(
+        isinstance(state, torch.Tensor) and state.dtype == torch.uint8
+        for state in cuda_states
+    ):
+        raise TypeError("torch_cuda RNG states must be a list of uint8 tensors.")
+    declared_cuda_count = int(rng_state["torch_cuda_device_count"])
+    if declared_cuda_count != len(cuda_states):
+        raise ValueError("CUDA RNG state count does not match its metadata.")
+    if cuda_states:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Cannot restore a CUDA checkpoint without CUDA.")
+        if torch.cuda.device_count() != declared_cuda_count:
+            raise RuntimeError(
+                "CUDA device count differs from the checkpoint: "
+                f"{torch.cuda.device_count()} != {declared_cuda_count}."
+            )
 
-@dataclass(frozen=True)
-class LoadedReplayCheckpoint:
-    run_id: str
-    completed_task_id: int
-    next_task_id: int
-    model_state: dict[str, torch.Tensor]
-    seen_class_map: dict[int, int]
-    seen_raw_classes: tuple[int, ...]
-    replay_buffer_state: dict[str, Any]
-    seed_metadata: dict[str, int | str | None]
-    config: dict[str, Any]
-    rng_state: dict[str, Any]
-    progress: dict[str, Any]
-
+    random.setstate(rng_state["python"])
+    np.random.set_state(rng_state["numpy"])
+    torch.random.set_rng_state(torch_cpu.cpu())
+    if cuda_states:
+        torch.cuda.set_rng_state_all([state.cpu() for state in cuda_states])
 
 def _cpu_tensor_mapping(
     state: Mapping[str, torch.Tensor],
@@ -59,356 +80,13 @@ def _cpu_tensor_mapping(
         copied[key] = value.detach().cpu().clone()
     return copied
 
-
 def _mapping_mismatches(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> list[str]:
     keys = sorted(set(expected) | set(actual))
     missing = object()
     return [key for key in keys if expected.get(key, missing) != actual.get(key, missing)]
 
-
-def capture_fixed_replay_buffer(buffer: FixedBudgetReplayBuffer) -> dict[str, Any]:
-    """Capture retained exemplars without changing their per-class order."""
-
-    features, raw_labels = buffer.get_all()
-    return {
-        "total_memory_budget": int(buffer.total_memory_budget),
-        "random_seed": int(buffer.random_seed),
-        "features": np.asarray(features, dtype=np.float32).copy(),
-        "raw_labels": np.asarray(raw_labels, dtype=np.int64).copy(),
-        "available_count_by_class": {
-            int(class_id): int(count)
-            for class_id, count in buffer.available_count_by_class.items()
-        },
-    }
-
-
-def _validate_buffer_state(
-    state: Any,
-    *,
-    expected_seen_class_map: Mapping[int, int] | None = None,
-    expected_total_memory_budget: int | None = None,
-    expected_random_seed: int | None = None,
-) -> dict[str, Any]:
-    if not isinstance(state, Mapping):
-        raise TypeError("Replay replay_buffer_state must be a mapping.")
-    required = {
-        "total_memory_budget",
-        "random_seed",
-        "features",
-        "raw_labels",
-        "available_count_by_class",
-    }
-    missing = sorted(required - set(state))
-    if missing:
-        raise ValueError(f"Replay replay_buffer_state is missing keys: {missing}")
-
-    budget = int(state["total_memory_budget"])
-    random_seed = int(state["random_seed"])
-    if budget <= 0:
-        raise ValueError("Replay total_memory_budget must be positive.")
-    if expected_total_memory_budget is not None and budget != int(expected_total_memory_budget):
-        raise ValueError(
-            "Replay memory budget mismatch: "
-            f"{budget} != {int(expected_total_memory_budget)}."
-        )
-    if expected_random_seed is not None and random_seed != int(expected_random_seed):
-        raise ValueError(
-            f"Replay buffer seed mismatch: {random_seed} != {int(expected_random_seed)}."
-        )
-
-    features = np.asarray(state["features"])
-    raw_labels = np.asarray(state["raw_labels"])
-    if features.dtype != np.float32 or features.ndim != 2:
-        raise TypeError("Replay retained features must be a two-dimensional float32 array.")
-    if raw_labels.dtype != np.int64 or raw_labels.shape != (features.shape[0],):
-        raise TypeError("Replay retained raw labels must be an aligned int64 array.")
-    if features.shape[0] == 0 or not np.isfinite(features).all():
-        raise ValueError("Replay retained features must be non-empty and finite.")
-
-    raw_available = state["available_count_by_class"]
-    if not isinstance(raw_available, Mapping) or not raw_available:
-        raise ValueError("Replay available_count_by_class must be a non-empty mapping.")
-    available = {int(class_id): int(count) for class_id, count in raw_available.items()}
-    if any(count <= 0 for count in available.values()):
-        raise ValueError("Replay available class counts must be positive.")
-    retained_classes = {int(class_id) for class_id in np.unique(raw_labels)}
-    if retained_classes != set(available):
-        raise ValueError("Replay retained classes do not match available_count_by_class.")
-    if expected_seen_class_map is not None and retained_classes != {
-        int(class_id) for class_id in expected_seen_class_map
-    }:
-        raise ValueError("Replay buffer classes do not match seen_class_map.")
-    for class_id, available_count in available.items():
-        retained_count = int(np.count_nonzero(raw_labels == class_id))
-        if retained_count <= 0 or retained_count > available_count:
-            raise ValueError(
-                f"Replay retained count is invalid for class {class_id}: "
-                f"{retained_count} of {available_count}."
-            )
-    expected_size = min(budget, sum(available.values()))
-    if features.shape[0] != expected_size:
-        raise ValueError(
-            "Replay retained size does not match its feasible fixed budget: "
-            f"{features.shape[0]} != {expected_size}."
-        )
-    return {
-        "total_memory_budget": budget,
-        "random_seed": random_seed,
-        "features": features.copy(),
-        "raw_labels": raw_labels.copy(),
-        "available_count_by_class": available,
-    }
-
-
-def restore_fixed_replay_buffer(
-    state: Mapping[str, Any],
-    *,
-    expected_seen_class_map: Mapping[int, int] | None = None,
-    expected_total_memory_budget: int | None = None,
-    expected_random_seed: int | None = None,
-) -> FixedBudgetReplayBuffer:
-    """Rebuild an exact fixed-budget buffer from checkpoint state."""
-
-    validated = _validate_buffer_state(
-        state,
-        expected_seen_class_map=expected_seen_class_map,
-        expected_total_memory_budget=expected_total_memory_budget,
-        expected_random_seed=expected_random_seed,
-    )
-    buffer = FixedBudgetReplayBuffer(
-        total_memory_budget=validated["total_memory_budget"],
-        random_seed=validated["random_seed"],
-    )
-    buffer.available_count_by_class = dict(validated["available_count_by_class"])
-    features = validated["features"]
-    raw_labels = validated["raw_labels"]
-    buffer.features_by_class = {
-        class_id: features[raw_labels == class_id].copy()
-        for class_id in sorted(buffer.available_count_by_class)
-    }
-    return buffer
-
-
-def _validate_payload(
-    payload: Any,
-    *,
-    expected_seed_metadata: Mapping[str, int | str | None] | None,
-    expected_config: Mapping[str, Any] | None,
-    expected_seen_class_map: Mapping[int, int] | None,
-) -> LoadedReplayCheckpoint:
-    if not isinstance(payload, dict):
-        raise TypeError("Replay checkpoint payload must be a dictionary.")
-    required = {
-        "schema_version",
-        "kind",
-        "run_id",
-        "completed_task_id",
-        "next_task_id",
-        "model_state",
-        "seen_class_map",
-        "seen_raw_classes",
-        "replay_buffer_state",
-        "seed_metadata",
-        "config",
-        "rng_state",
-        "progress",
-    }
-    missing = sorted(required - set(payload))
-    if missing:
-        raise ValueError(f"Replay checkpoint is missing keys: {missing}")
-    if payload["schema_version"] != REPLAY_CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError(
-            "Unsupported replay checkpoint schema version: "
-            f"{payload['schema_version']} != {REPLAY_CHECKPOINT_SCHEMA_VERSION}."
-        )
-    if payload["kind"] != REPLAY_CHECKPOINT_KIND:
-        raise ValueError(f"Unexpected replay checkpoint kind: {payload['kind']!r}.")
-
-    run_id = payload["run_id"]
-    if not isinstance(run_id, str) or not run_id:
-        raise ValueError("Replay checkpoint run_id must be a non-empty string.")
-    completed_task_id = int(payload["completed_task_id"])
-    next_task_id = int(payload["next_task_id"])
-    if completed_task_id < 0 or next_task_id != completed_task_id + 1:
-        raise ValueError("Replay next_task_id must equal completed_task_id + 1.")
-    model_state = _cpu_tensor_mapping(payload["model_state"], name="model_state")
-
-    raw_class_map = payload["seen_class_map"]
-    if not isinstance(raw_class_map, Mapping) or not raw_class_map:
-        raise ValueError("Replay seen_class_map must be a non-empty mapping.")
-    seen_class_map = {int(raw): int(index) for raw, index in raw_class_map.items()}
-    validate_dense_class_map(seen_class_map)
-    if expected_seen_class_map is not None:
-        normalized_expected = {int(raw): int(index) for raw, index in expected_seen_class_map.items()}
-        if seen_class_map != normalized_expected:
-            raise ValueError("Replay seen_class_map does not match expected task classes.")
-
-    raw_order = payload["seen_raw_classes"]
-    if not isinstance(raw_order, (list, tuple)):
-        raise TypeError("Replay seen_raw_classes must be a sequence.")
-    seen_raw_classes = tuple(int(class_id) for class_id in raw_order)
-    expected_order = tuple(raw for raw, _ in sorted(seen_class_map.items(), key=lambda item: item[1]))
-    if seen_raw_classes != expected_order:
-        raise ValueError("Replay raw class order does not match seen_class_map columns.")
-
-    seed_metadata = payload["seed_metadata"]
-    config = payload["config"]
-    progress = payload["progress"]
-    if not isinstance(seed_metadata, dict):
-        raise TypeError("Replay seed_metadata must be a dictionary.")
-    missing_seed_keys = sorted(REPLAY_SEED_METADATA_KEYS - set(seed_metadata))
-    if missing_seed_keys:
-        raise ValueError(f"Replay seed_metadata is missing keys: {missing_seed_keys}")
-    if not isinstance(config, dict) or not config:
-        raise ValueError("Replay config must be a non-empty dictionary.")
-    if config.get("method") != REPLAY_METHOD:
-        raise ValueError(f"Replay checkpoint method must be {REPLAY_METHOD!r}.")
-    if not isinstance(progress, dict):
-        raise TypeError("Replay progress must be a dictionary.")
-    if expected_seed_metadata is not None:
-        mismatches = _mapping_mismatches(expected_seed_metadata, seed_metadata)
-        if mismatches:
-            raise ValueError(f"Replay seed metadata mismatch for keys: {mismatches}")
-    if expected_config is not None:
-        mismatches = _mapping_mismatches(expected_config, config)
-        if mismatches:
-            raise ValueError(f"Replay resume config mismatch for keys: {mismatches}")
-
-    replay_buffer_state = _validate_buffer_state(
-        payload["replay_buffer_state"],
-        expected_seen_class_map=seen_class_map,
-        expected_total_memory_budget=config.get("total_memory_budget"),
-        expected_random_seed=seed_metadata.get("experiment_seed"),
-    )
-    rng_state = payload["rng_state"]
-    if not isinstance(rng_state, dict):
-        raise TypeError("Replay rng_state must be a dictionary.")
-    live_rng = capture_rng_state()
-    try:
-        restore_rng_state(rng_state)
-    finally:
-        restore_rng_state(live_rng)
-
-    return LoadedReplayCheckpoint(
-        run_id=run_id,
-        completed_task_id=completed_task_id,
-        next_task_id=next_task_id,
-        model_state=model_state,
-        seen_class_map=seen_class_map,
-        seen_raw_classes=seen_raw_classes,
-        replay_buffer_state=replay_buffer_state,
-        seed_metadata=dict(seed_metadata),
-        config=dict(config),
-        rng_state=dict(rng_state),
-        progress=dict(progress),
-    )
-
-
-def save_replay_checkpoint(
-    path: str | Path,
-    *,
-    run_id: str,
-    completed_task_id: int,
-    model_state: Mapping[str, torch.Tensor],
-    seen_class_map: Mapping[int, int],
-    seen_raw_classes: list[int] | tuple[int, ...],
-    replay_buffer: FixedBudgetReplayBuffer,
-    seed_metadata: Mapping[str, int | str | None],
-    config: Mapping[str, Any],
-    progress: Mapping[str, Any] | None = None,
-) -> Path:
-    """Atomically publish the latest complete fixed-replay task state."""
-
-    path = Path(path)
-    if not run_id:
-        raise ValueError("Replay checkpoint run_id must be non-empty.")
-    completed_task_id = int(completed_task_id)
-    if completed_task_id < 0:
-        raise ValueError("Replay completed_task_id must be non-negative.")
-    missing_seed_keys = sorted(REPLAY_SEED_METADATA_KEYS - set(seed_metadata))
-    if missing_seed_keys:
-        raise ValueError(f"Replay seed_metadata is missing keys: {missing_seed_keys}")
-    if not config or config.get("method") != REPLAY_METHOD:
-        raise ValueError(f"Replay config method must be {REPLAY_METHOD!r}.")
-    normalized_class_map = {int(raw): int(index) for raw, index in seen_class_map.items()}
-    validate_dense_class_map(normalized_class_map)
-    expected_order = tuple(raw for raw, _ in sorted(normalized_class_map.items(), key=lambda item: item[1]))
-    normalized_order = tuple(int(class_id) for class_id in seen_raw_classes)
-    if normalized_order != expected_order:
-        raise ValueError("Replay raw class order does not match seen_class_map columns.")
-
-    replay_buffer_state = _validate_buffer_state(
-        capture_fixed_replay_buffer(replay_buffer),
-        expected_seen_class_map=normalized_class_map,
-        expected_total_memory_budget=config.get("total_memory_budget"),
-        expected_random_seed=seed_metadata.get("experiment_seed"),
-    )
-    payload = {
-        "schema_version": REPLAY_CHECKPOINT_SCHEMA_VERSION,
-        "kind": REPLAY_CHECKPOINT_KIND,
-        "run_id": run_id,
-        "completed_task_id": completed_task_id,
-        "next_task_id": completed_task_id + 1,
-        "model_state": _cpu_tensor_mapping(model_state, name="model_state"),
-        "seen_class_map": normalized_class_map,
-        "seen_raw_classes": list(normalized_order),
-        "replay_buffer_state": replay_buffer_state,
-        "seed_metadata": dict(seed_metadata),
-        "config": dict(config),
-        "rng_state": capture_rng_state(),
-        "progress": dict(progress or {}),
-    }
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary_path.open("wb") as handle:
-            torch.save(payload, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
-    return path
-
-
-def load_replay_checkpoint(
-    path: str | Path,
-    *,
-    expected_seed_metadata: Mapping[str, int | str | None] | None = None,
-    expected_config: Mapping[str, Any] | None = None,
-    expected_seen_class_map: Mapping[int, int] | None = None,
-) -> LoadedReplayCheckpoint:
-    """Load and validate one fixed-replay task-boundary checkpoint on CPU."""
-
-    path = Path(path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing replay resume checkpoint: {path}")
-    try:
-        payload = torch.load(path, map_location="cpu", weights_only=False)
-    except Exception as exc:
-        raise ValueError(f"Could not load replay checkpoint {path}: {exc}") from exc
-    return _validate_payload(
-        payload,
-        expected_seed_metadata=expected_seed_metadata,
-        expected_config=expected_config,
-        expected_seen_class_map=expected_seen_class_map,
-    )
-
-
-def restore_replay_model(
-    model: torch.nn.Module,
-    checkpoint: LoadedReplayCheckpoint,
-) -> torch.nn.Module:
-    """Restore the boundary model; callers may clone/freeze it as the teacher."""
-
-    model.load_state_dict(checkpoint.model_state, strict=True)
-    return model
-
-
-# Separate kind and entrypoints: do not weaken/change the legacy schema above.
-FOLD_REPLAY_CHECKPOINT_KIND = "ddi_cil_frozen_fold_replay_task_boundary"
-FOLD_REPLAY_CHECKPOINT_VERSION = 1
+FOLD_REPLAY_CHECKPOINT_KIND = "ddi_cil_frozen_fold_method_task_boundary"
+FOLD_REPLAY_CHECKPOINT_VERSION = 2
 
 
 def fold_state_digest(value: Any) -> str:
@@ -485,7 +163,7 @@ def validate_fold_artifacts(root: Path, inventory: Mapping[str, str]) -> None:
 def save_fold_replay_checkpoint(path: str | Path, *, run_id: str, completed_task_id: int,
         model_state: Mapping[str, torch.Tensor], seen_class_map: Mapping[int, int],
         contract: dict, buffer, sampler, progress: dict, artifact_hashes: dict,
-        run_config_sha256: str) -> Path:
+        method_state: dict, run_config_sha256: str) -> Path:
     """Commit a task AFTER best-model evaluation/buffer update and artifact publication."""
     payload = {
         "kind": FOLD_REPLAY_CHECKPOINT_KIND, "schema_version": FOLD_REPLAY_CHECKPOINT_VERSION,
@@ -495,7 +173,7 @@ def save_fold_replay_checkpoint(path: str | Path, *, run_id: str, completed_task
         "seen_class_map": dict(seen_class_map),
         "raw_class_order": [raw for raw, _ in sorted(seen_class_map.items(), key=lambda p: p[1])],
         "contract": contract, "buffer_state": buffer.state_dict(), "sampler_state": sampler.state_dict(),
-        "rng_state": capture_rng_state(), "progress": progress, "artifact_hashes": artifact_hashes,
+        "method_state": method_state, "rng_state": capture_rng_state(), "progress": progress, "artifact_hashes": artifact_hashes,
         "run_config_sha256": run_config_sha256,
         "next_task_scheduling": {"task_id": completed_task_id + 1, "epoch": 0,
             "policy": "reset_from_new_current_and_retained_IDs_with_member_task_key",
@@ -512,8 +190,8 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
     Local torch checkpoints must be trusted: like the legacy API they contain
     NumPy/Python RNG state and are loaded with weights_only=False.
     """
-    from src.data.fold_replay_buffer import FoldSqrtReplayBuffer
-    from src.data.fold_replay_sampler import FoldReplayFractionSampler
+    from src.training.regularization_memory import restore_memory
+    from src.data.replay_sampler import FoldReplayFractionSampler
     from src.data.stratified_folds import fold_file_sha256
     path, root = Path(path).resolve(), Path(root).resolve()
     try:
@@ -528,7 +206,7 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
         required = {"kind", "schema_version", "run_id", "completed_task_id", "next_task_id",
             "full_trajectory_complete", "model_state", "seen_class_map", "raw_class_order",
             "contract", "buffer_state", "sampler_state", "rng_state", "progress", "artifact_hashes",
-            "run_config_sha256", "next_task_scheduling", "state_sha256"}
+            "run_config_sha256", "next_task_scheduling", "method_state", "state_sha256"}
         if set(state) != required:
             raise ValueError("Unexpected/missing frozen-fold checkpoint fields.")
         if state["state_sha256"] != fold_state_digest({k: v for k, v in state.items() if k != "state_sha256"}):
@@ -551,9 +229,16 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
                 or any(type(k) is not int or type(v) is not int for k, v in state["seen_class_map"].items())):
             raise ValueError("Frozen-fold class map/raw class order mismatch.")
         model = state["model_state"]
-        if (model["head.weight"].ndim != 2 or model["head.weight"].shape[0] != len(classes)
-                or tuple(model["head.bias"].shape) != (len(classes),)
-                or not all(isinstance(v, torch.Tensor) and torch.isfinite(v).all() for v in model.values())):
+        manifest = expected_contract.get("model", {})
+        if manifest.get("variant") == "tabm":
+            expected_weight = (manifest["k"], manifest["d_block"], len(classes))
+            expected_bias = (manifest["k"], len(classes))
+            valid_head = tuple(model["head.weight"].shape) == expected_weight and tuple(model["head.bias"].shape) == expected_bias
+        elif manifest.get("variant") == "realmlp_td":
+            valid_head = tuple(model["head.weight"].shape) == (len(classes), manifest["hidden_dims"][-1]) and tuple(model["head.bias"].shape) == (len(classes),)
+        else:
+            valid_head = model["head.weight"].ndim == 2 and model["head.weight"].shape[0] == len(classes) and tuple(model["head.bias"].shape) == (len(classes),)
+        if not valid_head or not all(isinstance(v, torch.Tensor) and torch.isfinite(v).all() for v in model.values()):
             raise ValueError("Frozen-fold model/head shape or finite-state mismatch.")
         config_path = root / "run_config.json"
         if fold_file_sha256(config_path) != state["run_config_sha256"]:
@@ -574,10 +259,11 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             if not task_dir.is_relative_to(root):
                 raise ValueError("Task artifact directory escapes run root.")
             epoch_count = summary["epochs_trained"]
-            if type(epoch_count) is not int or not 1 <= epoch_count <= expected_contract["hyperparameters"]["epochs"]:
+            epoch_limit = expected_contract["hyperparameters"]["epochs"]
+            if type(epoch_count) is not int or epoch_count < 1 or (epoch_limit is not None and epoch_count > epoch_limit):
                 raise ValueError("Invalid completed epoch count.")
             required_files = {"completed_task.json", "best_model.pt", "input_audit.json", "buffer_audit.json",
-                              "weight_alignment.json", "metrics.json", "metrics.csv", "training_audit.csv"}
+                              "metrics.json", "metrics.csv", "training_audit.csv"}
             required_files.update(f"epoch_{e}_audit.json" for e in range(1, epoch_count + 1))
             if any((task_dir / f).relative_to(root).as_posix() not in state["artifact_hashes"] for f in required_files):
                 raise ValueError("Missing task completion evidence in checkpoint inventory.")
@@ -594,7 +280,7 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             metric_rows = [r for r in progress["metric_rows"] if r["task"] == task_id]
             if json.loads((task_dir / "metrics.json").read_text(encoding="utf-8")) != metric_rows:
                 raise ValueError("Frozen-fold metric progress mismatch.")
-        restored = FoldSqrtReplayBuffer.from_state_dict(state["buffer_state"], **buffer_kwargs)
+        restored = restore_memory(state["buffer_state"], **buffer_kwargs)
         if restored.next_task_id != completed + 1 or set(restored.observed_counts) != set(classes):
             raise ValueError("Frozen-fold buffer task/classes mismatch.")
         last_dir = root / summaries[-1]["artifact_directory"]
@@ -606,7 +292,8 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
         audit = json.loads((last_dir / "input_audit.json").read_text(encoding="utf-8"))
         kwargs = dict(current_sample_ids=audit["current_ids"], replay_sample_ids=audit["replay_ids_before"],
             replay_raw_labels=audit["replay_raw_labels_before"], experiment_seed=expected_contract["seeds"]["experiment_seed"],
-            member_id=expected_contract["seeds"]["member_id"], task_id=completed)
+            member_id=expected_contract["seeds"]["member_id"], task_id=completed,
+            replay_fraction=expected_contract["sampler"]["replay_fraction"], repeat_cap=expected_contract["sampler"]["repeat_cap"])
         sampler = FoldReplayFractionSampler.from_state_dict(state["sampler_state"], **kwargs)
         if sampler.state_dict()["next_epoch"] != summaries[-1]["epochs_trained"]:
             raise ValueError("Completed sampler epoch mismatch.")
@@ -615,6 +302,20 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             "loader_seed": expected_contract["seeds"]["member_seed"] + completed + 1}
         if state["next_task_scheduling"] != expected_schedule:
             raise ValueError("Next-task scheduling mismatch.")
+        method_state = state["method_state"]
+        if expected_contract["method"] == "ewc":
+            if set(method_state) != {"fisher", "theta_star"}:
+                raise ValueError("EWC checkpoint requires Fisher and parameter anchors.")
+            for name in ("fisher", "theta_star"):
+                if set(method_state[name]) != set(model):
+                    raise ValueError("EWC state parameter coverage mismatch.")
+                for key, tensor in method_state[name].items():
+                    if tensor.shape != model[key].shape or not torch.isfinite(tensor).all():
+                        raise ValueError("EWC state shape/finite mismatch.")
+                    if name == "fisher" and (tensor < 0).any():
+                        raise ValueError("EWC Fisher must be nonnegative.")
+        elif method_state:
+            raise ValueError("Unexpected method state.")
         # Validate RNG without changing caller's streams or consuming randomness.
         before = capture_rng_state()
         try:

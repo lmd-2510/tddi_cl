@@ -1,11 +1,11 @@
-# DDI-CIL — T-DDI Ensemble3 Replay-Distill
+# DDI-CIL — T-DDI CB-Replay / EWC / A-GEM
 
 Repository hiện tập trung vào study:
 
 ```text
-replay_distill_fixed_budget_uniform
+class_balanced_fixed_budget_replay
 × tddi_paper_member ensemble 3
-× P3 tail-to-head
+× Ordered hoặc Shuffled LT-CIL
 × experiment seed 0
 × 8 task / 178 class
 ```
@@ -46,23 +46,34 @@ sang head mới theo raw class ID.
 Backbone này là paper-size numerical CIL member. Repository không tuyên bố toàn bộ
 training recipe là bản tái tạo chính xác paper T-DDI.
 
-## Replay và distillation
+## Fixed-budget replay
 
-Method chính là `replay_distill_fixed_budget_uniform`:
+Method Replay chính thức là `class_balanced_fixed_budget_replay` (CB-Replay), một biến thể dành cho long-tail:
 
-- Tổng ngân sách ba replay buffer là 4% development data: 27.778 slots.
-- Member 0/1/2 lần lượt có ngân sách 9.260/9.259/9.259 slots.
+- Buffer chia đều dung lượng khả dụng theo class; ranking bằng raw sample-normalized class mean.
+
+- Mỗi member có replay buffer bằng 4% development data: 27.778 slots.
 - Exemplar cũ được trộn với dữ liệu task hiện tại từ task 1.
 - Replay mục tiêu chiếm 12,5% số draws mỗi epoch, repeat cap 3/exemplar.
-- Classification sử dụng Focal Loss với `gamma=1.0`.
-- Frozen teacher từ task trước cung cấp logit distillation với `alpha=1.0` và
-  `temperature=2.0`.
-- Feature distillation dùng MSE với trọng số `0.5`.
+- Current samples dùng Focal Loss với `gamma=1.0`.
+- Replay samples dùng Cross-Entropy.
+- Baseline chính thức không dùng logit hoặc feature distillation.
 - Checkpoint được lưu ở task boundary để có thể resume đúng task tiếp theo.
 
-Replay cung cấp lại bằng chứng thật của class cũ; distillation giữ phân phối đầu ra và
-latent representation gần teacher trước đó. Hai cơ chế phối hợp nhằm giảm forgetting,
-nhưng forgetting vẫn phải được đo thực nghiệm sau toàn bộ trajectory.
+Replay cung cấp lại bằng chứng thật của class cũ nhằm giảm forgetting; hiệu quả vẫn
+được đo sau toàn bộ trajectory tám task.
+
+## Ba method chính thức
+
+- CB-Replay: Focal current + CE replay; buffer equal-class, ranking sample-normalized class mean.
+- EWC: Cross-Entropy + online Fisher penalty; không lưu exemplar. Mặc định lambda = 1000.
+- A-GEM: Cross-Entropy trên current data; chiếu gradient theo minibatch memory ngẫu nhiên.
+  Memory chọn seeded uniform từng task, tổng dung lượng tối đa 27.778 mẫu/member;
+  reference minibatch mặc định 256. Memory chỉ lưu raw features và ID/label.
+
+Cả ba dùng frozen fold/preprocessing và checkpoint `task_N.pt`.
+Config JSON giữ baseline CB-Replay; chọn `--method ewc` hoặc `--method agem` khi
+gọi launcher để dùng cùng hai protocol và cùng preprocessing, với output namespace riêng.
 
 ## Ensemble3 và uncertainty estimation
 
@@ -76,7 +87,7 @@ Study huấn luyện ba member độc lập và tuần tự:
 
 `experiment_seed=0` giữ protocol, task order, class map và cách dựng fold. Mỗi member
 giữ hai fold để train, fold còn lại để validation; vì tập train khác nhau nên scaler
-B và exemplar IDs cũng riêng theo member. `member_seed` điều khiển initialization,
+và exemplar IDs cũng riêng theo member. `member_seed` điều khiển initialization,
 dropout và sampler/DataLoader order.
 
 Ba member không phải ba experiment seed. Chúng thuộc cùng một experiment seed và được
@@ -94,25 +105,35 @@ Offline ensemble tuyệt đối không trung bình raw logits. Các uncertainty/
 metric gồm predictive entropy, mutual information, probability variance và pairwise
 disagreement.
 
-## Protocol P3
+## Hai protocol LT-CIL chính thức
 
-P3 sử dụng `tail_to_head`: các class hiếm được đưa vào trước, class phổ biến được đưa
-vào sau.
+Repo chỉ hỗ trợ hai protocol lấy theo hai scenario của paper *Long-Tailed Class
+Incremental Learning* (ECCV 2022):
+
+- `head_to_tail` — Ordered LT-CIL: sắp class theo số mẫu train giảm dần, vì vậy
+  task đầu chứa head class và task cuối tiến dần về tail class.
+- `shuffled` — Shuffled LT-CIL: lấy cùng danh sách class long-tail, xáo trộn bằng
+  seed cố định rồi mới cắt thành các task. Mỗi task có mức mất cân bằng tự nhiên khác nhau.
+
+Đây là cách áp dụng quy tắc thứ tự của paper lên tần suất tự nhiên của DDI. Repo giữ
+layout 8 task hiện tại, không sao chép layout CIFAR/ImageNet của paper.
 
 ```text
 Task layout: [38, 20, 20, 20, 20, 20, 20, 20]
 Total:       178 raw classes
 ```
 
-Task schedule đã đóng băng:
+Hai task schedule canonical đã đóng băng:
 
 ```text
-study_assets/task_protocols/tail_to_head_tasks.json
+study_assets/task_protocols/head_to_tail_tasks.json
+study_assets/task_protocols/shuffled_seed0_tasks.json
 ```
 
-P3 task-file có `seed: null` vì tail-to-head được xác định từ tần suất class, không
-dùng random permutation. Experiment seed vẫn được lưu trong manifest để đảm bảo
-provenance của study.
+`head_to_tail` có `seed: null` vì thứ tự được xác định từ tần suất class. `shuffled`
+luôn ghi seed tạo thứ tự; asset canonical hiện dùng seed 0. Các protocol cũ
+`tail_to_head`, `frequency_balanced` và `constrained_mass_balanced` không còn hợp lệ
+cho run mới.
 
 ## Study assets và outputs
 
@@ -121,39 +142,46 @@ provenance của study.
 ```text
 study_assets/
 ├── data_schema/
-│   └── feature_columns.json   # đúng 3.780 feature và đúng thứ tự
-├── preprocessing/
-│   └── scaler.pkl             # StandardScaler fit chỉ trên train split
+│   ├── feature_columns.json   # đúng 3.780 feature và đúng thứ tự
+│   └── global_class_map.json  # raw class ID → dense index để audit
+├── stratified_3fold_seed42/
+│   ├── fold_assignments.parquet
+│   └── fold_manifest.json
+├── preprocessing_<protocol>_seed0_fold42/
+│   └── member_<0|1|2>/
+│       └── fold_preprocessing.json  # fit Task 0 train của từng member rồi freeze
 └── task_protocols/
-    └── tail_to_head_tasks.json
+    ├── head_to_tail_tasks.json
+    └── shuffled_seed0_tasks.json
 ```
 
 `outputs/` chỉ dành cho artifact sinh ra khi chạy:
 
 ```text
-outputs/full/                  # full study
-outputs/pilot/                 # pilot runs
-outputs/smoke/                 # smoke tests
-outputs/remote_preflight/      # kiểm tra máy GPU
+outputs/ordered_cb_replay_seed0/
+outputs/shuffled_cb_replay_seed0/
+outputs/head_to_tail_ewc_seed0/
+outputs/shuffled_ewc_seed0/
+outputs/head_to_tail_agem_seed0/
+outputs/shuffled_agem_seed0/
 ```
 
-Các namespace output lớn được Git ignore. Không xóa `outputs/full` trên server nếu còn
+Các namespace output lớn được Git ignore. Không xóa run directory trên server nếu còn
 cần checkpoint, resume, member predictions hoặc báo cáo đã tạo.
 
 ## Config stratified 3-fold hiện tại
 
-Repo chỉ giữ các config full gắn với kết quả P3 và run P4 kế tiếp:
+Chỉ có ba config chính thức. Hai config train dùng cùng một baseline, chỉ khác
+protocol, preprocessing artifact và output namespace:
 
 ```text
-configs/full_tddi_p3_fold_ensemble3_seed0.json
-configs/full_tddi_p3_fold_ensemble3_seed0_epochs25.json
-configs/full_tddi_p3_fold_ensemble3_seed0_replay12p5.json
-configs/full_tddi_p4_fold_ensemble3_seed0.json
+configs/ordered_baseline.json
+configs/shuffled_seed0_baseline.json
+configs/eval_macro_f1_entropy.json
 ```
 
-Các config smoke/pilot đã hoàn thành vai trò kiểm chứng kỹ thuật và đã được loại bỏ.
-Hướng dẫn chạy P4 hiện tại nằm tại
-`docs/TDDI_P4_EPOCH20_MEMBER0_RUNBOOK.md`.
+Các launcher Bash và Python controller theo method cũ đã được loại khỏi `scripts/`.
+Run mới dùng hai protocol và ba config chính thức ở trên.
 
 Thông số chính:
 
@@ -162,7 +190,7 @@ Thông số chính:
 | Microbatch | 64 |
 | Effective batch | 1024 |
 | Gradient accumulation | 16 |
-| Epoch tối đa | 20/task |
+| Epoch tối đa | 30/task |
 | Early-stopping patience | 5 |
 | Optimizer | AdamW |
 | Learning rate | 0.001 |
@@ -170,23 +198,28 @@ Thông số chính:
 | Dropout | 0.2 |
 | Activation | GELU |
 | Input normalization | LayerNorm |
-| Replay memory | Tổng 4% development: 9.260 / 9.259 / 9.259 slots |
+| Replay memory | 4% development cho mỗi member: 27.778 slots/member |
 | Replay mỗi epoch | Mục tiêu 12,5%, repeat cap 3 |
 | Preprocessing | StandardScaler riêng từng member, fit task 0 rồi freeze |
 | Exemplar ranking | Sample-normalized class mean |
 
 ## Scripts chuẩn bị dữ liệu
 
-`scripts/` chỉ giữ sáu utility có ích để tái tạo hoặc kiểm tra study asset:
+`scripts/` chỉ giữ utility dữ liệu, preprocessing, cache và visualization; không còn
+Bash launcher hay Python controller huấn luyện theo method:
 
 | Script | Khi nào cần dùng |
 | --- | --- |
 | `convert_csv_to_parquet.py` | Khi máy mới chỉ có dataset CSV |
 | `inspect_splits.py` | Khi cần audit schema/tạo lại feature list |
-| `preprocess_features.py` | Khi cần fit lại scaler từ train split |
 | `analyze_class_distribution.py` | Khi cần tính lại tần suất class |
-| `build_cil_tasks.py` | Khi cần tạo lại P3/P4 task schedule |
+| `build_cil_tasks.py` | Tạo lại Ordered head-to-tail và Shuffled task schedule |
 | `check_leakage.py` | Khi cần kiểm tra overlap/leakage giữa các split |
+| `build_stratified_3fold_assignments.py` | Tạo stratified 3-fold assignment |
+| `audit_development_folds.py` | Kiểm tra fold assignment với Parquet nguồn |
+| `prepare_fold_preprocessing.py` | Fit preprocessing task-0 riêng cho từng member rồi freeze |
+| `build_source_shard_cache.py` | Tạo source-shard cache cho pipeline mới |
+| `visualize_cil_run.py` | Tạo biểu đồ chẩn đoán từ artifact sau train |
 
 Các script này không chạy trong mỗi epoch. Với full run hiện tại, training đọc thẳng
 asset đã đóng băng trong `study_assets/`.
@@ -198,12 +231,25 @@ model và không train:
 
 ```bash
 python src/training/fold_ensemble3_full.py \
-  --config configs/full_tddi_p3_fold_ensemble3_seed0.json \
+  --config configs/ordered_baseline.json \
   --member-id 0
 ```
 
 Chỉ thêm `--execute` khi thực sự muốn chạy trên máy GPU. Ba member phải chạy tuần tự,
 không giữ hai model trên GPU đồng thời.
+
+Chạy cùng protocol với EWC hoặc A-GEM (dry-run):
+
+```bash
+python src/training/fold_ensemble3_full.py --config configs/ordered_baseline.json --method ewc
+python src/training/fold_ensemble3_full.py --config configs/shuffled_seed0_baseline.json --method agem
+```
+
+Đổi `--preprocessing-root`, `--fold-assignments`, `--fold-manifest`, `--train`,
+`--validation`, `--test` khi asset nằm ở thư mục khác trên server.
+Preprocessing nằm tại `member_N/fold_preprocessing.json`, không còn thư mục case `B`.
+Bật source/task cache bằng `CIL_SOURCE_SHARD_CACHE_ROOT` và `CIL_COMMON_TASK_CACHE_ROOT`;
+mỗi protocol có cache riêng, provenance sai sẽ bị từ chối.
 
 ## Nguyên tắc đánh giá
 
@@ -228,20 +274,50 @@ Ba ensemble member không được dùng thay cho nhiều experiment seed. Muố
 `mean ± sample standard deviation` qua năm seed, cần chạy đầy đủ experiment seed 0–4,
 mỗi seed gồm ba member riêng.
 
-## Tài liệu chính
+## Tổng kết kết quả sau train
 
-1. `docs/TDDI_P4_EPOCH20_MEMBER0_RUNBOOK.md` — P4: một controller ngắn để prepare, nohup 0 → 1 → 2, ensemble/UE và final report.
-2. `docs/ensemble3_p3_final_report.md` — báo cáo P3 baseline.
-3. `docs/ensemble3_p3_12,5%_final_report.md` — báo cáo P3 được giữ để đối chiếu.
-4. `docs/TDDI_ENSEMBLE3_REPLAY_DISTILL_P3_RESULTS.md` — tổng hợp kết quả P3 và giải thích metric.
+Đầu mối báo cáo chính thức là `src/eval/report.py`. File này chỉ đọc artifact đã hoàn
+tất; nó không train và không chạy inference. Nó tạo Markdown report và các bảng CSV
+cho metric từng task, forgetting của ensemble/member và ensemble diversity/uncertainty.
 
-Final report mở rộng được dựng lại từ artifact đã có bằng:
+Report tự đọc protocol từ full manifest/run config. Có thể truyền `--task-file` khi cần chỉ định rõ.
+
+Với Ordered LT-CIL:
 
 ```bash
 python src/eval/report.py \
-  --full-root outputs/stratified_ensemble3/full_p3_seed0_8tasks \
-  --task-file study_assets/task_protocols/tail_to_head_tasks.json \
+  --full-root outputs/ordered_cb_replay_seed0 \
   --overwrite
 ```
 
 Lệnh này không train, không inference và không cần GPU.
+
+Với Shuffled LT-CIL:
+
+```bash
+python src/eval/report.py \
+  --full-root /absolute/path/to/completed_run \
+  --overwrite
+```
+
+Kết quả được ghi vào `<full-root>/final_results/`.
+
+## Cấu trúc source hiện tại
+
+```text
+fold_ensemble3_full.py → fold_ensemble3_runner.py → fold_run_setup.py
+                                                   ↓
+                                              train_cil.py
+                                                   ↓
+                                              fold_training.py
+```
+
+`src/methods/` chỉ còn `replay.py`, `ewc.py`, `agem.py`.
+`class_balanced_replay_buffer.py` lưu exemplar, `replay_sampler.py` lập lịch draws;
+`regularization_memory.py` quản lý memory A-GEM và trạng thái không exemplar của EWC.
+`replay_checkpoint.py` lưu checkpoint chung của cả ba method.
+
+Đã bỏ teacher/distillation, sqrt quota, pipeline-input ranking, rotating-current,
+GEM, DER++, WA và prepared-cache cũ. Checkpoint/config/threshold schema cũ không còn
+tương thích; run mới dùng namespace mới, không tiếp tục checkpoint lịch sử.
+Fold assignments và preprocessing phải được chuẩn bị trên dữ liệu server trước khi train.

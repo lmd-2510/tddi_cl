@@ -7,7 +7,7 @@ visible placeholder figure and a warning in visualization_manifest.json.
 
 Example:
     python scripts/visualize_cil_run.py \
-        --run-root outputs/p3_hybrid_full8_e30_mem4_seed0 --ensemble
+        --run-root outputs/ordered_cb_replay_seed0 --ensemble
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from src.eval.predictions import load_member_prediction_artifact
 from src.eval.ensemble_ue import load_offline_ensemble_artifact
 
 
-DEFAULT_TASK_FILE = ROOT / "study_assets" / "task_protocols" / "tail_to_head_tasks.json"
+DEFAULT_TASK_FILE = ROOT / "study_assets" / "task_protocols" / "head_to_tail_tasks.json"
 
 
 def _save(fig: plt.Figure, path: Path) -> None:
@@ -91,10 +91,10 @@ def _load_task_info(
         info: dict[int, dict[str, Any]] = {}
         for task in tasks:
             task_id = int(task["task_id"])
-            if protocol == "tail_to_head":
-                stage = "tail" if task_id == 0 else "head" if task_id == len(tasks) - 1 else "mid"
+            if protocol == "head_to_tail":
+                stage = "head" if task_id == 0 else "tail" if task_id == len(tasks) - 1 else "mid"
             else:
-                stage = "balanced"
+                stage = "shuffled"
             for raw in task.get("classes", []):
                 raw_id = int(raw)
                 info[raw_id] = {
@@ -150,16 +150,16 @@ def _task_sample_counts(
     source_paths: dict[str, Path],
     fallback_test_labels: np.ndarray | None,
     warnings: list[str],
-    protocol: str = "tail_to_head",
+    protocol: str = "head_to_tail",
 ) -> pd.DataFrame:
     task_ids = sorted({int(meta["task_id"]) for meta in task_info.values()})
     rows = []
     for task_id in task_ids:
         classes = sorted(raw for raw, meta in task_info.items() if int(meta["task_id"]) == task_id)
         stage = (
-            "tail" if protocol == "tail_to_head" and task_id == 0 else
-            "head" if protocol == "tail_to_head" and task_id == task_ids[-1] else
-            "balanced" if protocol == "constrained_mass_balanced" else "mid"
+            "head" if protocol == "head_to_tail" and task_id == 0 else
+            "tail" if protocol == "head_to_tail" and task_id == task_ids[-1] else
+            "shuffled" if protocol == "shuffled" else "mid"
         )
         row: dict[str, Any] = {
             "task_id": task_id,
@@ -619,7 +619,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     fallback_labels = None if final_prediction is None else final_prediction["labels"]
     task_counts = _task_sample_counts(
         run_root, task_info, source_paths, fallback_labels, warnings,
-        str(task_metadata.get("protocol", "tail_to_head")),
+        str(task_metadata.get("protocol", "head_to_tail")),
     )
     task_counts.to_csv(outdir / "task_sample_counts.csv", index=False)
     generated.append(str(outdir / "task_sample_counts.csv"))

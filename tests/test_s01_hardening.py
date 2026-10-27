@@ -11,7 +11,6 @@ import torch
 
 from src.training.train_cil import (
     _git_state,
-    build_student_old_indices,
     ordered_raw_classes,
 )
 from src.utils.logging import RunLogger, ensure_run_paths
@@ -48,10 +47,7 @@ class ClassAlignmentRegressionTest(unittest.TestCase):
         features = torch.randn(8, 5)
 
         teacher_raw_classes = ordered_raw_classes(old_map)
-        student_old_indices = build_student_old_indices(
-            teacher_raw_classes,
-            current_map,
-        )
+        student_old_indices = [current_map[raw] for raw in teacher_raw_classes]
         with torch.no_grad():
             teacher_logits = previous_model(features)
             aligned_student_logits = expanded_model(features)[:, student_old_indices]
@@ -67,13 +63,6 @@ class ClassAlignmentRegressionTest(unittest.TestCase):
             atol=1e-7,
         )
 
-    def test_rejects_invalid_teacher_class_order_metadata(self) -> None:
-        with self.assertRaisesRegex(ValueError, "duplicates"):
-            build_student_old_indices([6, 6], {6: 0})
-        with self.assertRaisesRegex(ValueError, "missing"):
-            build_student_old_indices([6, 11], {6: 0})
-        with self.assertRaisesRegex(ValueError, "dense"):
-            ordered_raw_classes({6: 0, 11: 2})
 
 
 class RunProvenanceTest(unittest.TestCase):

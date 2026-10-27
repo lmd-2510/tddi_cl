@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
-import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from src.data.sample_identity import (
+    DRUG_ID_A_COLUMN,
+    DRUG_ID_B_COLUMN,
+    build_stable_sample_ids,
+)
 
 try:
     import torch
@@ -83,13 +88,6 @@ def load_feature_columns(path: str | Path) -> list[str]:
     return columns
 
 
-def load_scaler_payload(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("rb") as handle:
-        payload = pickle.load(handle)
-    if not isinstance(payload, dict) or "scaler_type" not in payload:
-        raise ValueError(f"Invalid scaler payload: {path}")
-    return payload
-
 
 def load_class_counts(
     parquet_path: str | Path,
@@ -106,35 +104,6 @@ def load_class_counts(
     }
 
 
-def apply_imputation(values: np.ndarray, scaler_payload: dict[str, Any]) -> np.ndarray:
-    impute_values = np.asarray(scaler_payload["impute_values"], dtype=np.float64)
-    nonfinite_mask = ~np.isfinite(values)
-    if nonfinite_mask.any():
-        values = np.where(nonfinite_mask, impute_values, values)
-    return values
-
-
-def transform_features(values: np.ndarray, scaler_payload: dict[str, Any]) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float64)
-    values = apply_imputation(values, scaler_payload)
-    scaler_type = scaler_payload["scaler_type"]
-
-    if scaler_type == "standard":
-        mean = np.asarray(scaler_payload["mean"], dtype=np.float64)
-        scale = np.asarray(scaler_payload["scale"], dtype=np.float64)
-        transformed = (values - mean) / scale
-    elif scaler_type == "robust":
-        center = np.asarray(scaler_payload["center"], dtype=np.float64)
-        scale = np.asarray(scaler_payload["scale"], dtype=np.float64)
-        transformed = (values - center) / scale
-    else:
-        raise ValueError(f"Unsupported scaler_type: {scaler_type}")
-
-    pca_components = scaler_payload.get("pca_components")
-    if pca_components is not None:
-        transformed = transformed @ np.asarray(pca_components, dtype=np.float64)
-
-    return transformed.astype(np.float32, copy=False)
 
 
 def _read_table(
@@ -193,7 +162,6 @@ def load_split_arrays(
     *,
     label_col: str = DEFAULT_LABEL_COL,
     class_ids: Iterable[int] | None = None,
-    scaler_payload: dict[str, Any] | None = None,
     include_metadata: bool = False,
     meta_cols: list[str] | None = None,
     max_rows: int | None = None,
@@ -217,10 +185,7 @@ def load_split_arrays(
         max_rows=max_rows,
     )
     features = frame[feature_columns].to_numpy(dtype=np.float64, copy=False)
-    if scaler_payload is not None:
-        features = transform_features(features, scaler_payload)
-    else:
-        features = features.astype(np.float32, copy=False)
+    features = features.astype(np.float32, copy=False)
 
     labels = frame[label_col].to_numpy(dtype=np.int64, copy=False)
     metadata: dict[str, np.ndarray] | None = None
@@ -286,7 +251,6 @@ def build_dataset(
     *,
     label_col: str = DEFAULT_LABEL_COL,
     class_ids: Iterable[int] | None = None,
-    scaler_payload: dict[str, Any] | None = None,
     include_metadata: bool = False,
     meta_cols: list[str] | None = None,
     max_rows: int | None = None,
@@ -298,7 +262,6 @@ def build_dataset(
         feature_columns=feature_columns,
         label_col=label_col,
         class_ids=class_ids,
-        scaler_payload=scaler_payload,
         include_metadata=include_metadata,
         meta_cols=meta_cols,
         max_rows=max_rows,
@@ -557,6 +520,132 @@ def load_development_fold_arrays(
         metadata={key: np.concatenate([part.metadata[key] for part in parts])
                   for key in parts[0].metadata},
     )
+
+
+def load_development_fold_pair(
+    parquet_paths: Sequence[str | Path],
+    feature_columns: list[str],
+    assignments: Any,
+    *,
+    fold_id: int,
+    current_class_ids: Iterable[int],
+    seen_class_ids: Iterable[int],
+    max_train_rows: int | None = None,
+    max_validation_rows: int | None = None,
+    batch_size: int = 2048,
+) -> tuple[DDIBatchArrays, DDIBatchArrays]:
+    """Load a frozen-fold train/validation pair in one source pass.
+
+    The legacy trainer used to call ``load_development_fold_arrays`` twice:
+    once for current training rows and once for held-out validation rows. Each
+    call scanned both development Parquets and materialized intermediate
+    Pandas frames. This function routes both roles while each source is being
+    streamed once with Arrow. It does not fit preprocessing or read test data.
+
+    ``assignments`` is deliberately duck-typed to avoid importing the fold
+    module here (which imports this dataset module). It must provide the
+    validated ``lookup(sample_ids)`` method.
+    """
+
+    if len(parquet_paths) != 2:
+        raise ValueError("Frozen-fold loading requires train and validation Parquets.")
+    if not 0 <= int(fold_id) < int(assignments.fold_count):
+        raise ValueError("fold_id is outside the configured fold range.")
+    if not feature_columns or len(set(feature_columns)) != len(feature_columns):
+        raise ValueError("feature_columns must be non-empty and unique.")
+    current_set = {int(value) for value in current_class_ids}
+    seen_set = {int(value) for value in seen_class_ids}
+    if not current_set or not seen_set:
+        raise ValueError("Current and seen class selections must be non-empty.")
+
+    train_features: list[np.ndarray] = []
+    train_labels: list[np.ndarray] = []
+    train_meta_a: list[np.ndarray] = []
+    train_meta_b: list[np.ndarray] = []
+    validation_features: list[np.ndarray] = []
+    validation_labels: list[np.ndarray] = []
+    validation_meta_a: list[np.ndarray] = []
+    validation_meta_b: list[np.ndarray] = []
+    train_rows = validation_rows = 0
+    columns = [*feature_columns, DEFAULT_LABEL_COL, DRUG_ID_A_COLUMN, DRUG_ID_B_COLUMN]
+
+    for parquet_path in parquet_paths:
+        parquet = pq.ParquetFile(parquet_path)
+        for batch in parquet.iter_batches(columns=columns, batch_size=batch_size):
+            table = pa.Table.from_batches([batch])
+            labels = table[DEFAULT_LABEL_COL].to_numpy().astype(np.int64, copy=False)
+            meta_a = table[DRUG_ID_A_COLUMN].to_numpy(zero_copy_only=False)
+            meta_b = table[DRUG_ID_B_COLUMN].to_numpy(zero_copy_only=False)
+            sample_ids = build_stable_sample_ids(
+                {DRUG_ID_A_COLUMN: meta_a, DRUG_ID_B_COLUMN: meta_b},
+                len(labels),
+            )
+            fold_values = np.asarray(assignments.lookup(sample_ids), dtype=np.int16)
+            train_mask = (fold_values != fold_id) & np.isin(labels, list(current_set))
+            validation_mask = (fold_values == fold_id) & np.isin(labels, list(seen_set))
+            if max_train_rows is not None:
+                remaining = max_train_rows - train_rows
+                if remaining <= 0:
+                    train_mask.fill(False)
+                elif int(train_mask.sum()) > remaining:
+                    selected = np.flatnonzero(train_mask)
+                    train_mask.fill(False)
+                    train_mask[selected[:remaining]] = True
+            if max_validation_rows is not None:
+                remaining = max_validation_rows - validation_rows
+                if remaining <= 0:
+                    validation_mask.fill(False)
+                elif int(validation_mask.sum()) > remaining:
+                    selected = np.flatnonzero(validation_mask)
+                    validation_mask.fill(False)
+                    validation_mask[selected[:remaining]] = True
+
+            if train_mask.any():
+                selected = table.filter(pa.array(train_mask))
+                values = np.column_stack([
+                    selected[column].to_numpy(zero_copy_only=False)
+                    for column in feature_columns
+                ]).astype(np.float64, copy=False)
+                values = values.astype(np.float32, copy=False)
+                train_features.append(values)
+                train_labels.append(selected[DEFAULT_LABEL_COL].to_numpy().astype(np.int64, copy=False))
+                train_meta_a.append(selected[DRUG_ID_A_COLUMN].to_numpy(zero_copy_only=False))
+                train_meta_b.append(selected[DRUG_ID_B_COLUMN].to_numpy(zero_copy_only=False))
+                train_rows += int(values.shape[0])
+
+            if validation_mask.any():
+                selected = table.filter(pa.array(validation_mask))
+                values = np.column_stack([
+                    selected[column].to_numpy(zero_copy_only=False)
+                    for column in feature_columns
+                ]).astype(np.float64, copy=False)
+                values = values.astype(np.float32, copy=False)
+                validation_features.append(values)
+                validation_labels.append(selected[DEFAULT_LABEL_COL].to_numpy().astype(np.int64, copy=False))
+                validation_meta_a.append(selected[DRUG_ID_A_COLUMN].to_numpy(zero_copy_only=False))
+                validation_meta_b.append(selected[DRUG_ID_B_COLUMN].to_numpy(zero_copy_only=False))
+                validation_rows += int(values.shape[0])
+    if not train_features:
+        raise ValueError(f"Fold {fold_id} has no current training rows after filtering.")
+    if not validation_features:
+        raise ValueError(f"Fold {fold_id} has no held-out validation rows after filtering.")
+    train = DDIBatchArrays(
+        features=np.concatenate(train_features, axis=0),
+        labels=np.concatenate(train_labels, axis=0),
+        metadata={
+            DRUG_ID_A_COLUMN: np.concatenate(train_meta_a),
+            DRUG_ID_B_COLUMN: np.concatenate(train_meta_b),
+        },
+    )
+    validation = DDIBatchArrays(
+        features=np.concatenate(validation_features, axis=0),
+        labels=np.concatenate(validation_labels, axis=0),
+        metadata={
+            DRUG_ID_A_COLUMN: np.concatenate(validation_meta_a),
+            DRUG_ID_B_COLUMN: np.concatenate(validation_meta_b),
+        },
+    )
+    return train, validation
 
 
 def load_development_fold_identity(
