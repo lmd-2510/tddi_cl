@@ -1,11 +1,5 @@
 from __future__ import annotations
 
-import json
-from argparse import Namespace
-from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 import torch
 from torch import nn
 
@@ -18,7 +12,6 @@ from src.models.tddi_paper_member import (
 )
 from src.training.train_cil import (
     expand_model_for_seen_classes,
-    parse_args,
 )
 
 

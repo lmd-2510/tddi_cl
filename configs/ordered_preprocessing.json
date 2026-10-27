@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "kind": "ddi_cil_original_split_preprocessing",
+  "protocol": {
+    "id": "ORDERED",
+    "name": "head_to_tail",
+    "task_file": "study_assets/task_protocols/head_to_tail_tasks.json",
+    "layout": [38, 20, 20, 20, 20, 20, 20, 20]
+  },
+  "inputs": {
+    "train": "train_extracted.parquet",
+    "validation": "validation_extracted.parquet",
+    "test": "test_extracted.parquet",
+    "feature_cols": "study_assets/data_schema/feature_columns.json"
+  },
+  "preprocessing": {
+    "policy": "task0_standard_frozen",
+    "artifact": "study_assets/preprocessing_single_ordered/task0_standard_frozen.json",
+    "task_cache_root": "study_assets/single_task_cache"
+  }
+}

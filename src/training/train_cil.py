@@ -1,7 +1,5 @@
-"""Training entrypoint and numerical kernels for CB-Replay, EWC and A-GEM."""
+"""Shared model and optimization kernels for future training workflows."""
 from __future__ import annotations
-
-import argparse
 from dataclasses import dataclass
 import json
 import math
@@ -22,20 +20,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.class_mapping import remap_labels
-from src.data.class_balanced_replay_buffer import BUFFER_POLICY, RANKING_POLICY
 from src.eval.evaluation import evaluate_model
 from src.methods.agem import project_agem_gradient, trainable_parameters, flatten_gradients, assign_gradients
 from src.methods.ewc import ewc_penalty
 from src.methods.replay import classification_loss as replay_classification_loss
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, TDDIPaperMember, TDDIPaperMemberConfig
-
-FIXED_BUDGET_METHOD = "class_balanced_fixed_budget_replay"
-METHODS = (FIXED_BUDGET_METHOD, "ewc", "agem")
-METHOD_POLICIES = {
-    FIXED_BUDGET_METHOD: "frozen_fold_class_balanced_replay_v1",
-    "ewc": "frozen_fold_online_ewc_v1",
-    "agem": "frozen_fold_agem_v1",
-}
 
 class FocalLoss(nn.Module if nn is not None else object):
     """L_focal(p_t) = -(1-p_t)^gamma * log(p_t), unweighted (Lin et al. 2017),
@@ -52,78 +41,6 @@ class FocalLoss(nn.Module if nn is not None else object):
         target_probs = target_log_probs.exp()
         loss = -((1 - target_probs) ** self.gamma) * target_log_probs
         return loss.mean()
-
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    for key in ("train", "validation", "test", "feature-cols", "task-file", "outdir",
-                "fold-assignments", "fold-manifest", "fold-preprocessing"):
-        parser.add_argument("--" + key, type=Path, required=True)
-    parser.add_argument("--method", choices=METHODS, default=FIXED_BUDGET_METHOD)
-    parser.add_argument("--variant", choices=["tddi_paper_member", "tabm", "realmlp_td"], default="tddi_paper_member")
-    parser.add_argument("--norm", choices=["layernorm", "none"], default=None)
-    parser.add_argument("--activation", choices=["gelu", "relu", "selu"], default=None)
-    parser.add_argument("--member-id", type=int, choices=[0, 1, 2], required=True)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--fold-seed", type=int, default=42)
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--preprocessing-policy", choices=["raw_identity", "task0_standard_frozen"], required=True)
-    parser.add_argument("--fold-replay-policy", choices=["stratified_fraction_v1"], default="stratified_fraction_v1")
-    parser.add_argument("--buffer-policy", choices=[BUFFER_POLICY], default=BUFFER_POLICY)
-    parser.add_argument("--exemplar-ranking-policy", choices=[RANKING_POLICY], default=RANKING_POLICY)
-    parser.add_argument("--loss-variant", choices=["focal_current_ce_replay", "cross_entropy"],
-                        help="Derived from method when omitted.")
-    parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--effective-batch-size", type=int, default=None)
-    parser.add_argument("--evaluation-batch-size", type=int, default=None)
-    parser.add_argument("--epochs", type=int, default=None, help="TabM: optional hard cap; default stops on validation patience.")
-    parser.add_argument("--patience", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--weight-decay", type=float, default=None)
-    parser.add_argument("--dropout", type=float, default=None)
-    parser.add_argument("--gradient-clip-norm", type=float, default=None)
-    parser.add_argument("--label-smoothing", type=float, default=None)
-    parser.add_argument("--focal-gamma", type=float, default=1.0)
-    parser.add_argument("--replay-fraction", type=float, default=0.125)
-    parser.add_argument("--replay-repeat-cap", type=int, default=3)
-    parser.add_argument("--fold-member-budget", type=int)
-    parser.add_argument("--fold-global-budget", type=int)
-    parser.add_argument("--ewc-lambda", type=float, default=1000.0)
-    parser.add_argument("--agem-reference-batch-size", type=int, default=256)
-    parser.add_argument("--stop-after-task", type=int)
-    parser.add_argument("--validation-only", action="store_true")
-    parser.add_argument("--resume-fold-checkpoint", type=Path)
-    parser.add_argument("--export-member-predictions", action="store_true")
-    parser.add_argument("--member-prediction-splits", choices=["validation", "test"],
-                        nargs="+", default=["validation", "test"])
-    parser.add_argument("--task-cache-root", type=Path)
-    parser.add_argument("--source-shard-cache-root", type=Path)
-    args = parser.parse_args(argv)
-    tabm = args.variant == "tabm"
-    realmlp = args.variant == "realmlp_td"
-    defaults = dict(norm="none" if tabm else "layernorm", activation="relu" if tabm else "gelu",
-        batch_size=256 if tabm else 64, evaluation_batch_size=256 if tabm else 512,
-        patience=16 if tabm else 5, lr=0.002 if tabm else 0.001,
-        weight_decay=0.0003 if tabm else 0.0001, dropout=0.1 if tabm else 0.2,
-        gradient_clip_norm=1.0 if tabm else None)
-    if realmlp:
-        defaults.update(norm="none", activation="selu", batch_size=256,
-            evaluation_batch_size=1024, patience=20, lr=.04, weight_decay=.02,
-            dropout=.15)
-    defaults["label_smoothing"] = .1 if realmlp else 0.
-    for key, value in defaults.items():
-        if getattr(args, key) is None:
-            setattr(args, key, value)
-    if args.effective_batch_size is None:
-        args.effective_batch_size = args.batch_size if tabm or realmlp else 1024
-    if args.epochs is None and not tabm:
-        args.epochs = 256 if realmlp else 30
-    expected_loss = "focal_current_ce_replay" if args.method == FIXED_BUDGET_METHOD and args.variant == "tddi_paper_member" else "cross_entropy"
-    if args.loss_variant is None:
-        args.loss_variant = expected_loss
-    if args.loss_variant != expected_loss:
-        parser.error(f"{args.variant}/{args.method} requires --loss-variant {expected_loss}")
-    return args
-
 
 def resolve_device(requested: str) -> str:
     if requested != "auto":
@@ -464,17 +381,3 @@ def train_one_epoch(
     result = EpochLossComponents(*means.tolist(), optimizer_steps=steps,
         examples_seen=examples, tail_effective_batch=(examples - 1) % target + 1 if examples else 0)
     return result if return_loss_components else result.total_loss
-
-
-def main():
-    args = parse_args()
-    for attr, key in (("task_cache_root", "CIL_COMMON_TASK_CACHE_ROOT"),
-                      ("source_shard_cache_root", "CIL_SOURCE_SHARD_CACHE_ROOT")):
-        if getattr(args, attr) is None and os.environ.get(key):
-            setattr(args, attr, Path(os.environ[key]).expanduser())
-    from src.training.fold_training import run_fold_training
-    run_fold_training(args, engine=sys.modules[__name__])
-
-
-if __name__ == "__main__":
-    main()
