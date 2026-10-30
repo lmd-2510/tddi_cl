@@ -1,3 +1,0 @@
--r requirements.txt
-# Numerical RealMLP-TD is a pinned-source PyTorch port; no sklearn/Lightning
-# training wrapper or additional preprocessing dependency is required.

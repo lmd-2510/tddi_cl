@@ -1,8 +1,0 @@
-RealMLP-TD numerical adapter in DDI-CIL
-Adapted from PyTabKit by David Holzmüller and contributors.
-https://github.com/dholzmueller/pytabkit
-Reference commit: c126ea51187c5080b91f28d352481dbd3b2194b0
-Licensed under the Apache License, Version 2.0; see LICENSE.
-
-Modified for ordinary PyTorch modules, class-incremental head expansion,
-external frozen preprocessing and the DDI-CIL training/evaluation contracts.

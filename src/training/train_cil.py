@@ -59,9 +59,9 @@ def parse_args(argv=None):
                 "fold-assignments", "fold-manifest", "fold-preprocessing"):
         parser.add_argument("--" + key, type=Path, required=True)
     parser.add_argument("--method", choices=METHODS, default=FIXED_BUDGET_METHOD)
-    parser.add_argument("--variant", choices=["tddi_paper_member", "tabm", "realmlp_td"], default="tddi_paper_member")
+    parser.add_argument("--variant", choices=["tddi_paper_member"], default="tddi_paper_member")
     parser.add_argument("--norm", choices=["layernorm", "none"], default=None)
-    parser.add_argument("--activation", choices=["gelu", "relu", "selu"], default=None)
+    parser.add_argument("--activation", choices=["gelu", "relu"], default=None)
     parser.add_argument("--member-id", type=int, choices=[0, 1, 2], required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--fold-seed", type=int, default=42)
@@ -75,7 +75,7 @@ def parse_args(argv=None):
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--effective-batch-size", type=int, default=None)
     parser.add_argument("--evaluation-batch-size", type=int, default=None)
-    parser.add_argument("--epochs", type=int, default=None, help="TabM: optional hard cap; default stops on validation patience.")
+    parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--patience", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
@@ -98,26 +98,18 @@ def parse_args(argv=None):
     parser.add_argument("--task-cache-root", type=Path)
     parser.add_argument("--source-shard-cache-root", type=Path)
     args = parser.parse_args(argv)
-    tabm = args.variant == "tabm"
-    realmlp = args.variant == "realmlp_td"
-    defaults = dict(norm="none" if tabm else "layernorm", activation="relu" if tabm else "gelu",
-        batch_size=256 if tabm else 64, evaluation_batch_size=256 if tabm else 512,
-        patience=16 if tabm else 5, lr=0.002 if tabm else 0.001,
-        weight_decay=0.0003 if tabm else 0.0001, dropout=0.1 if tabm else 0.2,
-        gradient_clip_norm=1.0 if tabm else None)
-    if realmlp:
-        defaults.update(norm="none", activation="selu", batch_size=256,
-            evaluation_batch_size=1024, patience=20, lr=.04, weight_decay=.02,
-            dropout=.15)
-    defaults["label_smoothing"] = .1 if realmlp else 0.
+    defaults = dict(norm="layernorm", activation="gelu", batch_size=64,
+        evaluation_batch_size=512, patience=5, lr=0.001,
+        weight_decay=0.0001, dropout=0.2, gradient_clip_norm=None,
+        label_smoothing=0.)
     for key, value in defaults.items():
         if getattr(args, key) is None:
             setattr(args, key, value)
     if args.effective_batch_size is None:
-        args.effective_batch_size = args.batch_size if tabm or realmlp else 1024
-    if args.epochs is None and not tabm:
-        args.epochs = 256 if realmlp else 30
-    expected_loss = "focal_current_ce_replay" if args.method == FIXED_BUDGET_METHOD and args.variant == "tddi_paper_member" else "cross_entropy"
+        args.effective_batch_size = 1024
+    if args.epochs is None:
+        args.epochs = 30
+    expected_loss = "focal_current_ce_replay" if args.method == FIXED_BUDGET_METHOD else "cross_entropy"
     if args.loss_variant is None:
         args.loss_variant = expected_loss
     if args.loss_variant != expected_loss:
@@ -197,12 +189,6 @@ def _git_state(project_root: Path) -> dict[str, str | bool | None]:
 
 
 def model_manifest(args):
-    if args.variant == "tabm":
-        from src.models.tabm_member import TabMMemberConfig
-        return TabMMemberConfig(num_classes=1, dropout=args.dropout).manifest()
-    if args.variant == "realmlp_td":
-        from src.models.realmlp_td_member import RealMLPTDConfig
-        return RealMLPTDConfig(num_classes=1, dropout=args.dropout).manifest()
     from src.models.tddi_paper_member import paper_member_manifest
     return paper_member_manifest(dropout=args.dropout, activation=args.activation)
 
@@ -217,22 +203,6 @@ def expand_model_for_seen_classes(
     activation: str,
     norm: str,
 ) -> nn.Module:
-    if variant == "realmlp_td":
-        from src.models.realmlp_td_member import RealMLPTDConfig, RealMLPTDMember
-        if norm != "none" or activation != "selu":
-            raise ValueError("RealMLP-TD requires external preprocessing, norm=none and activation=selu.")
-        model = RealMLPTDMember(RealMLPTDConfig(len(current_seen_map), input_dim=input_dim, dropout=dropout))
-        if previous_model is not None and previous_seen_map is not None:
-            return copy_previous_state_to_expanded_model(previous_model, model, previous_seen_map, current_seen_map, variant=variant)
-        return model
-    if variant == "tabm":
-        from src.models.tabm_member import TabMMember, TabMMemberConfig
-        if norm != "none" or activation != "relu":
-            raise ValueError("Basic TabM requires --norm none --activation relu; preprocessing remains external.")
-        model = TabMMember(TabMMemberConfig(num_classes=len(current_seen_map), input_dim=input_dim, dropout=dropout))
-        if previous_model is not None and previous_seen_map is not None:
-            return copy_previous_state_to_expanded_model(previous_model, model, previous_seen_map, current_seen_map, variant=variant)
-        return model
     if variant != "tddi_paper_member":
         raise ValueError(f"Unsupported model variant: {variant}")
     if input_dim != TDDI_PAPER_INPUT_DIM:
@@ -280,11 +250,6 @@ def copy_previous_state_to_expanded_model(
 
     previous_head_weight = previous_state["head.weight"]
     previous_head_bias = previous_state["head.bias"]
-    if variant == "tabm":
-        from src.models.tabm_member import copy_head_classes
-        copy_head_classes(current_state, previous_state, previous_seen_map, current_seen_map)
-        expanded_model.load_state_dict(current_state)
-        return expanded_model
     for raw_class_id, previous_index in previous_seen_map.items():
         current_index = current_seen_map[raw_class_id]
         current_state["head.weight"][current_index] = previous_head_weight[
@@ -317,9 +282,6 @@ class EpochLossComponents:
 
 
 def make_optimizer(model, args):
-    if args.variant == "realmlp_td":
-        from src.models.realmlp_td_member import make_optimizer as realmlp_optimizer
-        return realmlp_optimizer(model, lr=args.lr, weight_decay=args.weight_decay)
     return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 
@@ -432,7 +394,7 @@ def train_one_epoch(
         features, labels = features.to(device), labels.to(device)
         if hasattr(model, "classification_loss"):
             if loss_variant != "cross_entropy":
-                raise ValueError("TabM uses branch-wise cross entropy, not the inherited Focal/replay objective.")
+                raise ValueError("Backbone-native classification loss requires cross entropy.")
             logits, classification = model.classification_loss(features, labels, criterion)
         elif loss_variant == "focal_current_ce_replay":
             logits = model(features)

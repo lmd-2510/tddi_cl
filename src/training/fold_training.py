@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
-import itertools
 from pathlib import Path
 import time
 import uuid
@@ -101,13 +100,7 @@ def method_policy(method):
 def validate_fold_options(args):
     if args.method not in engine_methods():
         raise ValueError("Supported methods are CB-Replay, EWC and A-GEM.")
-    if args.variant == "tabm":
-        if args.norm != "none" or args.activation != "relu":
-            raise ValueError("Basic TabM requires external frozen preprocessing, norm=none and activation=relu.")
-    elif args.variant == "realmlp_td":
-        if args.norm != "none" or args.activation != "selu":
-            raise ValueError("RealMLP-TD requires external frozen preprocessing, norm=none and activation=selu.")
-    elif args.variant != "tddi_paper_member" or args.norm != "layernorm":
+    if args.variant != "tddi_paper_member" or args.norm != "layernorm":
         raise ValueError("Unsupported frozen-fold model/normalization.")
     if args.member_id not in (0, 1, 2) or args.seed != 0 or args.fold_seed != 42:
         raise ValueError("Study requires experiment seed 0, fold seed 42 and members 0/1/2.")
@@ -115,24 +108,19 @@ def validate_fold_options(args):
         raise ValueError("Provide frozen fold assignments, manifest and preprocessing.")
     if args.export_member_predictions and not args.member_prediction_splits:
         raise ValueError("Prediction export requires at least one validation/test split.")
-    if args.variant in ("tabm", "realmlp_td"):
-        if args.batch_size <= 0 or args.effective_batch_size < args.batch_size or args.effective_batch_size % args.batch_size:
-            raise ValueError("The backbone's effective batch must be a positive multiple of its microbatch.")
-        if args.variant == "tabm" and args.gradient_clip_norm != 1.0:
-            raise ValueError("Approved TabM gradient clipping is global norm 1.0.")
-    elif args.batch_size not in (8, 16, 32, 64) or args.effective_batch_size != 1024:
+    if args.batch_size not in (8, 16, 32, 64) or args.effective_batch_size != 1024:
         raise ValueError("Frozen-fold training uses microbatch 64 (OOM: 32/16/8), effective target 1024.")
-    if args.variant != "tabm" and args.gradient_clip_norm is not None:
-        raise ValueError("Gradient clipping is only enabled for the locked TabM recipe.")
-    if args.label_smoothing != (.1 if args.variant == "realmlp_td" else 0.):
-        raise ValueError("RealMLP-TD uses label smoothing 0.1; the other locked backbones use 0.")
+    if args.gradient_clip_norm is not None:
+        raise ValueError("Gradient clipping is not enabled for the locked T-DDI recipe.")
+    if args.label_smoothing != 0.:
+        raise ValueError("The locked T-DDI recipe uses no label smoothing.")
     if args.evaluation_batch_size <= 0:
         raise ValueError("--evaluation-batch-size must be positive.")
     if args.stop_after_task is not None and args.stop_after_task not in range(8):
         raise ValueError("--stop-after-task must be between 0 and 7.")
-    if (args.epochs is None and args.variant != "tabm") or (args.epochs is not None and args.epochs <= 0) or args.patience <= 0:
+    if args.epochs is None or args.epochs <= 0 or args.patience <= 0:
         raise ValueError("Epochs and patience must be positive.")
-    expected_loss = "focal_current_ce_replay" if args.method == "class_balanced_fixed_budget_replay" and args.variant == "tddi_paper_member" else "cross_entropy"
+    expected_loss = "focal_current_ce_replay" if args.method == "class_balanced_fixed_budget_replay" else "cross_entropy"
     if args.loss_variant != expected_loss:
         raise ValueError("Loss must match the selected method.")
     if args.buffer_policy != BUFFER_POLICY or args.exemplar_ranking_policy != RANKING_POLICY:
@@ -383,7 +371,7 @@ def prepare_fold_run(args, *, engine, context=None):
         ],
         "drop_last": False, "optimizer": "AdamW_new_each_task", "scheduler": None,
         "classification_weight": 1.0, "loss_variant": args.loss_variant,
-        "loss_scope": ("mean_branch_cross_entropy" if args.variant == "tabm" else "focal_current_cross_entropy_replay" if args.method == "class_balanced_fixed_budget_replay"
+        "loss_scope": ("focal_current_cross_entropy_replay" if args.method == "class_balanced_fixed_budget_replay"
                        else "cross_entropy_plus_online_ewc" if args.method == "ewc" else "cross_entropy_with_agem_projection"),
         "early_stopping": "held_out_all_seen_macro_f1", "validation_only": args.validation_only,
         "test_policy": "integrity_hash_and_pair_IDs_only" if args.validation_only else "report_only_after_best_validation",
@@ -399,38 +387,14 @@ def prepare_fold_run(args, *, engine, context=None):
             "training/fold_training.py", "training/train_cil.py", "eval/evaluation.py",
             "eval/metrics.py", "eval/predictions.py", "data/ddi_dataset.py",
             "data/fold_preprocessing.py", "data/class_balanced_replay_buffer.py", "data/replay_sampler.py",
-            "methods/ewc.py", "methods/agem.py", "methods/replay.py",
+            "methods/ewc.py", "methods/agem.py", "methods/replay.py", "models/tddi_paper_member.py",
             "training/regularization_memory.py", "training/replay_checkpoint.py")},
     }
-    if args.variant == "tabm":
-        resolved["implementation_sha256"]["models/tabm_member.py"] = fold_file_sha256(
-            Path(__file__).parents[1] / "models/tabm_member.py")
-        resolved["gradient_clip_norm"] = args.gradient_clip_norm
-        resolved["evaluation_loss_scope"] = "cross_entropy_of_mean_branch_probabilities"
-        if args.method == "ewc":
-            resolved["loss_scope"] += "_plus_online_ewc"
-        elif args.method == "agem":
-            resolved["loss_scope"] += "_with_agem_projection"
-    if args.variant == "realmlp_td":
-        resolved["implementation_sha256"]["models/realmlp_td_member.py"] = fold_file_sha256(
-            Path(__file__).parents[1] / "models/realmlp_td_member.py")
-        resolved.update(optimizer="AdamW_upstream_parameter_factors_new_each_task",
-            optimizer_betas=[.9, .95], optimizer_epsilon=1e-8,
-            scheduler={"lr": "coslog4", "dropout": "flat_cos", "weight_decay": "flat_cos",
-                       "progress": "fractional_epoch_over_task_epoch_cap", "reset": "each_task"},
-            label_smoothing=args.label_smoothing,
-            loss_scope="cross_entropy_label_smoothing_0.1" + (
-                "_plus_online_ewc" if args.method == "ewc" else "_with_agem_projection" if args.method == "agem" else ""),
-            evaluation_loss_scope="unsmoothed_cross_entropy",
-            early_stopping="held_out_all_seen_macro_f1_epoch_gt_2x_best_plus_patience",
-            early_stopping_tie_policy="first_best_epoch")
     # Scope/path relocation may change; learning/provenance contract may not.
     contract = {k: v for k, v in resolved.items() if k != "stop_after_task"}
     contract["hyperparameters"] = {k: getattr(args, k) for k in (
         "epochs", "patience", "lr", "weight_decay", "dropout", "activation", "norm", "focal_gamma",
         "loss_variant", "ewc_lambda", "agem_reference_batch_size")}
-    if args.variant == "realmlp_td":
-        contract["hyperparameters"]["label_smoothing"] = args.label_smoothing
     contract["sampler"] = {
         "policy": SAMPLER_POLICY, "schema_version": 1, "rng_derivation": RNG_DERIVATION,
         "replay_fraction": args.replay_fraction if args.method == "class_balanced_fixed_budget_replay" else 0.0,
@@ -711,38 +675,28 @@ def run_fold_training(args, *, engine):
         loader = DataLoader(training, batch_size=args.batch_size, sampler=sampler, drop_last=False,
                             generator=torch.Generator().manual_seed(seeds.member_seed + task_id))
         val_loader = DataLoader(engine.build_tensor_dataset(val_inputs, remap_labels(validation.labels, seen_map)),
-                               batch_size=args.evaluation_batch_size if args.variant == "realmlp_td" else args.batch_size, shuffle=False, drop_last=False,
+                               batch_size=args.batch_size, shuffle=False, drop_last=False,
                                generator=torch.Generator().manual_seed(seeds.member_seed + task_id))
         del current_inputs, replay_inputs
         model = engine.expand_model_for_seen_classes(previous, previous_map, seen_map,
             variant=args.variant, input_dim=len(columns), dropout=args.dropout,
             activation=args.activation, norm=args.norm).to(device)
-        initialization_rows = 0
-        if args.variant == "realmlp_td":
-            initialization_rows = model.initialize_for_task(
-                training.tensors[0][:len(current.labels)], [seen_map[c] for c in new_classes],
-                initialize_backbone=not bool(previous_map))
-            logger.log(f"task={task_id} RealMLP-TD train-only initialization rows={initialization_rows}")
         if args.method == "ewc" and fisher is not None:
             fisher = {k: v.to(device) for k, v in grow_head_state(fisher, previous_map, seen_map, model.state_dict(), zero_new_rows=True).items()}
             theta_star = {k: v.to(device) for k, v in grow_head_state(theta_star, previous_map, seen_map, model.state_dict(), zero_new_rows=False).items()}
         optimizer = engine.make_optimizer(model, args)
         criterion = engine.training_criterion(args)
-        evaluation_criterion = torch.nn.CrossEntropyLoss() if args.variant == "realmlp_td" else criterion
+        evaluation_criterion = criterion
         best_score, best_state, best_epoch, best_validation_metrics, stale = (
             -float("inf"), None, None, None, 0
         )
         epoch_rows = []
         if str(device).startswith("cuda"):
             torch.cuda.reset_peak_memory_stats(device)
-        for epoch in (range(args.epochs) if args.epochs is not None else itertools.count()):
+        for epoch in range(args.epochs):
             epoch_start = time.perf_counter()
             projector = None
             schedule_kwargs = {}
-            if args.variant == "realmlp_td":
-                from src.models.realmlp_td_member import update_training_schedule
-                schedule_kwargs["before_batch"] = lambda batch: update_training_schedule(
-                    model, optimizer, (epoch + batch * args.batch_size / len(sampler)) / args.epochs)
             if args.method == "agem" and len(retained.labels):
                 def projector(step):
                     rng = np.random.default_rng(np.random.SeedSequence([seeds.member_seed, task_id, epoch, step]))
@@ -786,17 +740,13 @@ def run_fold_training(args, *, engine):
                 f"total_loss={losses.total_loss:.6f} "
                 f"val_macro_f1={row['validation_macro_f1']:.6f} steps={losses.optimizer_steps}", _json(row))
             score = result.metrics["macro_f1"]
-            if args.variant == "realmlp_td":
-                from src.models.realmlp_td_member import should_stop
-                if should_stop(epoch + 1, best_epoch, additive_patience=args.patience):
-                    break
             if score > best_score:
                 best_score, best_epoch, stale = score, epoch + 1, 0
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                 best_validation_metrics = dict(result.metrics)
             else:
                 stale += 1
-                if args.variant != "realmlp_td" and stale >= args.patience:
+                if stale >= args.patience:
                     break
         if best_state is None or best_validation_metrics is None:
             raise RuntimeError(f"Task {task_id} did not produce a finite best checkpoint.")
@@ -902,8 +852,6 @@ def run_fold_training(args, *, engine):
             "boundary_checkpoint": f"checkpoints/task_{task_id}.pt",
             "prediction_artifacts": [path.relative_to(root).as_posix() for path in prediction_paths],
             "completion_policy": "requires_valid_boundary_checkpoint_and_hashed_artifacts"}
-        if args.variant == "realmlp_td":
-            summary["model_initialization_rows"] = initialization_rows
         summary = json.loads(_json(summary))
         _publish_json(task_root / "completed_task.json", summary)
         all_metrics.extend(metrics)

@@ -19,19 +19,6 @@ TRAINING = dict(method="class_balanced_fixed_budget_replay", fold_replay_policy=
     lr=0.001, weight_decay=0.0001, focal_gamma=1.0, loss_variant="focal_current_ce_replay")
 MODEL = dict(variant="tddi_paper_member", input_dim=3780, hidden_dims=[7560, 7560],
              activation="gelu", dropout=0.2, norm="layernorm")
-TABM_MODEL = dict(variant="tabm", input_dim=3780, n_blocks=3, d_block=512, k=32,
-                  num_embeddings=None, activation="relu", dropout=0.1, norm="none")
-TABM_TRAINING = {**TRAINING, "batch_size": 256, "effective_batch_size": 256,
-    "gradient_accumulation_steps": 1, "lr": 0.002, "weight_decay": 0.0003,
-    "loss_variant": "cross_entropy", "epochs": None, "patience": 16,
-    "gradient_clip_norm": 1.0, "evaluation_batch_size": 256}
-REALMLP_TD_MODEL = dict(variant="realmlp_td", input_dim=3780, hidden_dims=[256, 256, 256],
-    num_embeddings="pbld", embedding_frequencies=16, embedding_dim=4,
-    activation="selu", dropout=.15, norm="none")
-REALMLP_TD_TRAINING = {**TRAINING, "optimizer": "adamw_realmlp_parameter_factors",
-    "batch_size": 256, "effective_batch_size": 256, "gradient_accumulation_steps": 1,
-    "epochs": 256, "patience": 20, "lr": .04, "weight_decay": .02,
-    "loss_variant": "cross_entropy", "label_smoothing": .1, "evaluation_batch_size": 1024}
 REPLAY = dict(buffer_policy="equal_class_fixed_budget", ranking_policy="sample_normalized_class_mean",
               fraction=0.125, repeat_cap=3, replay_starts_at_task=1)
 INPUT_KEYS = {"train", "validation", "test", "feature_cols", "fold_assignments", "fold_manifest"}

@@ -36,10 +36,6 @@ from src.training import train_cil as engine  # noqa: E402
 from src.training.fold_run_setup import (  # noqa: E402
     INPUT_KEYS,
     MODEL,
-    TABM_MODEL,
-    TABM_TRAINING,
-    REALMLP_TD_MODEL,
-    REALMLP_TD_TRAINING,
     REPLAY,
     TRAINING,
     _default_runner,
@@ -184,16 +180,14 @@ def _load_locked_config(
         )
     _keys(value["inputs"], INPUT_KEYS, "inputs")
     _keys(value["preprocessing"], {"policy", "artifact_template"}, "preprocessing")
-    tabm = value["model"].get("variant") == "tabm"
-    realmlp = value["model"].get("variant") == "realmlp_td"
-    expected_model = REALMLP_TD_MODEL if realmlp else TABM_MODEL if tabm else MODEL
-    expected_training = REALMLP_TD_TRAINING if realmlp else TABM_TRAINING if tabm else {**TRAINING, "epochs": 30, "patience": 5}
+    expected_model = MODEL
+    expected_training = {**TRAINING, "epochs": 30, "patience": 5}
     _keys(value["training"], set(expected_training), "training")
     _keys(value["evaluation"], EVALUATION_KEYS, "evaluation")
     if value["preprocessing"]["policy"] != "task0_standard_frozen":
         raise ValueError("Approved study preprocessing is task0_standard_frozen.")
     if value["model"] != expected_model:
-        raise ValueError("Study model must match the locked T-DDI, TabM or RealMLP-TD configuration.")
+        raise ValueError("Study model must match the locked T-DDI configuration.")
     expected_replay = {**REPLAY, "ranking_policy": "sample_normalized_class_mean"}
     replay = value["replay"]
     _keys(replay, set(REPLAY), "replay")
@@ -288,10 +282,6 @@ def _load_locked_config(
             value["member_budgets"] = {str(member): 0 for member in MEMBER_IDS}
             value["global_slot_budget"] = 0
         value["output_root"] = str(Path(value["output_root"]).with_name(f"{protocol_name}_{method}_seed0"))
-        if tabm:
-            value["output_root"] += "_tabm"
-        elif realmlp:
-            value["output_root"] += "_realmlp_td"
     output_source = overrides.get("output_root") or value["output_root"]
     value["output_root"] = _resolve(output_source, root, "output_root")
     value["device"] = str(overrides.get("device") or value["device"])

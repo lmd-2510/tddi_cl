@@ -1,3 +1,0 @@
--r requirements.txt
-# Official basic TabM implementation; no vendored approximation.
-tabm==0.0.3

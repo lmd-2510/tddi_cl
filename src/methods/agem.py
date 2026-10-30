@@ -8,8 +8,121 @@ from typing import Sequence
 
 import torch
 
+from src.training.class_incremental_policy import fixed_head_cross_entropy
+
 
 METHOD_NAME = "agem"
+
+
+class TaskEpisodicMemory:
+    """Uniform random episodic examples stored independently per old task.
+
+    A-GEM does not optimize directly on these examples.  A random reference
+    minibatch is used only to form the constraint gradient.
+    """
+
+    def __init__(self, examples_per_task: int, *, seed: int = 0) -> None:
+        if type(examples_per_task) is not int or examples_per_task <= 0:
+            raise ValueError("examples_per_task must be a positive integer.")
+        self.examples_per_task = examples_per_task
+        self.seed = int(seed)
+        self._generator = torch.Generator(device="cpu")
+        self._generator.manual_seed(self.seed)
+        self._tasks: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def __len__(self) -> int:
+        return sum(labels.shape[0] for _, labels in self._tasks.values())
+
+    @property
+    def task_ids(self) -> tuple[int, ...]:
+        return tuple(sorted(self._tasks))
+
+    def add_task(
+        self,
+        task_id: int,
+        features: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> None:
+        """Store a seeded uniform subset after completing one task."""
+
+        task_id = int(task_id)
+        if task_id in self._tasks:
+            raise ValueError(f"Task {task_id} is already present in A-GEM memory.")
+        if features.ndim < 2 or labels.ndim != 1 or features.shape[0] != labels.shape[0]:
+            raise ValueError("features and labels must be aligned batched tensors.")
+        if labels.dtype != torch.long:
+            raise ValueError("A-GEM labels must use torch.long.")
+        count = min(self.examples_per_task, int(labels.shape[0]))
+        indices = torch.randperm(labels.shape[0], generator=self._generator)[:count]
+        self._tasks[task_id] = (
+            features.detach().cpu()[indices].contiguous().clone(),
+            labels.detach().cpu()[indices].contiguous().clone(),
+        )
+
+    def sample_reference(
+        self,
+        batch_size: int,
+        *,
+        device: torch.device | str | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample uniformly from the union of all previous-task memories."""
+
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer.")
+        if not self._tasks:
+            raise ValueError("Cannot sample empty A-GEM memory.")
+        features = torch.cat([self._tasks[key][0] for key in self.task_ids], dim=0)
+        labels = torch.cat([self._tasks[key][1] for key in self.task_ids], dim=0)
+        count = min(batch_size, int(labels.shape[0]))
+        indices = torch.randperm(labels.shape[0], generator=self._generator)[:count]
+        return features[indices].to(device=device), labels[indices].to(device=device)
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "examples_per_task": self.examples_per_task,
+            "seed": self.seed,
+            "tasks": {
+                task_id: (features.clone(), labels.clone())
+                for task_id, (features, labels) in self._tasks.items()
+            },
+            "generator_state": self._generator.get_state().clone(),
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: dict[str, object]) -> "TaskEpisodicMemory":
+        memory = cls(int(state["examples_per_task"]), seed=int(state["seed"]))
+        tasks = state.get("tasks")
+        if not isinstance(tasks, dict):
+            raise ValueError("A-GEM checkpoint task memory is missing.")
+        for task_id, value in tasks.items():
+            if not isinstance(value, (tuple, list)) or len(value) != 2:
+                raise ValueError("Invalid A-GEM task-memory entry.")
+            features, labels = value
+            if not isinstance(features, torch.Tensor) or not isinstance(labels, torch.Tensor):
+                raise ValueError("Invalid A-GEM task-memory tensors.")
+            memory._tasks[int(task_id)] = (features.cpu().clone(), labels.cpu().clone())
+        generator_state = state.get("generator_state")
+        if not isinstance(generator_state, torch.Tensor):
+            raise ValueError("A-GEM checkpoint RNG state is missing.")
+        memory._generator.set_state(generator_state)
+        return memory
+
+
+def reference_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    active_class_indices,
+    *,
+    total_classes: int = 178,
+) -> torch.Tensor:
+    """CE objective whose gradient defines the A-GEM reference constraint."""
+
+    return fixed_head_cross_entropy(
+        logits,
+        labels,
+        active_class_indices,
+        total_classes=total_classes,
+    )
 
 
 def project_agem_gradient(

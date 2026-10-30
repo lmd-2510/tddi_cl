@@ -230,14 +230,13 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             raise ValueError("Frozen-fold class map/raw class order mismatch.")
         model = state["model_state"]
         manifest = expected_contract.get("model", {})
-        if manifest.get("variant") == "tabm":
-            expected_weight = (manifest["k"], manifest["d_block"], len(classes))
-            expected_bias = (manifest["k"], len(classes))
-            valid_head = tuple(model["head.weight"].shape) == expected_weight and tuple(model["head.bias"].shape) == expected_bias
-        elif manifest.get("variant") == "realmlp_td":
-            valid_head = tuple(model["head.weight"].shape) == (len(classes), manifest["hidden_dims"][-1]) and tuple(model["head.bias"].shape) == (len(classes),)
-        else:
-            valid_head = model["head.weight"].ndim == 2 and model["head.weight"].shape[0] == len(classes) and tuple(model["head.bias"].shape) == (len(classes),)
+        if manifest.get("variant") != "tddi_paper_member":
+            raise ValueError("Frozen-fold checkpoint requires the T-DDI backbone.")
+        valid_head = (
+            model["head.weight"].ndim == 2
+            and model["head.weight"].shape[0] == len(classes)
+            and tuple(model["head.bias"].shape) == (len(classes),)
+        )
         if not valid_head or not all(isinstance(v, torch.Tensor) and torch.isfinite(v).all() for v in model.values()):
             raise ValueError("Frozen-fold model/head shape or finite-state mismatch.")
         config_path = root / "run_config.json"
