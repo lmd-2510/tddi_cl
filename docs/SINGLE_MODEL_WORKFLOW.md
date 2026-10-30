@@ -1,9 +1,10 @@
-# Original-split single-model workflow
+# Original-split preprocessing for a future single-model workflow
 
-This is the default workflow for experiments before continual model merging.
-It trains one model with seed 0 on the original, independent train split,
-selects checkpoints on the original validation split, and reports on the
-original test split. Train and validation are never merged or reassigned.
+This is an optional preprocessing path for future experiments before continual
+model merging. The intended future workflow will train one model with seed 0
+on the original, independent train split, select checkpoints on the original
+validation split, and report on the original test split. Train and validation
+will never be merged or reassigned.
 
 The baseline is naive sequential fine-tuning: task `t` trains only the current
 task's training rows, starting from task `t-1`'s best checkpoint. It has no
@@ -18,8 +19,8 @@ once from original Task-0 training rows and remains frozen. A method-neutral
 cache is created on demand per reached task; future task shards are not opened
 or materialised. RealMLP-TD's learned PBLD/front-scale/SELU layers remain model
 parameters and its train-dependent initialization only receives current train
-rows. TabM retains its 32 internal branches; they are one model, not the removed
-three-fold external ensemble.
+rows. TabM retains its 32 internal branches; they form one model and are
+independent of the retained three-fold external ensemble workflow.
 
 ## Commands
 
@@ -38,6 +39,6 @@ No single-model training launcher is included yet. This stage prepares only
 the immutable preprocessing artifact and method-neutral caches; the future
 training workflow will consume them without refitting.
 
-The retired three-fold training/ensemble pipeline is not part of the current
-repository. Historical fold checkpoints remain external archival results and
-are not compatible with this workflow.
+The three-fold training/ensemble pipeline remains available in parallel. Its
+fold assignments, member-specific preprocessing, checkpoints, and offline
+ensemble artifacts are separate from this original-split preprocessing path.
