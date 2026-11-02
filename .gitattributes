@@ -1,0 +1,3 @@
+*.sh text eol=lf
+configs/*.json text eol=lf
+study_assets/task_protocols/*.json text eol=lf

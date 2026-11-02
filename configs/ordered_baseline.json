@@ -21,7 +21,7 @@
     "id": "ORDERED",
     "name": "head_to_tail",
     "task_file": "study_assets/task_protocols/head_to_tail_tasks.json",
-    "sha256": "e4824b99f5f190cb5e8d600a789cd3efdfe70d740a3f56e19751e8147fef8d9b",
+    "sha256": "b5cc67460f399afa6e04f18ad065401eaf644ec2981c8406e1f22c574ed872b8",
     "layout": [
       38,
       20,
