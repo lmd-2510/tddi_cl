@@ -1,4 +1,4 @@
-"""Strict frozen-fold task-boundary checkpoints for CB-Replay, EWC and A-GEM."""
+"""Strict task-boundary checkpoints for CB-Replay, EWC, A-GEM and IDER."""
 from __future__ import annotations
 import os
 import random

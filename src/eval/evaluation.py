@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - environment may not have torch yet
     DataLoader = None
 
 from src.eval.metrics import compute_classification_metrics, compute_classwise_metrics
+from src.methods.ider import ider_forward, ider_forward_with_latent
 from src.training.class_incremental_policy import (
     fixed_head_cross_entropy,
     mask_unseen_logits,
@@ -108,7 +109,13 @@ def evaluate_model(
             for features, labels in loader:
                 features = features.to(device)
                 labels = labels.to(device)
-                if collect_outputs and collect_latent:
+                if hasattr(model, "ider_adapter"):
+                    if collect_outputs and collect_latent:
+                        logits, latent = ider_forward_with_latent(model, features)
+                    else:
+                        logits = ider_forward(model, features)
+                        latent = None
+                elif collect_outputs and collect_latent:
                     logits, latent = model.forward_with_latent(features)
                 else:
                     logits = model(features)

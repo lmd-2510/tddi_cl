@@ -1,4 +1,4 @@
-"""Training entrypoint and numerical kernels for CB-Replay, EWC and A-GEM."""
+"""Training entrypoint and numerical kernels for CB-Replay, EWC, A-GEM and IDER."""
 from __future__ import annotations
 
 import argparse
@@ -26,6 +26,13 @@ from src.data.class_balanced_replay_buffer import BUFFER_POLICY, RANKING_POLICY
 from src.eval.evaluation import evaluate_model
 from src.methods.agem import project_agem_gradient, trainable_parameters, flatten_gradients, assign_gradients
 from src.methods.ewc import original_ewc_penalty
+from src.methods.ider import (
+    METHOD_NAME as IDER_METHOD,
+    METHOD_POLICY as IDER_POLICY,
+    IDERTrainingContext,
+    attach_ider_adapter,
+    compute_ider_loss,
+)
 from src.methods.replay import classification_loss as replay_classification_loss
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, TDDIPaperMember, TDDIPaperMemberConfig
 from src.training.class_incremental_policy import (
@@ -34,11 +41,12 @@ from src.training.class_incremental_policy import (
 )
 
 FIXED_BUDGET_METHOD = "class_balanced_fixed_budget_replay"
-METHODS = (FIXED_BUDGET_METHOD, "ewc", "agem")
+METHODS = (FIXED_BUDGET_METHOD, "ewc", "agem", IDER_METHOD)
 METHOD_POLICIES = {
     FIXED_BUDGET_METHOD: "frozen_fold_fixed_head_class_balanced_replay_v1",
     "ewc": "frozen_fold_fixed_head_original_ewc_v1",
     "agem": "frozen_fold_fixed_head_agem_v1",
+    IDER_METHOD: IDER_POLICY,
 }
 
 class FocalLoss(nn.Module if nn is not None else object):
@@ -74,7 +82,7 @@ def parse_args(argv=None):
     parser.add_argument("--fold-replay-policy", choices=["stratified_fraction_v1"], default="stratified_fraction_v1")
     parser.add_argument("--buffer-policy", choices=[BUFFER_POLICY], default=BUFFER_POLICY)
     parser.add_argument("--exemplar-ranking-policy", choices=[RANKING_POLICY], default=RANKING_POLICY)
-    parser.add_argument("--loss-variant", choices=["focal_current_ce_replay", "cross_entropy"],
+    parser.add_argument("--loss-variant", choices=["focal_current_ce_replay", "cross_entropy", "ider"],
                         help="Derived from method when omitted.")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--effective-batch-size", type=int, default=None)
@@ -93,6 +101,16 @@ def parse_args(argv=None):
     parser.add_argument("--fold-global-budget", type=int)
     parser.add_argument("--ewc-lambda", type=float, default=1000.0)
     parser.add_argument("--agem-reference-batch-size", type=int, default=256)
+    parser.add_argument("--ider-weight-a", type=float, default=0.5,
+                        help="Official replay idempotence weight.")
+    parser.add_argument("--ider-weight-b", type=float, default=0.4,
+                        help="Official current idempotence weight.")
+    parser.add_argument("--ider-weight-c", type=float, default=0.5,
+                        help="Official replay supervised weight.")
+    parser.add_argument("--ider-uniform-probability", type=float, default=1.0,
+                        help="Probability of the paper's uniform initial class signal.")
+    parser.add_argument("--ider-replay-batch-size", type=int,
+                        help="IDER memory examples per current minibatch; defaults to microbatch size.")
     parser.add_argument("--stop-after-task", type=int)
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--resume-fold-checkpoint", type=Path)
@@ -113,7 +131,13 @@ def parse_args(argv=None):
         args.effective_batch_size = 1024
     if args.epochs is None:
         args.epochs = 30
-    expected_loss = "focal_current_ce_replay" if args.method == FIXED_BUDGET_METHOD else "cross_entropy"
+    if args.ider_replay_batch_size is None:
+        args.ider_replay_batch_size = args.batch_size
+    expected_loss = (
+        "focal_current_ce_replay"
+        if args.method == FIXED_BUDGET_METHOD
+        else "ider" if args.method == IDER_METHOD else "cross_entropy"
+    )
     if args.loss_variant is None:
         args.loss_variant = expected_loss
     if args.loss_variant != expected_loss:
@@ -194,7 +218,18 @@ def _git_state(project_root: Path) -> dict[str, str | bool | None]:
 
 def model_manifest(args):
     from src.models.tddi_paper_member import paper_member_manifest
-    return paper_member_manifest(dropout=args.dropout, activation=args.activation)
+    manifest = paper_member_manifest(dropout=args.dropout, activation=args.activation)
+    if args.method == IDER_METHOD:
+        manifest = {
+            **manifest,
+            "method_adapter": {
+                "method": IDER_METHOD,
+                "policy": IDER_POLICY,
+                "placement": "additive_projection_before_fixed_classifier",
+                "total_classes": 178,
+            },
+        }
+    return manifest
 
 def expand_model_for_seen_classes(
     previous_model: nn.Module | None,
@@ -206,6 +241,8 @@ def expand_model_for_seen_classes(
     dropout: float,
     activation: str,
     norm: str,
+    method: str | None = None,
+    active_class_indices=None,
 ) -> nn.Module:
     if variant != "tddi_paper_member":
         raise ValueError(f"Unsupported model variant: {variant}")
@@ -226,6 +263,10 @@ def expand_model_for_seen_classes(
             activation=activation,  # type: ignore[arg-type]
         )
     )
+    if method == IDER_METHOD:
+        if active_class_indices is None:
+            raise ValueError("IDER expansion requires active_class_indices.")
+        attach_ider_adapter(model, active_class_indices=active_class_indices)
     if previous_model is None or previous_seen_map is None:
         return model
     return copy_previous_state_to_expanded_model(
@@ -279,6 +320,9 @@ class EpochLossComponents:
     classification_loss: float
     raw_ewc_penalty: float
     scaled_ewc_penalty: float
+    ider_current_idempotence: float
+    ider_replay_supervised: float
+    ider_replay_idempotence: float
     total_loss: float
     optimizer_steps: int = 0
     examples_seen: int = 0
@@ -406,20 +450,33 @@ def train_one_epoch(
     before_batch=None,
     active_class_indices=None,
     optimizer_step=None,
+    ider_context: IDERTrainingContext | None = None,
 ):
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
-    if loss_variant not in {"cross_entropy", "focal_current_ce_replay"}:
+    if loss_variant not in {"cross_entropy", "focal_current_ce_replay", "ider"}:
         raise ValueError(f"Unsupported loss_variant: {loss_variant}")
+    if (loss_variant == "ider") != (ider_context is not None):
+        raise ValueError("IDER loss requires exactly one IDERTrainingContext.")
     model.train()
-    totals = np.zeros(4, dtype=np.float64)
+    totals = np.zeros(7, dtype=np.float64)
     examples = steps = 0
     optimizer.zero_grad(set_to_none=True)
     for batch_index, (features, labels) in enumerate(loader):
         if before_batch is not None:
             before_batch(batch_index)
         features, labels = features.to(device), labels.to(device)
-        if active_class_indices is not None:
+        if loss_variant == "ider":
+            breakdown = compute_ider_loss(model, features, labels, ider_context)
+            classification = breakdown.current_supervised
+            current_id = breakdown.current_idempotence_distillation
+            replay_supervised = breakdown.replay_supervised
+            replay_id = breakdown.replay_idempotence_distillation
+            loss = breakdown.total
+            raw = loss.new_zeros(())
+            scaled = loss.new_zeros(())
+            logits = None
+        elif active_class_indices is not None:
             logits = model(features)
             if loss_variant == "focal_current_ce_replay":
                 masked_logits = mask_unseen_logits(
@@ -451,13 +508,17 @@ def train_one_epoch(
         else:
             logits = model(features)
             classification = criterion(logits, labels)
-        raw = (
-            original_ewc_penalty(model, fisher, theta_star)
-            if fisher is not None
-            else logits.new_zeros(())
-        )
-        scaled = ewc_lambda * raw
-        loss = classification + scaled
+        if loss_variant != "ider":
+            current_id = classification.new_zeros(())
+            replay_supervised = classification.new_zeros(())
+            replay_id = classification.new_zeros(())
+            raw = (
+                original_ewc_penalty(model, fisher, theta_star)
+                if fisher is not None
+                else classification.new_zeros(())
+            )
+            scaled = ewc_lambda * raw
+            loss = classification + scaled
         group_start = (batch_index // gradient_accumulation_steps) * gradient_accumulation_steps
         group_end = min(group_start + gradient_accumulation_steps, len(loader))
         group_samples = min(group_end * loader.batch_size, len(loader.sampler)) - group_start * loader.batch_size
@@ -474,7 +535,9 @@ def train_one_epoch(
             optimizer.zero_grad(set_to_none=True)
             steps += 1
         count = len(labels)
-        totals += count * np.array([float(v.detach()) for v in (classification, raw, scaled, loss)])
+        totals += count * np.array([float(v.detach()) for v in (
+            classification, raw, scaled, current_id, replay_supervised, replay_id, loss
+        )])
         examples += count
     means = totals / max(examples, 1)
     target = loader.batch_size * gradient_accumulation_steps

@@ -15,6 +15,7 @@ from src.data.fold_preprocessing import prepare_fold_preprocessing, save_fold_pr
 from src.data.stratified_folds import FOLD_ASSIGNMENT_SCHEMA, describe_fold_source, save_fold_artifact
 from src.models.tddi_paper_member import TDDIPaperMember, TDDIPaperMemberConfig
 from src.eval.predictions import load_member_prediction_artifact
+from src.methods.ider import attach_ider_adapter
 from src.training import fold_training, train_cil as engine
 
 
@@ -75,6 +76,12 @@ def tiny(monkeypatch):
     def expand(previous, previous_map, seen_map, **kwargs):
         model = TDDIPaperMember(TDDIPaperMemberConfig(input_dim=2, hidden_dims=(8, 4), num_classes=len(seen_map),
                                                    dropout=kwargs["dropout"], activation=kwargs["activation"]))
+        if kwargs.get("method") == "ider":
+            attach_ider_adapter(
+                model,
+                active_class_indices=kwargs["active_class_indices"],
+                total_classes=len(seen_map),
+            )
         if previous is not None:
             engine.copy_previous_state_to_expanded_model(previous, model, previous_map, seen_map,
                                                          variant="tddi_paper_member")
@@ -88,8 +95,8 @@ def tiny(monkeypatch):
     torch.set_num_threads(old_threads)
 
 
-@pytest.mark.parametrize("method", [engine.FIXED_BUDGET_METHOD, "ewc", "agem"])
-def test_three_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
+@pytest.mark.parametrize("method", [engine.FIXED_BUDGET_METHOD, "ewc", "agem", "ider"])
+def test_four_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
     monkeypatch.setattr(sys, "argv", cli(data, extra=["--method", method, "--export-member-predictions",
                                                    "--member-prediction-splits", "validation"]))
     engine.main()
@@ -102,7 +109,12 @@ def test_three_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
     assert artifact.context.method_protocol == engine.METHOD_POLICIES[method]
     losses = pd.read_csv(root / "training_audit.csv")
     assert np.isfinite(losses.select_dtypes(include="number")).all().all()
-    assert not any("distill" in name for name in losses.columns)
+    if method == "ider":
+        assert {"ider_current_idempotence", "ider_replay_supervised",
+                "ider_replay_idempotence"}.issubset(losses.columns)
+        assert "ider_adapter.label_projection.0.weight" in state["model_state"]
+    else:
+        assert not any("idempotence" in name for name in losses.columns)
     assert state["contract"]["head_policy"] == fold_training.FIXED_HEAD_POLICY
     assert len(state["contract"]["global_raw_class_order"]) == 178
     assert state["model_state"]["head.weight"].shape[0] == 178

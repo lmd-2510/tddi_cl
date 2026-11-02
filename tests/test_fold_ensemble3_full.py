@@ -88,6 +88,27 @@ def test_shuffled_changes_only_protocol_preprocessing_and_output(tmp_path: Path)
     ]
 
 
+def test_ider_full_override_uses_paper_defaults_and_equal_class_memory(tmp_path: Path) -> None:
+    config = load_full_config(
+        ORDERED_CONFIG,
+        overrides={"output_root": tmp_path / "ider", "method": "ider"},
+    )
+    plan = shared.build_ensemble_plan(
+        config,
+        python="full-python",
+        inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+    command = plan.members[0].command
+    assert command is not None
+    assert config["training"]["loss_variant"] == "ider"
+    assert config["training"]["ider_weight_a"] == 0.5
+    assert config["training"]["ider_weight_b"] == 0.4
+    assert config["training"]["ider_weight_c"] == 0.5
+    assert _arg(command, "--buffer-policy") == "equal_class_fixed_budget"
+    assert _arg(command, "--ider-uniform-probability") == "1.0"
+    assert _arg(command, "--ider-replay-batch-size") == "64"
+
+
 def test_full_selected_member_skip_and_resume(tmp_path: Path) -> None:
     config = _config(tmp_path)
     resume = tmp_path / "task_4.pt"

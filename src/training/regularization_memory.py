@@ -1,7 +1,8 @@
-"""Task-uniform episodic memory for A-GEM and empty memory for EWC.
+"""Method-specific memory selection for regularization and replay methods.
 
-Both use the same frozen source/ID guards as CB-Replay. A-GEM retains a seeded
-uniform subset of each completed task; EWC stores Fisher/parameters separately.
+All methods use the same frozen source/ID guards. A-GEM retains a seeded
+uniform subset of each completed task; EWC stores Fisher/parameters separately;
+IDER reuses the proven equal-class reservoir required by its internal replay.
 """
 from __future__ import annotations
 
@@ -88,13 +89,13 @@ class RegularizationMemory(ClassBalancedReplayBuffer):
 
 def create_memory(**kwargs):
     method = kwargs.pop("method")
-    if method == "class_balanced_fixed_budget_replay":
+    if method in {"class_balanced_fixed_budget_replay", "ider"}:
         return ClassBalancedReplayBuffer(**kwargs)
     return RegularizationMemory(method=method, **kwargs)
 
 
 def restore_memory(state, **kwargs):
     method = kwargs.pop("method")
-    if method == "class_balanced_fixed_budget_replay":
+    if method in {"class_balanced_fixed_budget_replay", "ider"}:
         return ClassBalancedReplayBuffer.from_state_dict(state, **kwargs)
     return RegularizationMemory.from_state_dict(state, method=method, **kwargs)

@@ -45,10 +45,13 @@ def member_command(config, member, *, python=sys.executable):
     args["replay_fraction"] = config["replay"]["fraction"]
     args["replay_repeat_cap"] = config["replay"]["repeat_cap"]
     args["buffer_policy"] = config["replay"]["buffer_policy"]
-    if config["training"]["method"] != engine.FIXED_BUDGET_METHOD:
-        for key in ("exemplar_ranking_policy", "buffer_policy", "replay_fraction",
-                    "replay_repeat_cap", "fold_replay_policy", "focal_gamma"):
+    method = config["training"]["method"]
+    if method != engine.FIXED_BUDGET_METHOD:
+        for key in ("replay_fraction", "replay_repeat_cap", "fold_replay_policy", "focal_gamma"):
             args.pop(key, None)
+        if method != "ider":
+            for key in ("exemplar_ranking_policy", "buffer_policy"):
+                args.pop(key, None)
     common_task_cache_root = os.environ.get("CIL_COMMON_TASK_CACHE_ROOT")
     if common_task_cache_root:
         # Explicit opt-in keeps the cache namespace outside any method output.

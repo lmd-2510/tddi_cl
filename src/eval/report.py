@@ -42,6 +42,7 @@ METHOD_NAMES = {
     "class_balanced_fixed_budget_replay": "CB-Replay",
     "ewc": "EWC",
     "agem": "A-GEM",
+    "ider": "IDER",
 }
 SUPPORTED_PROTOCOLS = {
     "head_to_tail": ("ORDERED", "ensemble3_ordered"),

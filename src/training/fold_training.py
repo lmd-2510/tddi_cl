@@ -57,6 +57,11 @@ from src.methods.ewc import (
     consolidate_quadratic_penalties,
     parameter_snapshot,
 )
+from src.methods.ider import (
+    IDERTrainingContext,
+    METHOD_POLICY as IDER_POLICY,
+    optimizer_step_preserving_future_classes,
+)
 from src.training.class_incremental_policy import ClassIncrementalPolicy
 from src.training.regularization_memory import create_memory
 from src.eval.predictions import (
@@ -99,7 +104,7 @@ def _publish_csv(path, rows):
 
 
 def engine_methods():
-    return {"class_balanced_fixed_budget_replay", "ewc", "agem"}
+    return {"class_balanced_fixed_budget_replay", "ewc", "agem", "ider"}
 
 
 def method_policy(method):
@@ -107,12 +112,13 @@ def method_policy(method):
         "class_balanced_fixed_budget_replay": TRAINING_POLICY,
         "ewc": "frozen_fold_fixed_head_original_ewc_v1",
         "agem": "frozen_fold_fixed_head_agem_v1",
+        "ider": IDER_POLICY,
     }[method]
 
 
 def validate_fold_options(args):
     if args.method not in engine_methods():
-        raise ValueError("Supported methods are CB-Replay, EWC and A-GEM.")
+        raise ValueError("Supported methods are CB-Replay, EWC, A-GEM and IDER.")
     if args.variant != "tddi_paper_member" or args.norm != "layernorm":
         raise ValueError("Unsupported frozen-fold model/normalization.")
     if args.member_id not in (0, 1, 2) or args.seed != 0 or args.fold_seed != 42:
@@ -133,7 +139,11 @@ def validate_fold_options(args):
         raise ValueError("--stop-after-task must be between 0 and 7.")
     if args.epochs is None or args.epochs <= 0 or args.patience <= 0:
         raise ValueError("Epochs and patience must be positive.")
-    expected_loss = "focal_current_ce_replay" if args.method == "class_balanced_fixed_budget_replay" else "cross_entropy"
+    expected_loss = (
+        "focal_current_ce_replay"
+        if args.method == "class_balanced_fixed_budget_replay"
+        else "ider" if args.method == "ider" else "cross_entropy"
+    )
     if args.loss_variant != expected_loss:
         raise ValueError("Loss must match the selected method.")
     if args.buffer_policy != BUFFER_POLICY or args.exemplar_ranking_policy != RANKING_POLICY:
@@ -142,10 +152,18 @@ def validate_fold_options(args):
         raise ValueError("replay_fraction must be finite and in [0,1).")
     if args.replay_repeat_cap <= 0 or args.agem_reference_batch_size <= 0:
         raise ValueError("Replay cap and A-GEM reference batch must be positive.")
+    if args.ider_replay_batch_size <= 0:
+        raise ValueError("IDER replay batch size must be positive.")
     for name in ("lr", "weight_decay", "focal_gamma", "ewc_lambda"):
         value = getattr(args, name)
         if not math.isfinite(value) or value < 0 or (name == "lr" and value == 0):
             raise ValueError(f"Invalid hyperparameter {name}.")
+    for name in ("ider_weight_a", "ider_weight_b", "ider_weight_c"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Invalid hyperparameter {name}.")
+    if not math.isfinite(args.ider_uniform_probability) or not 0 <= args.ider_uniform_probability <= 1:
+        raise ValueError("IDER uniform probability must be in [0,1].")
     if not 0 <= args.dropout < 1:
         raise ValueError("Dropout must be in [0,1).")
 
@@ -407,8 +425,12 @@ def prepare_fold_run(args, *, engine, context=None):
         ],
         "drop_last": False, "optimizer": "AdamW_new_each_task", "scheduler": None,
         "classification_weight": 1.0, "loss_variant": args.loss_variant,
-        "loss_scope": ("focal_current_cross_entropy_replay" if args.method == "class_balanced_fixed_budget_replay"
-                       else "fixed_head_cross_entropy_plus_original_cumulative_ewc" if args.method == "ewc" else "cross_entropy_with_agem_projection"),
+        "loss_scope": {
+            "class_balanced_fixed_budget_replay": "focal_current_cross_entropy_replay",
+            "ewc": "fixed_head_cross_entropy_plus_original_cumulative_ewc",
+            "agem": "cross_entropy_with_agem_projection",
+            "ider": "paper_idempotence_current_and_equal_class_memory_replay",
+        }[args.method],
         "early_stopping": "held_out_all_seen_macro_f1", "validation_only": args.validation_only,
         "test_policy": "integrity_hash_and_pair_IDs_only" if args.validation_only else "report_only_after_best_validation",
         "prediction_export": {
@@ -423,7 +445,7 @@ def prepare_fold_run(args, *, engine, context=None):
             "training/fold_training.py", "training/train_cil.py", "eval/evaluation.py",
             "eval/metrics.py", "eval/predictions.py", "data/ddi_dataset.py",
             "data/fold_preprocessing.py", "data/class_balanced_replay_buffer.py", "data/replay_sampler.py",
-            "methods/ewc.py", "methods/agem.py", "methods/replay.py", "models/tddi_paper_member.py",
+            "methods/ewc.py", "methods/agem.py", "methods/ider.py", "methods/replay.py", "models/tddi_paper_member.py",
             "training/regularization_memory.py", "training/replay_checkpoint.py",
             "training/class_incremental_policy.py")},
     }
@@ -431,7 +453,8 @@ def prepare_fold_run(args, *, engine, context=None):
     contract = {k: v for k, v in resolved.items() if k != "stop_after_task"}
     contract["hyperparameters"] = {k: getattr(args, k) for k in (
         "epochs", "patience", "lr", "weight_decay", "dropout", "activation", "norm", "focal_gamma",
-        "loss_variant", "ewc_lambda", "agem_reference_batch_size")}
+        "loss_variant", "ewc_lambda", "agem_reference_batch_size", "ider_weight_a",
+        "ider_weight_b", "ider_weight_c", "ider_uniform_probability", "ider_replay_batch_size")}
     contract["sampler"] = {
         "policy": SAMPLER_POLICY, "schema_version": 1, "rng_derivation": RNG_DERIVATION,
         "replay_fraction": args.replay_fraction if args.method == "class_balanced_fixed_budget_replay" else 0.0,
@@ -540,7 +563,8 @@ def run_fold_training(args, *, engine):
         reconstruction_map = global_class_map if fixed_head else previous_map
         previous = engine.expand_model_for_seen_classes(None, None, reconstruction_map,
             variant=args.variant, input_dim=len(columns), dropout=args.dropout,
-            activation=args.activation, norm=args.norm)
+            activation=args.activation, norm=args.norm, method=args.method,
+            active_class_indices=[global_class_map[raw] for raw in sorted(previous_map)])
         previous.load_state_dict(loaded["model_state"], strict=True)
         previous.eval().requires_grad_(False)
         all_metrics, all_epochs, task_summaries = (loaded["progress"][k] for k in
@@ -702,6 +726,7 @@ def run_fold_training(args, *, engine):
             raise ValueError("Replay contains non-old classes.")
         if set(_ids(current) + _ids(retained)) & set(_ids(validation)):
             raise ValueError("Training/replay overlaps held-out validation IDs.")
+        memory_ids = _ids(retained) if args.method in {"class_balanced_fixed_budget_replay", "ider"} else []
         replay_ids = _ids(retained) if args.method == "class_balanced_fixed_budget_replay" else []
         sampler = FoldReplayFractionSampler(
             current_sample_ids=_ids(current), replay_sample_ids=replay_ids,
@@ -711,7 +736,7 @@ def run_fold_training(args, *, engine):
             repeat_cap=args.replay_repeat_cap,
         )
         _publish_json(task_root / "input_audit.json", {"task_id": task_id, "current_ids": _ids(current),
-            "replay_ids_before": replay_ids, "replay_raw_labels_before": retained.labels.tolist() if replay_ids else [],
+            "replay_ids_before": memory_ids, "replay_raw_labels_before": retained.labels.tolist() if memory_ids else [],
             "validation_ids": _ids(validation),
             "current_raw_classes": new_classes, "seen_class_map": seen_map,
             "head_size": 178 if fixed_head else len(seen_map),
@@ -723,6 +748,15 @@ def run_fold_training(args, *, engine):
         replay_inputs = (_model_values(retained.features, prep, columns, args.member_id)
                          if args.method == "class_balanced_fixed_budget_replay" else np.empty((0, len(columns)), dtype=np.float32))
         replay_labels = retained.labels if args.method == "class_balanced_fixed_budget_replay" else np.empty(0, dtype=np.int64)
+        ider_replay_features = None
+        ider_replay_labels = None
+        if args.method == "ider" and len(retained.labels):
+            ider_replay_features = torch.from_numpy(
+                _model_values(retained.features, prep, columns, args.member_id)
+            )
+            ider_replay_labels = torch.from_numpy(
+                remap_labels(retained.labels, global_class_map).astype(np.int64, copy=False)
+            )
         val_inputs = validation_model.features
         training_label_map = global_class_map if fixed_head else seen_map
         training = engine.build_tensor_dataset(np.concatenate((current_inputs, replay_inputs)),
@@ -738,12 +772,16 @@ def run_fold_training(args, *, engine):
         previous_model_map = global_class_map if fixed_head and previous is not None else previous_map
         model = engine.expand_model_for_seen_classes(previous, previous_model_map, model_map,
             variant=args.variant, input_dim=len(columns), dropout=args.dropout,
-            activation=args.activation, norm=args.norm).to(device)
+            activation=args.activation, norm=args.norm, method=args.method,
+            active_class_indices=active_class_indices).to(device)
         if class_policy is not None:
             class_policy.validate_linear_head(model.classifier_head)
         if args.method == "ewc" and fisher is not None:
             fisher = {k: v.to(device) for k, v in fisher.items()}
             theta_star = {k: v.to(device) for k, v in theta_star.items()}
+        ider_old_model = None
+        if args.method == "ider" and previous is not None:
+            ider_old_model = previous.to(device).eval().requires_grad_(False)
         optimizer = engine.make_optimizer(model, args)
         criterion = engine.training_criterion(args)
         evaluation_criterion = criterion
@@ -765,6 +803,25 @@ def run_fold_training(args, *, engine):
                         _model_values(retained.features[idx], prep, columns, args.member_id),
                         retained.labels[idx], training_label_map, device,
                         active_class_indices=active_class_indices)
+            if args.method == "ider":
+                ider_generator = torch.Generator(device="cpu").manual_seed(
+                    int(np.random.SeedSequence([
+                        seeds.member_seed, task_id, epoch, 0x1DE2
+                    ]).generate_state(1, dtype=np.uint64)[0])
+                )
+                schedule_kwargs["ider_context"] = IDERTrainingContext(
+                    old_model=ider_old_model,
+                    replay_features=ider_replay_features,
+                    replay_labels=ider_replay_labels,
+                    active_class_indices=tuple(active_class_indices),
+                    old_class_indices=tuple(global_class_map[c] for c in sorted(previous_map)),
+                    replay_batch_size=args.ider_replay_batch_size,
+                    weight_old_replay_id=args.ider_weight_a,
+                    weight_current_id=args.ider_weight_b,
+                    weight_replay_supervised=args.ider_weight_c,
+                    uniform_probability=args.ider_uniform_probability,
+                    generator=ider_generator,
+                )
             losses = engine.train_one_epoch(model, loader, optimizer, criterion, device,
                 old_class_indices=[training_label_map[c] for c in previous_map],
                 fisher=fisher, theta_star=theta_star, ewc_lambda=args.ewc_lambda,
@@ -773,7 +830,9 @@ def run_fold_training(args, *, engine):
                 return_loss_components=True, gradient_clip_norm=args.gradient_clip_norm,
                 active_class_indices=active_class_indices if fixed_head else None,
                 optimizer_step=(
-                    (lambda: class_policy.optimizer_step(optimizer, model.classifier_head))
+                    (lambda: optimizer_step_preserving_future_classes(model, optimizer, class_policy))
+                    if args.method == "ider" and class_policy is not None
+                    else (lambda: class_policy.optimizer_step(optimizer, model.classifier_head))
                     if class_policy is not None else None
                 ),
                 **schedule_kwargs)
@@ -803,7 +862,15 @@ def run_fold_training(args, *, engine):
                 ),
                 active_class_indices=active_class_indices if fixed_head else None,
             )
-            row = {"task": task_id, "epoch": epoch + 1, **asdict(losses),
+            loss_values = asdict(losses)
+            if args.method != "ider":
+                for key in (
+                    "ider_current_idempotence",
+                    "ider_replay_supervised",
+                    "ider_replay_idempotence",
+                ):
+                    loss_values.pop(key)
+            row = {"task": task_id, "epoch": epoch + 1, **loss_values,
                    "classification_weight": 1.0,
                    "validation_macro_f1": result.metrics["macro_f1"],
                    "validation_balanced_accuracy": result.metrics["balanced_accuracy"],
@@ -974,6 +1041,8 @@ def run_fold_training(args, *, engine):
                    f"checkpoint={boundary_path} checkpoint_bytes={boundary_path.stat().st_size} "
                    f"checkpoint_seconds={checkpoint_seconds:.6f}")
         previous, previous_map = model.cpu(), seen_map
+        ider_old_model = None
+        schedule_kwargs = {}
         del optimizer, model, best_state, current, validation, retained, after, training, loader, val_loader, val_inputs
     report_root = root if not resume_path else root / "reports" / f"through_task_{stop}_{uuid.uuid4().hex}"
     report_root.mkdir(parents=True, exist_ok=True)
