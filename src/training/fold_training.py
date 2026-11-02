@@ -45,8 +45,8 @@ from src.data.source_shard_cache import load_source_shard, validate_source_shard
 from src.data.fold_preprocessing import load_fold_preprocessing
 from src.data.class_balanced_replay_buffer import BUFFER_POLICY, RANKING_POLICY, four_percent_member_budgets
 from src.data.replay_sampler import (
-    FoldFullMemorySampler, FoldReplayFractionSampler,
-    FULL_MEMORY_SAMPLER_POLICY, RNG_DERIVATION, SAMPLER_POLICY,
+    FoldERSampler, FoldFullMemorySampler, FoldReplayFractionSampler,
+    ER_SAMPLER_POLICY, FULL_MEMORY_SAMPLER_POLICY, RNG_DERIVATION, SAMPLER_POLICY,
 )
 from src.data.stratified_folds import fold_file_sha256
 from src.data.task_protocols import (
@@ -74,7 +74,7 @@ from src.methods.upcl import (
     validate_prototype_state,
 )
 from src.training.class_incremental_policy import ClassIncrementalPolicy
-from src.training.regularization_memory import create_memory
+from src.training.regularization_memory import ER_BUFFER_POLICY, ER_RANKING_POLICY, create_memory
 from src.eval.predictions import (
     MemberPredictionContext,
     PredictionProvenance,
@@ -115,7 +115,7 @@ def _publish_csv(path, rows):
 
 
 def engine_methods():
-    return {"class_balanced_fixed_budget_replay", "ewc", "agem", "ider", "upcl"}
+    return {"class_balanced_fixed_budget_replay", "er", "ewc", "agem", "ider", "upcl"}
 
 
 def method_policy(method):
@@ -125,12 +125,13 @@ def method_policy(method):
         "agem": "frozen_fold_fixed_head_agem_v1",
         "ider": IDER_POLICY,
         "upcl": UPCL_POLICY,
+        "er": "frozen_fold_fixed_head_experience_replay_v1",
     }[method]
 
 
 def validate_fold_options(args):
     if args.method not in engine_methods():
-        raise ValueError("Supported methods are CB-Replay, EWC, A-GEM, IDER and UPCL.")
+        raise ValueError("Supported methods are CB-Replay, ER, EWC, A-GEM, IDER and UPCL.")
     if args.variant != "tddi_paper_member" or args.norm != "layernorm":
         raise ValueError("Unsupported frozen-fold model/normalization.")
     if args.member_id not in (0, 1, 2) or args.seed != 0 or args.fold_seed != 42:
@@ -158,12 +159,19 @@ def validate_fold_options(args):
     )
     if args.loss_variant != expected_loss:
         raise ValueError("Loss must match the selected method.")
-    if args.buffer_policy != BUFFER_POLICY or args.exemplar_ranking_policy != RANKING_POLICY:
+    if args.method == "er":
+        if args.buffer_policy != ER_BUFFER_POLICY or args.exemplar_ranking_policy != ER_RANKING_POLICY:
+            raise ValueError("ER requires reservoir-uniform memory and ranking policies.")
+        if args.fold_replay_policy != ER_SAMPLER_POLICY:
+            raise ValueError("ER requires the uniform reservoir equal-batch sampler policy.")
+    elif args.buffer_policy != BUFFER_POLICY or args.exemplar_ranking_policy != RANKING_POLICY:
         raise ValueError("Use the official equal-class and sample-normalized ranking policies.")
     if not math.isfinite(args.replay_fraction) or not 0 <= args.replay_fraction < 1:
         raise ValueError("replay_fraction must be finite and in [0,1).")
     if args.replay_repeat_cap <= 0 or args.agem_reference_batch_size <= 0:
         raise ValueError("Replay cap and A-GEM reference batch must be positive.")
+    if args.method == "er" and not math.isclose(args.replay_fraction, 0.5):
+        raise ValueError("ER uses one uniformly sampled replay item per current item (replay_fraction=0.5).")
     if args.ider_replay_batch_size <= 0:
         raise ValueError("IDER replay batch size must be positive.")
     if not math.isfinite(args.upcl_temperature) or args.upcl_temperature <= 0:
@@ -445,6 +453,7 @@ def prepare_fold_run(args, *, engine, context=None):
             "agem": "cross_entropy_with_agem_projection",
             "ider": "paper_idempotence_current_and_equal_class_memory_replay",
             "upcl": "paper_uniform_prototype_contrastive_feature_kd_iCaRL_memory_replay",
+            "er": "paper_experience_replay_cross_entropy_current_plus_uniform_reservoir_replay",
         }[args.method],
         "early_stopping": "held_out_all_seen_macro_f1", "validation_only": args.validation_only,
         "test_policy": "integrity_hash_and_pair_IDs_only" if args.validation_only else "report_only_after_best_validation",
@@ -481,9 +490,9 @@ def prepare_fold_run(args, *, engine, context=None):
         key: getattr(args, key) for key in hyperparameter_names
     }
     contract["sampler"] = {
-        "policy": FULL_MEMORY_SAMPLER_POLICY if args.method == "upcl" else SAMPLER_POLICY,
+        "policy": FULL_MEMORY_SAMPLER_POLICY if args.method == "upcl" else ER_SAMPLER_POLICY if args.method == "er" else SAMPLER_POLICY,
         "schema_version": 1, "rng_derivation": RNG_DERIVATION,
-        "replay_fraction": args.replay_fraction if args.method == "class_balanced_fixed_budget_replay" else 0.0,
+        "replay_fraction": args.replay_fraction if args.method in {"class_balanced_fixed_budget_replay", "er"} else 0.0,
         "repeat_cap": args.replay_repeat_cap if args.method == "class_balanced_fixed_budget_replay" else 1,
         "task_boundary_epoch_reset": 0,
     }
@@ -760,12 +769,18 @@ def run_fold_training(args, *, engine):
             raise ValueError("Replay contains non-old classes.")
         if set(_ids(current) + _ids(retained)) & set(_ids(validation)):
             raise ValueError("Training/replay overlaps held-out validation IDs.")
-        memory_ids = _ids(retained) if args.method in {"class_balanced_fixed_budget_replay", "ider", "upcl"} else []
-        replay_ids = _ids(retained) if args.method in {"class_balanced_fixed_budget_replay", "upcl"} else []
-        sampler_class = FoldFullMemorySampler if args.method == "upcl" else FoldReplayFractionSampler
+        memory_methods = {"class_balanced_fixed_budget_replay", "er", "ider", "upcl"}
+        replay_methods = {"class_balanced_fixed_budget_replay", "er", "upcl"}
+        memory_ids = _ids(retained) if args.method in memory_methods else []
+        replay_ids = _ids(retained) if args.method in replay_methods else []
+        sampler_class = (
+            FoldFullMemorySampler if args.method == "upcl"
+            else FoldERSampler if args.method == "er"
+            else FoldReplayFractionSampler
+        )
         sampler = sampler_class(
             current_sample_ids=_ids(current), replay_sample_ids=replay_ids,
-            replay_raw_labels=retained.labels if args.method in {"class_balanced_fixed_budget_replay", "upcl"} else np.empty(0, dtype=np.int64), experiment_seed=args.seed,
+            replay_raw_labels=retained.labels if args.method in replay_methods else np.empty(0, dtype=np.int64), experiment_seed=args.seed,
             member_id=args.member_id, task_id=task_id,
             replay_fraction=contract["sampler"]["replay_fraction"],
             repeat_cap=contract["sampler"]["repeat_cap"],
@@ -781,8 +796,8 @@ def run_fold_training(args, *, engine):
             "buffer_policy": buffer.metadata["policy"], "ranking": buffer.metadata["ranking"]})
         current_inputs = current_model.features
         replay_inputs = (_model_values(retained.features, prep, columns, args.member_id)
-                         if args.method in {"class_balanced_fixed_budget_replay", "upcl"} else np.empty((0, len(columns)), dtype=np.float32))
-        replay_labels = retained.labels if args.method in {"class_balanced_fixed_budget_replay", "upcl"} else np.empty(0, dtype=np.int64)
+                         if args.method in replay_methods else np.empty((0, len(columns)), dtype=np.float32))
+        replay_labels = retained.labels if args.method in replay_methods else np.empty(0, dtype=np.int64)
         ider_replay_features = None
         ider_replay_labels = None
         if args.method == "ider" and len(retained.labels):
@@ -896,14 +911,20 @@ def run_fold_training(args, *, engine):
             audit = sampler.last_audit
             expected_replay = (
                 len(retained.labels) if args.method == "upcl" else
+                len(current.labels) if args.method == "er" and task_id > 0 else
                 0 if task_id == 0 or args.method != "class_balanced_fixed_budget_replay" else min(
                     int(len(current.labels) * args.replay_fraction / (1.0 - args.replay_fraction)),
                     args.replay_repeat_cap * len(retained.labels),
                 )
             )
             expected_current = len(current.labels)
+            repeat_violation = (
+                args.method not in {"upcl", "er"}
+                and audit is not None
+                and audit["max_repeat"] > args.replay_repeat_cap
+            )
             if (audit is None or audit["epoch"] != epoch or audit["current_draws"] != expected_current
-                    or audit["max_repeat"] > (1 if args.method == "upcl" else args.replay_repeat_cap) or audit["actual_replay_draws"] !=
+                    or repeat_violation or audit["actual_replay_draws"] !=
                     expected_replay
                     or losses.examples_seen != len(sampler)
                     or losses.optimizer_steps != math.ceil(len(sampler) / args.effective_batch_size)

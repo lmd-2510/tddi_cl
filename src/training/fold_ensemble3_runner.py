@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.class_balanced_replay_buffer import BUFFER_POLICIES, four_percent_member_budgets  # noqa: E402
+from src.training.regularization_memory import ER_BUFFER_POLICY, ER_RANKING_POLICY  # noqa: E402
 from src.data.stratified_folds import fold_file_sha256  # noqa: E402
 from src.data.task_protocols import (  # noqa: E402
     PROTOCOL_IDS,
@@ -275,7 +276,7 @@ def _load_locked_config(
 
     method = str(overrides.get("method") or value["training"]["method"])
     if method not in engine.METHODS:
-        raise ValueError("Supported methods are CB-Replay, EWC, A-GEM, IDER and UPCL.")
+        raise ValueError("Supported methods are CB-Replay, ER, EWC, A-GEM, IDER and UPCL.")
     if method != value["training"]["method"]:
         value["training"] = {
             **value["training"],
@@ -292,6 +293,17 @@ def _load_locked_config(
             })
         if method == "upcl":
             value["training"].update({"upcl_temperature": 0.07})
+        if method == "er":
+            value["training"].update({
+                "loss_variant": "cross_entropy",
+                "fold_replay_policy": "er_uniform_reservoir_equal_batch_v1",
+            })
+            value["replay"].update({
+                "buffer_policy": ER_BUFFER_POLICY,
+                "ranking_policy": ER_RANKING_POLICY,
+                "fraction": 0.5,
+                "repeat_cap": 1,
+            })
         if method == "ewc":
             value["member_budgets"] = {str(member): 0 for member in MEMBER_IDS}
             value["global_slot_budget"] = 0
@@ -450,8 +462,8 @@ def _validate_member_predictions(config: Mapping[str, Any], member_id: int) -> N
                 or artifact.provenance.preprocessing_member_id != member_id
                 or artifact.provenance.preprocessing_policy != "task0_standard_frozen"
                 or artifact.provenance.ranking_policy
-                != ("sample_normalized_class_mean" if config["training"]["method"] in {engine.FIXED_BUDGET_METHOD, "ider", "upcl"} else "none" if config["training"]["method"] == "ewc" else "seeded_task_uniform")
-                or artifact.provenance.buffer_policy != (config["replay"]["buffer_policy"] if config["training"]["method"] in {engine.FIXED_BUDGET_METHOD, "ider", "upcl"} else "ewc_no_examples_v1" if config["training"]["method"] == "ewc" else "agem_task_uniform_v1")
+                != (config["replay"]["ranking_policy"] if config["training"]["method"] in {engine.FIXED_BUDGET_METHOD, "er", "ider", "upcl"} else "none" if config["training"]["method"] == "ewc" else "seeded_task_uniform")
+                or artifact.provenance.buffer_policy != (config["replay"]["buffer_policy"] if config["training"]["method"] in {engine.FIXED_BUDGET_METHOD, "er", "ider", "upcl"} else "ewc_no_examples_v1" if config["training"]["method"] == "ewc" else "agem_task_uniform_v1")
                 or artifact.provenance.member_memory_budget != config["member_budgets"][str(member_id)]
                 or artifact.provenance.global_memory_budget != config["global_slot_budget"]
             ):
@@ -599,7 +611,7 @@ def _manifest(
         "global_slot_budget": config["global_slot_budget"],
         "preprocessing_policy": config["preprocessing"]["policy"],
         "ranking_policy": (
-            config["replay"]["ranking_policy"] if config["training"]["method"] in {engine.FIXED_BUDGET_METHOD, "ider", "upcl"}
+            config["replay"]["ranking_policy"] if config["training"]["method"] in {engine.FIXED_BUDGET_METHOD, "er", "ider", "upcl"}
             else "none" if config["training"]["method"] == "ewc" else "seeded_task_uniform"
         ),
         "members": members,

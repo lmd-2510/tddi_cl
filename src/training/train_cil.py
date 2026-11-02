@@ -1,4 +1,4 @@
-"""Training entrypoint and numerical kernels for CB-Replay, EWC, A-GEM and IDER."""
+"""Training entrypoint and numerical kernels for frozen-fold CIL methods."""
 from __future__ import annotations
 
 import argparse
@@ -23,6 +23,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data.class_mapping import remap_labels
 from src.data.class_balanced_replay_buffer import BUFFER_POLICY, RANKING_POLICY
+from src.data.replay_sampler import ER_SAMPLER_POLICY
+from src.training.regularization_memory import ER_BUFFER_POLICY, ER_RANKING_POLICY
 from src.eval.evaluation import evaluate_model
 from src.methods.agem import project_agem_gradient, trainable_parameters, flatten_gradients, assign_gradients
 from src.methods.ewc import original_ewc_penalty
@@ -48,13 +50,15 @@ from src.training.class_incremental_policy import (
 )
 
 FIXED_BUDGET_METHOD = "class_balanced_fixed_budget_replay"
-METHODS = (FIXED_BUDGET_METHOD, "ewc", "agem", IDER_METHOD, UPCL_METHOD)
+ER_METHOD = "er"
+METHODS = (FIXED_BUDGET_METHOD, ER_METHOD, "ewc", "agem", IDER_METHOD, UPCL_METHOD)
 METHOD_POLICIES = {
     FIXED_BUDGET_METHOD: "frozen_fold_fixed_head_class_balanced_replay_v1",
     "ewc": "frozen_fold_fixed_head_original_ewc_v1",
     "agem": "frozen_fold_fixed_head_agem_v1",
     IDER_METHOD: IDER_POLICY,
     UPCL_METHOD: UPCL_POLICY,
+    ER_METHOD: "frozen_fold_fixed_head_experience_replay_v1",
 }
 
 class FocalLoss(nn.Module if nn is not None else object):
@@ -87,9 +91,9 @@ def parse_args(argv=None):
     parser.add_argument("--fold-seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--preprocessing-policy", choices=["raw_identity", "task0_standard_frozen"], required=True)
-    parser.add_argument("--fold-replay-policy", choices=["stratified_fraction_v1"], default="stratified_fraction_v1")
-    parser.add_argument("--buffer-policy", choices=[BUFFER_POLICY], default=BUFFER_POLICY)
-    parser.add_argument("--exemplar-ranking-policy", choices=[RANKING_POLICY], default=RANKING_POLICY)
+    parser.add_argument("--fold-replay-policy", choices=["stratified_fraction_v1", ER_SAMPLER_POLICY], default="stratified_fraction_v1")
+    parser.add_argument("--buffer-policy", choices=[BUFFER_POLICY, ER_BUFFER_POLICY], default=BUFFER_POLICY)
+    parser.add_argument("--exemplar-ranking-policy", choices=[RANKING_POLICY, ER_RANKING_POLICY], default=RANKING_POLICY)
     parser.add_argument("--loss-variant", choices=["focal_current_ce_replay", "cross_entropy", "ider", "upcl"],
                         help="Derived from method when omitted.")
     parser.add_argument("--batch-size", type=int, default=None)

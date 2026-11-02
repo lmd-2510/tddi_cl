@@ -40,6 +40,7 @@ from src.eval.predictions import load_member_prediction_artifact  # noqa: E402
 
 METHOD_NAMES = {
     "class_balanced_fixed_budget_replay": "CB-Replay",
+    "er": "Experience Replay (ER)",
     "ewc": "EWC",
     "agem": "A-GEM",
     "ider": "IDER",

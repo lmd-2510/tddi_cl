@@ -121,7 +121,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     ):
         parser.add_argument("--" + name.replace("_", "-"), type=Path)
     parser.add_argument("--device")
-    parser.add_argument("--method", choices=["class_balanced_fixed_budget_replay", "ewc", "agem", "ider"])
+    parser.add_argument("--method", choices=["class_balanced_fixed_budget_replay", "er", "ewc", "agem", "ider", "upcl"])
     args = parser.parse_args(argv)
     override_names = INPUT_KEYS | {
         "task_file",

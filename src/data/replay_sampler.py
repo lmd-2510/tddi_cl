@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover
 SAMPLER_POLICY = "class_round_robin_fraction_capped_v1"
 RNG_DERIVATION = "seedsequence_pcg64_member_task_epoch_stream_v1"
 FULL_MEMORY_SAMPLER_POLICY = "icarl_full_current_plus_memory_once_per_epoch_v1"
+ER_SAMPLER_POLICY = "er_uniform_reservoir_equal_batch_v1"
 
 
 def _integer(value, name: str) -> int:
@@ -303,6 +304,178 @@ class _EpochIterator:
             self.closed = True
 
     def __del__(self):  # best effort on abandonment; explicit close is portable
+        self.close()
+
+
+class FoldERSampler(Sampler):
+    """Standard ER: current rows once plus an equally sized uniform replay batch.
+
+    Memory draws are with replacement, as in the paper's uniformly sampled
+    replay minibatch.  The reservoir itself is updated separately by
+    ``ReservoirReplayBuffer`` at task boundaries.
+    """
+
+    def __init__(self, *, current_sample_ids: Sequence[str], replay_sample_ids: Sequence[str],
+                 replay_raw_labels: Sequence[int], experiment_seed: int, member_id: int,
+                 task_id: int, replay_fraction: float = 0.5, repeat_cap: int = 1) -> None:
+        self._current = _ids(current_sample_ids, "current sample IDs")
+        self._replay = _ids(replay_sample_ids, "replay sample IDs")
+        if set(self._current) & set(self._replay):
+            raise ValueError("Current and replay sample IDs overlap.")
+        labels = np.asarray(replay_raw_labels)
+        if labels.shape != (len(self._replay),) or (labels.size and labels.dtype.kind not in "iu"):
+            raise ValueError("replay_raw_labels must be aligned raw integer class IDs.")
+        task_id, member_id = _integer(task_id, "task_id"), _integer(member_id, "member_id")
+        if member_id not in (0, 1, 2):
+            raise ValueError("member_id must be 0, 1 or 2.")
+        if task_id == 0 and self._replay:
+            raise ValueError("Task0 must have empty replay memory.")
+        if not 0 < float(replay_fraction) <= 0.5:
+            raise ValueError("ER replay_fraction must be in (0, 0.5].")
+        seeds = resolve_seed_configuration(_integer(experiment_seed, "experiment_seed"), member_id)
+        self._seed, self._task_id = seeds.member_seed, task_id
+        self._labels = tuple(int(label) for label in labels)
+        self._replay_draws = 0 if task_id == 0 else len(self._current)
+        self._canonical_current = np.asarray(
+            sorted(range(len(self._current)), key=lambda index: self._current[index]), dtype=np.int64
+        )
+        self._metadata = {
+            "policy": ER_SAMPLER_POLICY, "schema_version": 1,
+            "seeds": asdict(seeds), "task_id": task_id,
+            "replay_fraction": float(replay_fraction), "current_count": len(self._current),
+            "memory_count": len(self._replay), "replay_draws_per_epoch": self._replay_draws,
+            "current_order_sha256": _digest(self._current),
+            "replay_order_label_sha256": _digest(list(zip(self._replay, self._labels))),
+            "rng_derivation": RNG_DERIVATION, "rng_state_policy": "stateless_keyed_streams_no_global_rng",
+            "mix_policy": "uniform_memory_with_replacement_equal_current_batch", "drop_last": False,
+            "state_boundary": "completed_epoch_only", "reset_policy": "new_instance_at_each_task_epoch0",
+            "repeat_cap_ignored": int(repeat_cap),
+        }
+        self._next_epoch, self._active, self._last_audit = 0, False, None
+
+    def _rng(self, epoch: int, stream: int) -> np.random.Generator:
+        return np.random.Generator(np.random.PCG64(np.random.SeedSequence([
+            self._seed, self._task_id, 0x45525350, stream, epoch,
+        ])))
+
+    @property
+    def metadata(self):
+        return deepcopy(self._metadata)
+
+    @property
+    def next_epoch(self):
+        return self._next_epoch
+
+    @property
+    def last_audit(self):
+        return deepcopy(self._last_audit)
+
+    def __len__(self):
+        return len(self._current) + self._replay_draws
+
+    def _plan(self, epoch: int):
+        current = self._canonical_current[self._rng(epoch, 0).permutation(len(self._current))]
+        if self._replay_draws:
+            if not self._replay:
+                raise RuntimeError("ER requires replay memory after task 0.")
+            replay = self._rng(epoch, 1).integers(0, len(self._replay), size=self._replay_draws, dtype=np.int64)
+        else:
+            replay = np.empty(0, dtype=np.int64)
+        positions = self._rng(epoch, 2).permutation(len(self))
+        indices = np.empty(len(self), dtype=np.int64)
+        indices[positions[:len(current)]] = current
+        indices[positions[len(current):]] = replay + len(self._current)
+        repetitions = np.bincount(replay, minlength=len(self._replay)) if len(replay) else np.zeros(len(self._replay), dtype=np.int64)
+        per_class = {
+            str(label): {"draws": int(repetitions[np.asarray(self._labels) == label].sum()),
+                         "unique_exemplars": int(np.count_nonzero(repetitions[np.asarray(self._labels) == label])),
+                         "memory_count": int(np.sum(np.asarray(self._labels) == label)),
+                         "exemplar_coverage": float(np.count_nonzero(repetitions[np.asarray(self._labels) == label]) /
+                                                     max(1, np.sum(np.asarray(self._labels) == label)))}
+            for label in sorted(set(self._labels))
+        }
+        audit = {
+            "policy": ER_SAMPLER_POLICY, "task_id": self._task_id, "epoch": epoch,
+            "current_draws": len(current), "target_replay_draws": self._replay_draws,
+            "actual_replay_draws": len(replay), "total_draws": len(self),
+            "target_fraction": len(replay) / len(self) if len(self) else 0.0,
+            "actual_fraction": len(replay) / len(self) if len(self) else 0.0,
+            "capacity_limited": False, "repeat_cap": None, "memory_size": len(self._replay),
+            "unique_replay_exemplars": int(np.count_nonzero(repetitions)),
+            "exemplar_coverage": float(np.count_nonzero(repetitions) / len(self._replay)) if self._replay else 0.0,
+            "eligible_class_count": len(per_class), "replayed_class_count": sum(v["draws"] > 0 for v in per_class.values()),
+            "class_coverage": sum(v["draws"] > 0 for v in per_class.values()) / len(per_class) if per_class else 0.0,
+            "coverage_denominator": "classes_and_exemplars_present_in_buffer", "per_class": per_class,
+            "repeat_histogram": {str(n): int(np.sum(repetitions == n)) for n in range(int(repetitions.max()) + 1)} if len(repetitions) else {"0": 0},
+            "max_repeat": int(repetitions.max()) if len(repetitions) else 0,
+            "replay_ids_sha256": _digest([self._replay[i] for i in replay]),
+            "draw_order_ids_sha256": _digest([(self._current + self._replay)[int(i)] for i in indices]),
+        }
+        return ReplayEpochPlan(tuple(int(i) for i in indices), audit)
+
+    def set_epoch(self, epoch: int):
+        if self._active:
+            raise RuntimeError("Cannot set_epoch during an active iterator.")
+        self._next_epoch = _integer(epoch, "epoch")
+        self._last_audit = None
+
+    def plan_epoch(self, epoch: int):
+        """Preview an epoch without advancing checkpoint state."""
+        return self._plan(_integer(epoch, "epoch"))
+
+    def __iter__(self):
+        if self._active:
+            raise RuntimeError("An epoch iterator is already active.")
+        self._active = True
+        return _EREpochIterator(self, self._plan(self._next_epoch))
+
+    def state_dict(self):
+        if self._active:
+            raise RuntimeError("Sampler checkpoint requires a completed epoch.")
+        state = {"metadata": self.metadata, "next_epoch": self._next_epoch,
+                 "rng_state": {"derivation": RNG_DERIVATION, "mutable_rng_state": None,
+                               "next_epoch_key": self._next_epoch}}
+        state["state_sha256"] = _digest(state)
+        return state
+
+    @classmethod
+    def from_state_dict(cls, state, **kwargs):
+        result = cls(**kwargs)
+        if state.get("state_sha256") != _digest({k: v for k, v in state.items() if k != "state_sha256"}):
+            raise ValueError("ER sampler state SHA256 mismatch.")
+        if state.get("metadata") != result.metadata:
+            raise ValueError("ER sampler metadata/IDs/seed/task mismatch.")
+        result.set_epoch(state["next_epoch"])
+        if state != result.state_dict():
+            raise ValueError("ER sampler epoch/RNG state mismatch.")
+        return result
+
+
+class _EREpochIterator:
+    def __init__(self, owner, plan):
+        self.owner, self.plan, self.position, self.closed = owner, plan, 0, False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.closed:
+            raise StopIteration
+        if self.position == len(self.plan.indices):
+            self.owner._next_epoch += 1
+            self.owner._last_audit = deepcopy(self.plan.audit)
+            self.close()
+            raise StopIteration
+        value = self.plan.indices[self.position]
+        self.position += 1
+        return value
+
+    def close(self):
+        if not self.closed:
+            self.owner._active = False
+            self.closed = True
+
+    def __del__(self):
         self.close()
 
 

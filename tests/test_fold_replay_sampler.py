@@ -231,6 +231,29 @@ def test_dataloader_tail_not_dropped_and_no_fixed_microbatch_ratio():
     assert sampler.last_audit["total_draws"] == 80
 
 
+def test_er_uses_equal_current_and_uniform_replay_batch_with_replacement():
+    cfg = config(n=8, sizes=(2, 3), replay_fraction=0.5)
+    sampler = replay.FoldERSampler(**cfg)
+    plan = sampler.plan_epoch(0)
+    assert len(plan.indices) == 16
+    assert Counter(i for i in plan.indices if i < 8) == Counter(range(8))
+    replay_indices = [i - 8 for i in plan.indices if i >= 8]
+    assert len(replay_indices) == 8
+    assert plan.audit["policy"] == replay.ER_SAMPLER_POLICY
+    assert plan.audit["actual_fraction"] == 0.5
+    assert plan.audit["repeat_cap"] is None
+    assert plan.audit["max_repeat"] >= 1
+
+
+def test_er_sampler_state_roundtrip_preserves_next_epoch():
+    cfg = config(n=8, sizes=(2, 3), replay_fraction=0.5)
+    sampler = replay.FoldERSampler(**cfg)
+    list(sampler)
+    restored = replay.FoldERSampler.from_state_dict(sampler.state_dict(), **cfg)
+    assert restored.next_epoch == sampler.next_epoch == 1
+    assert list(restored) == list(sampler)
+
+
 @pytest.mark.parametrize("change", [
     {"current_sample_ids": ["a", "a"]}, {"replay_sample_ids": ["a", "a"], "replay_raw_labels": [10, 10]},
     {"current_sample_ids": [""]}, {"current_sample_ids": [123]},

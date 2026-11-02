@@ -1,4 +1,4 @@
-"""Strict task-boundary checkpoints for CB-Replay, EWC, A-GEM and IDER."""
+"""Strict task-boundary checkpoints for CB-Replay, ER, EWC, A-GEM and IDER."""
 from __future__ import annotations
 import os
 import random
@@ -192,8 +192,8 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
     """
     from src.training.regularization_memory import restore_memory
     from src.data.replay_sampler import (
-        FoldFullMemorySampler, FoldReplayFractionSampler,
-        FULL_MEMORY_SAMPLER_POLICY,
+        FoldERSampler, FoldFullMemorySampler, FoldReplayFractionSampler,
+        ER_SAMPLER_POLICY, FULL_MEMORY_SAMPLER_POLICY,
     )
     from src.data.stratified_folds import fold_file_sha256
     from src.methods.upcl import validate_prototype_state
@@ -318,6 +318,8 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
         sampler_class = (
             FoldFullMemorySampler
             if expected_contract["sampler"]["policy"] == FULL_MEMORY_SAMPLER_POLICY
+            else FoldERSampler
+            if expected_contract["sampler"]["policy"] == ER_SAMPLER_POLICY
             else FoldReplayFractionSampler
         )
         sampler = sampler_class.from_state_dict(state["sampler_state"], **kwargs)

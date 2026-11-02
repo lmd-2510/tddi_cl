@@ -98,10 +98,16 @@ def member_command(config, member, *, python=sys.executable):
         # compatibility arguments are recorded as inert zero/one values.
         args["replay_fraction"] = 0.0
         args["replay_repeat_cap"] = 1
-    if method not in {engine.FIXED_BUDGET_METHOD, "upcl"}:
+    if method == "er":
+        # ER keeps its paper-defined reservoir/replay arguments in the member
+        # command; the engine validates the exact 1:1 current/replay recipe.
+        args["replay_fraction"] = 0.5
+        args["replay_repeat_cap"] = 1
+        args["fold_replay_policy"] = "er_uniform_reservoir_equal_batch_v1"
+    if method not in {engine.FIXED_BUDGET_METHOD, "er", "upcl"}:
         for key in ("replay_fraction", "replay_repeat_cap", "fold_replay_policy", "focal_gamma"):
             args.pop(key, None)
-        if method != "ider":
+        if method not in {"ider", "er"}:
             for key in ("exemplar_ranking_policy", "buffer_policy"):
                 args.pop(key, None)
     common_task_cache_root = os.environ.get("CIL_COMMON_TASK_CACHE_ROOT")
