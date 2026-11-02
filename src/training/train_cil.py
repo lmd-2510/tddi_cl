@@ -25,15 +25,19 @@ from src.data.class_mapping import remap_labels
 from src.data.class_balanced_replay_buffer import BUFFER_POLICY, RANKING_POLICY
 from src.eval.evaluation import evaluate_model
 from src.methods.agem import project_agem_gradient, trainable_parameters, flatten_gradients, assign_gradients
-from src.methods.ewc import ewc_penalty
+from src.methods.ewc import original_ewc_penalty
 from src.methods.replay import classification_loss as replay_classification_loss
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, TDDIPaperMember, TDDIPaperMemberConfig
+from src.training.class_incremental_policy import (
+    fixed_head_cross_entropy,
+    mask_unseen_logits,
+)
 
 FIXED_BUDGET_METHOD = "class_balanced_fixed_budget_replay"
 METHODS = (FIXED_BUDGET_METHOD, "ewc", "agem")
 METHOD_POLICIES = {
     FIXED_BUDGET_METHOD: "frozen_fold_class_balanced_replay_v1",
-    "ewc": "frozen_fold_online_ewc_v1",
+    "ewc": "frozen_fold_fixed_head_original_ewc_v1",
     "agem": "frozen_fold_agem_v1",
 }
 
@@ -379,6 +383,8 @@ def train_one_epoch(
     return_loss_components=False,
     gradient_clip_norm=None,
     before_batch=None,
+    active_class_indices=None,
+    optimizer_step=None,
 ):
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
@@ -392,7 +398,28 @@ def train_one_epoch(
         if before_batch is not None:
             before_batch(batch_index)
         features, labels = features.to(device), labels.to(device)
-        if hasattr(model, "classification_loss"):
+        if active_class_indices is not None:
+            logits = model(features)
+            if loss_variant == "focal_current_ce_replay":
+                masked_logits = mask_unseen_logits(
+                    logits,
+                    active_class_indices,
+                    total_classes=logits.shape[1],
+                )
+                classification = replay_classification_loss(
+                    masked_logits,
+                    labels,
+                    old_class_indices,
+                    gamma=float(criterion.gamma),
+                )
+            else:
+                classification = fixed_head_cross_entropy(
+                    logits,
+                    labels,
+                    active_class_indices,
+                    total_classes=logits.shape[1],
+                )
+        elif hasattr(model, "classification_loss"):
             if loss_variant != "cross_entropy":
                 raise ValueError("Backbone-native classification loss requires cross entropy.")
             logits, classification = model.classification_loss(features, labels, criterion)
@@ -403,7 +430,11 @@ def train_one_epoch(
         else:
             logits = model(features)
             classification = criterion(logits, labels)
-        raw = ewc_penalty(model, fisher, theta_star) if fisher is not None else logits.new_zeros(())
+        raw = (
+            original_ewc_penalty(model, fisher, theta_star)
+            if fisher is not None
+            else logits.new_zeros(())
+        )
         scaled = ewc_lambda * raw
         loss = classification + scaled
         group_start = (batch_index // gradient_accumulation_steps) * gradient_accumulation_steps
@@ -415,7 +446,10 @@ def train_one_epoch(
                 gradient_projector(steps)
             if gradient_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_norm, error_if_nonfinite=True)
-            optimizer.step()
+            if optimizer_step is None:
+                optimizer.step()
+            else:
+                optimizer_step()
             optimizer.zero_grad(set_to_none=True)
             steps += 1
         count = len(labels)

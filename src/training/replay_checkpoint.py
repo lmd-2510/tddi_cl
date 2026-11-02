@@ -232,10 +232,23 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
         manifest = expected_contract.get("model", {})
         if manifest.get("variant") != "tddi_paper_member":
             raise ValueError("Frozen-fold checkpoint requires the T-DDI backbone.")
+        fixed_head = expected_contract.get("head_policy") == "fixed_global_178_seen_class_mask_v1"
+        global_raw_class_order = expected_contract.get("global_raw_class_order")
+        if fixed_head:
+            if (
+                not isinstance(global_raw_class_order, list)
+                or len(global_raw_class_order) != 178
+                or len(set(global_raw_class_order)) != 178
+                or global_raw_class_order != sorted(global_raw_class_order)
+            ):
+                raise ValueError("Fixed-head checkpoint requires a sorted 178-class global vocabulary.")
+            expected_head_rows = len(global_raw_class_order)
+        else:
+            expected_head_rows = len(classes)
         valid_head = (
             model["head.weight"].ndim == 2
-            and model["head.weight"].shape[0] == len(classes)
-            and tuple(model["head.bias"].shape) == (len(classes),)
+            and model["head.weight"].shape[0] == expected_head_rows
+            and tuple(model["head.bias"].shape) == (expected_head_rows,)
         )
         if not valid_head or not all(isinstance(v, torch.Tensor) and torch.isfinite(v).all() for v in model.values()):
             raise ValueError("Frozen-fold model/head shape or finite-state mismatch.")
@@ -287,6 +300,11 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
         if (best["seen_class_map"] != expected_map or set(best["model_state"]) != set(model)
                 or any(not torch.equal(model[k], best["model_state"][k]) for k in model)):
             raise ValueError("Boundary model must equal completed task's best model.")
+        if (
+            best.get("head_policy") != expected_contract.get("head_policy")
+            or best.get("global_raw_class_order") != global_raw_class_order
+        ):
+            raise ValueError("Boundary model fixed-head policy/global vocabulary mismatch.")
         # Validate completed scheduling from identity-only input audit; no old features.
         audit = json.loads((last_dir / "input_audit.json").read_text(encoding="utf-8"))
         kwargs = dict(current_sample_ids=audit["current_ids"], replay_sample_ids=audit["replay_ids_before"],

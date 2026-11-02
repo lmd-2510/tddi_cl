@@ -19,6 +19,10 @@ except ImportError:  # pragma: no cover - environment may not have torch yet
     DataLoader = None
 
 from src.eval.metrics import compute_classification_metrics, compute_classwise_metrics
+from src.training.class_incremental_policy import (
+    fixed_head_cross_entropy,
+    mask_unseen_logits,
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ def evaluate_model(
     include_classwise: bool = False,
     collect_outputs: bool = False,
     collect_latent: bool = True,
+    active_class_indices: list[int] | None = None,
 ) -> EvaluationResult:
     """Evaluate a model and optionally retain prediction-level arrays.
 
@@ -75,7 +80,18 @@ def evaluate_model(
     if collect_outputs and collect_latent and not hasattr(model, "forward_with_latent"):
         raise TypeError("collect_outputs requires model.forward_with_latent().")
 
-    class_ids = _ordered_raw_class_ids(inverse_seen_map)
+    all_class_ids = _ordered_raw_class_ids(inverse_seen_map)
+    if active_class_indices is None:
+        active_indices = None
+        class_ids = all_class_ids
+    else:
+        active_indices = [int(index) for index in active_class_indices]
+        if len(active_indices) != len(set(active_indices)) or not active_indices:
+            raise ValueError("active_class_indices must be non-empty and unique.")
+        if min(active_indices) < 0 or max(active_indices) >= len(all_class_ids):
+            raise ValueError("Active class index is outside the fixed class map.")
+        active_indices = sorted(active_indices)
+        class_ids = all_class_ids[np.asarray(active_indices, dtype=np.int64)]
     model.eval()
     total_loss = 0.0
     total_examples = 0
@@ -97,18 +113,35 @@ def evaluate_model(
                 else:
                     logits = model(features)
                     latent = None
-                loss = criterion(logits, labels)
+                if active_indices is None:
+                    reporting_logits = logits
+                    loss = criterion(logits, labels)
+                    predictions = logits.argmax(dim=1)
+                    probabilities = F.softmax(logits, dim=1)
+                else:
+                    masked_logits = mask_unseen_logits(
+                        logits,
+                        active_indices,
+                        total_classes=len(all_class_ids),
+                    )
+                    loss = fixed_head_cross_entropy(
+                        logits,
+                        labels,
+                        active_indices,
+                        total_classes=len(all_class_ids),
+                    )
+                    predictions = masked_logits.argmax(dim=1)
+                    reporting_logits = masked_logits[:, active_indices]
+                    probabilities = F.softmax(reporting_logits, dim=1)
                 batch_size = labels.shape[0]
                 total_loss += float(loss.item()) * batch_size
                 total_examples += batch_size
-                predictions = logits.argmax(dim=1)
-                probabilities = F.softmax(logits, dim=1)
                 all_true.append(labels.cpu().numpy())
                 all_pred.append(predictions.cpu().numpy())
                 if include_classwise or collect_outputs:
                     all_probabilities.append(probabilities.cpu().numpy())
                 if collect_outputs:
-                    all_logits.append(logits.cpu().numpy())
+                    all_logits.append(reporting_logits.cpu().numpy())
                     if collect_latent and latent is None:  # pragma: no cover - guarded by branch above
                         raise RuntimeError("Latent outputs were not returned by the model.")
                     if collect_latent:
@@ -138,27 +171,40 @@ def evaluate_model(
     if include_classwise:
         if probabilities_array is None:  # pragma: no cover - guarded above
             raise RuntimeError("Class-wise evaluation requires probabilities.")
+        if active_indices is None:
+            classwise_true, classwise_pred = y_true, y_pred
+            classwise_indices = sorted(inverse_seen_map)
+            classwise_inverse = inverse_seen_map
+        else:
+            global_to_local = {global_index: local for local, global_index in enumerate(active_indices)}
+            classwise_true = np.asarray([global_to_local[int(value)] for value in y_true], dtype=np.int64)
+            classwise_pred = np.asarray([global_to_local[int(value)] for value in y_pred], dtype=np.int64)
+            classwise_indices = list(range(len(active_indices)))
+            classwise_inverse = {
+                local: int(all_class_ids[global_index])
+                for local, global_index in enumerate(active_indices)
+            }
         classwise = compute_classwise_metrics(
-            y_true,
-            y_pred,
+            classwise_true,
+            classwise_pred,
             probabilities_array,
-            class_indices=sorted(inverse_seen_map),
-            inverse_class_map=inverse_seen_map,
+            class_indices=classwise_indices,
+            inverse_class_map=classwise_inverse,
         )
 
     outputs = None
     if collect_outputs:
         if probabilities_array is None:  # pragma: no cover - guarded above
             raise RuntimeError("Prediction collection requires probabilities.")
-        if np.any(y_true < 0) or np.any(y_true >= class_ids.shape[0]):
+        if np.any(y_true < 0) or np.any(y_true >= all_class_ids.shape[0]):
             raise ValueError("Evaluation labels fall outside seen-class output columns.")
-        if np.any(y_pred < 0) or np.any(y_pred >= class_ids.shape[0]):
+        if np.any(y_pred < 0) or np.any(y_pred >= all_class_ids.shape[0]):
             raise ValueError("Predictions fall outside seen-class output columns.")
         outputs = PredictionOutputs(
             logits=np.concatenate(all_logits).astype(np.float32, copy=False),
             probabilities=probabilities_array,
-            predictions=class_ids[y_pred],
-            labels=class_ids[y_true],
+            predictions=all_class_ids[y_pred],
+            labels=all_class_ids[y_true],
             latent_features=(
                 np.concatenate(all_latent).astype(np.float32, copy=False)
                 if collect_latent else None

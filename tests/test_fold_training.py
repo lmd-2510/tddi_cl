@@ -106,6 +106,20 @@ def test_three_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
     if method == "ewc":
         assert state["buffer_state"]["metadata"]["total_memory_budget"] == 0
         assert state["method_state"]["fisher"]
+        assert state["contract"]["head_policy"] == fold_training.EWC_FIXED_HEAD_POLICY
+        assert len(state["contract"]["global_raw_class_order"]) == 178
+        assert state["model_state"]["head.weight"].shape[0] == 178
+        assert artifact.class_count == 58
+        assert artifact.probabilities.shape[1] == 58
+        assert set(artifact.raw_class_ids.tolist()) == set(state["seen_class_map"])
+        global_order = state["contract"]["global_raw_class_order"]
+        future_rows = [
+            index for index, raw in enumerate(global_order)
+            if raw not in state["seen_class_map"]
+        ]
+        fisher = state["method_state"]["fisher"]
+        assert torch.count_nonzero(fisher["head.weight"][future_rows]).item() == 0
+        assert torch.count_nonzero(fisher["head.bias"][future_rows]).item() == 0
     else:
         assert state["method_state"] == {}
     for t in (0, 1):

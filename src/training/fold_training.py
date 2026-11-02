@@ -21,7 +21,12 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from src.data.class_mapping import build_seen_class_map, invert_class_map, remap_labels
+from src.data.class_mapping import (
+    build_global_class_map,
+    build_seen_class_map,
+    invert_class_map,
+    remap_labels,
+)
 from src.data.ddi_dataset import (
     DEFAULT_META_COLS, DDIBatchArrays, load_development_fold_arrays, load_development_fold_identity,
     load_feature_columns, load_split_frame,
@@ -47,7 +52,12 @@ from src.data.task_protocols import (
     validate_full_task_spec,
 )
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, paper_member_manifest
-from src.methods.ewc import compute_fisher, grow_head_state
+from src.methods.ewc import (
+    compute_fisher,
+    consolidate_quadratic_penalties,
+    parameter_snapshot,
+)
+from src.training.class_incremental_policy import ClassIncrementalPolicy
 from src.training.regularization_memory import create_memory
 from src.eval.predictions import (
     MemberPredictionContext,
@@ -64,6 +74,7 @@ from src.training.replay_checkpoint import (
 )
 
 TRAINING_POLICY = "frozen_fold_class_balanced_replay_v1"
+EWC_FIXED_HEAD_POLICY = "fixed_global_178_seen_class_mask_v1"
 FULL_TASK_LAYOUT = TASK_LAYOUT
 SUPPORTED_TASK_PROTOCOLS = PROTOCOL_IDS
 
@@ -92,7 +103,7 @@ def engine_methods():
 def method_policy(method):
     return {
         "class_balanced_fixed_budget_replay": TRAINING_POLICY,
-        "ewc": "frozen_fold_online_ewc_v1",
+        "ewc": "frozen_fold_fixed_head_original_ewc_v1",
         "agem": "frozen_fold_agem_v1",
     }[method]
 
@@ -194,6 +205,8 @@ def _prediction_provenance(prepared, *, metadata, labels, all_oof=None):
         "buffer_policy": buffer.metadata["policy"],
         "global_memory_budget": sum(prepared["budgets"].values()),
         "model": resolved["model"],
+        "head_policy": resolved["head_policy"],
+        "global_raw_class_order": resolved["global_raw_class_order"],
         "microbatch": resolved["microbatch"],
         "effective_batch_target": resolved["effective_batch_target"],
         "loss_scope": resolved["loss_scope"],
@@ -279,18 +292,29 @@ def _group_metrics_from_outputs(outputs, seen_map, new_classes, criterion):
 
 def _evaluate_fold_split(
     *, engine, model, values, labels, seen_map, new_classes, criterion,
-    device, batch_size,
+    device, batch_size, global_class_map=None,
 ):
     """Run one reporting inference pass and reuse it for metrics and export."""
+    label_map = seen_map if global_class_map is None else global_class_map
+    active_indices = (
+        None
+        if global_class_map is None
+        else [global_class_map[raw] for raw in sorted(seen_map)]
+    )
     loader = DataLoader(
-        engine.build_tensor_dataset(values, remap_labels(labels, seen_map)),
+        engine.build_tensor_dataset(values, remap_labels(labels, label_map)),
         batch_size=batch_size, shuffle=False, drop_last=False,
         generator=torch.Generator().manual_seed(0),
     )
     result = engine.evaluate_model(
-        model, loader, criterion, device, invert_class_map(seen_map),
-        evaluation_class_indices=list(range(len(seen_map))),
+        model, loader, criterion, device, invert_class_map(label_map),
+        evaluation_class_indices=(
+            list(range(len(seen_map)))
+            if active_indices is None
+            else active_indices
+        ),
         collect_outputs=True, collect_latent=False,
+        active_class_indices=active_indices,
     )
     if result.outputs is None:
         raise RuntimeError("Fold reporting evaluation did not return prediction outputs.")
@@ -321,6 +345,14 @@ def prepare_fold_run(args, *, engine, context=None):
             raise ValueError("Cached fold context does not match requested source/assignment paths.")
         context.assert_unchanged()
     tasks = validate_fold_task_spec(spec, context)
+    global_class_map = build_global_class_map(
+        raw for task in tasks for raw in task["classes"]
+    )
+    if len(global_class_map) != 178:
+        raise ValueError("Fixed-head study requires exactly 178 global classes.")
+    global_raw_class_order = [
+        raw for raw, _ in sorted(global_class_map.items(), key=lambda item: item[1])
+    ]
     manifest = context.manifest
     if manifest["fold_seed"] != 42:
         raise ValueError("Assignment fold seed must be 42.")
@@ -356,6 +388,10 @@ def prepare_fold_run(args, *, engine, context=None):
         "task_protocol_id": SUPPORTED_TASK_PROTOCOLS[spec["protocol"]],
         "task_file_sha256": task_hash,
         "task_layout": FULL_TASK_LAYOUT, "protocol_task_count": 8, "stop_after_task": stop,
+        "head_policy": (
+            EWC_FIXED_HEAD_POLICY if args.method == "ewc" else "expanding_seen_class_head_v1"
+        ),
+        "global_raw_class_order": global_raw_class_order,
         "assignment_sha256": manifest["assignment_sha256"], "fold_manifest_sha256": context.manifest_sha256,
         "sources": buffer.metadata["sources"], "preprocessing_sha256": prep_hash,
         "preprocessing": prep.metadata, "buffer": buffer.metadata,
@@ -372,7 +408,7 @@ def prepare_fold_run(args, *, engine, context=None):
         "drop_last": False, "optimizer": "AdamW_new_each_task", "scheduler": None,
         "classification_weight": 1.0, "loss_variant": args.loss_variant,
         "loss_scope": ("focal_current_cross_entropy_replay" if args.method == "class_balanced_fixed_budget_replay"
-                       else "cross_entropy_plus_online_ewc" if args.method == "ewc" else "cross_entropy_with_agem_projection"),
+                       else "fixed_head_cross_entropy_plus_original_cumulative_ewc" if args.method == "ewc" else "cross_entropy_with_agem_projection"),
         "early_stopping": "held_out_all_seen_macro_f1", "validation_only": args.validation_only,
         "test_policy": "integrity_hash_and_pair_IDs_only" if args.validation_only else "report_only_after_best_validation",
         "prediction_export": {
@@ -388,7 +424,8 @@ def prepare_fold_run(args, *, engine, context=None):
             "eval/metrics.py", "eval/predictions.py", "data/ddi_dataset.py",
             "data/fold_preprocessing.py", "data/class_balanced_replay_buffer.py", "data/replay_sampler.py",
             "methods/ewc.py", "methods/agem.py", "methods/replay.py", "models/tddi_paper_member.py",
-            "training/regularization_memory.py", "training/replay_checkpoint.py")},
+            "training/regularization_memory.py", "training/replay_checkpoint.py",
+            "training/class_incremental_policy.py")},
     }
     # Scope/path relocation may change; learning/provenance contract may not.
     contract = {k: v for k, v in resolved.items() if k != "stop_after_task"}
@@ -448,6 +485,7 @@ def prepare_fold_run(args, *, engine, context=None):
     return dict(columns=columns, tasks=tasks, task_hash=task_hash, context=context, manifest=manifest,
                 prep=prep, prep_hash=prep_hash, budgets=budgets, buffer_kwargs=buffer_kwargs, buffer=buffer,
                 seeds=seeds, device=device, stop=stop, arguments=arguments, resolved=resolved, contract=contract,
+                global_class_map=global_class_map,
                 task_cache_contract=task_cache_contract,
                 task_cache_root=getattr(args, "task_cache_root", None),
                 source_shard_cache_root=source_shard_root)
@@ -467,6 +505,8 @@ def run_fold_training(args, *, engine):
         ("prep", "prep_hash", "budgets", "buffer_kwargs", "buffer"))
     seeds, device, stop, arguments, resolved, contract = (prepared[k] for k in
         ("seeds", "device", "stop", "arguments", "resolved", "contract"))
+    global_class_map = prepared["global_class_map"]
+    fixed_head = args.method == "ewc"
     task_cache_contract = prepared.get("task_cache_contract")
     task_cache_root = prepared.get("task_cache_root")
     source_shard_root = prepared.get("source_shard_cache_root")
@@ -495,7 +535,8 @@ def run_fold_training(args, *, engine):
     artifact_hashes, start_task = {}, 0
     if loaded:
         previous_map = loaded["seen_class_map"]
-        previous = engine.expand_model_for_seen_classes(None, None, previous_map,
+        reconstruction_map = global_class_map if fixed_head else previous_map
+        previous = engine.expand_model_for_seen_classes(None, None, reconstruction_map,
             variant=args.variant, input_dim=len(columns), dropout=args.dropout,
             activation=args.activation, norm=args.norm)
         previous.load_state_dict(loaded["model_state"], strict=True)
@@ -522,6 +563,15 @@ def run_fold_training(args, *, engine):
             task_root.parent.mkdir(exist_ok=True)
         task_root.mkdir(exist_ok=False)
         seen_map = build_seen_class_map(set(previous_map) | set(new_classes))
+        active_class_indices = [global_class_map[raw] for raw in sorted(seen_map)]
+        class_policy = (
+            ClassIncrementalPolicy(
+                global_class_map,
+                active_raw_classes=seen_map,
+            )
+            if fixed_head
+            else None
+        )
         logger.log(f"task={task_id} loading current/held-out seen_classes={len(seen_map)}")
         cache_loaded = False
         cache_manifest = (
@@ -662,7 +712,9 @@ def run_fold_training(args, *, engine):
             "replay_ids_before": replay_ids, "replay_raw_labels_before": retained.labels.tolist() if replay_ids else [],
             "validation_ids": _ids(validation),
             "current_raw_classes": new_classes, "seen_class_map": seen_map,
-            "head_size": len(seen_map), "sampler": sampler.metadata,
+            "head_size": 178 if fixed_head else len(seen_map),
+            "active_class_count": len(seen_map),
+            "head_policy": resolved["head_policy"], "sampler": sampler.metadata,
             "assignment_sha256": manifest["assignment_sha256"], "preprocessing_sha256": prep_hash,
             "buffer_policy": buffer.metadata["policy"], "ranking": buffer.metadata["ranking"]})
         current_inputs = current_model.features
@@ -670,20 +722,26 @@ def run_fold_training(args, *, engine):
                          if args.method == "class_balanced_fixed_budget_replay" else np.empty((0, len(columns)), dtype=np.float32))
         replay_labels = retained.labels if args.method == "class_balanced_fixed_budget_replay" else np.empty(0, dtype=np.int64)
         val_inputs = validation_model.features
+        training_label_map = global_class_map if fixed_head else seen_map
         training = engine.build_tensor_dataset(np.concatenate((current_inputs, replay_inputs)),
-            remap_labels(np.concatenate((current.labels, replay_labels)), seen_map))
+            remap_labels(np.concatenate((current.labels, replay_labels)), training_label_map))
         loader = DataLoader(training, batch_size=args.batch_size, sampler=sampler, drop_last=False,
                             generator=torch.Generator().manual_seed(seeds.member_seed + task_id))
-        val_loader = DataLoader(engine.build_tensor_dataset(val_inputs, remap_labels(validation.labels, seen_map)),
+        val_loader = DataLoader(engine.build_tensor_dataset(
+                                   val_inputs, remap_labels(validation.labels, training_label_map)),
                                batch_size=args.batch_size, shuffle=False, drop_last=False,
                                generator=torch.Generator().manual_seed(seeds.member_seed + task_id))
         del current_inputs, replay_inputs
-        model = engine.expand_model_for_seen_classes(previous, previous_map, seen_map,
+        model_map = global_class_map if fixed_head else seen_map
+        previous_model_map = global_class_map if fixed_head and previous is not None else previous_map
+        model = engine.expand_model_for_seen_classes(previous, previous_model_map, model_map,
             variant=args.variant, input_dim=len(columns), dropout=args.dropout,
             activation=args.activation, norm=args.norm).to(device)
+        if class_policy is not None:
+            class_policy.validate_linear_head(model.classifier_head)
         if args.method == "ewc" and fisher is not None:
-            fisher = {k: v.to(device) for k, v in grow_head_state(fisher, previous_map, seen_map, model.state_dict(), zero_new_rows=True).items()}
-            theta_star = {k: v.to(device) for k, v in grow_head_state(theta_star, previous_map, seen_map, model.state_dict(), zero_new_rows=False).items()}
+            fisher = {k: v.to(device) for k, v in fisher.items()}
+            theta_star = {k: v.to(device) for k, v in theta_star.items()}
         optimizer = engine.make_optimizer(model, args)
         criterion = engine.training_criterion(args)
         evaluation_criterion = criterion
@@ -705,11 +763,17 @@ def run_fold_training(args, *, engine):
                         _model_values(retained.features[idx], prep, columns, args.member_id),
                         retained.labels[idx], seen_map, device)
             losses = engine.train_one_epoch(model, loader, optimizer, criterion, device,
-                old_class_indices=[seen_map[c] for c in previous_map],
+                old_class_indices=[training_label_map[c] for c in previous_map],
                 fisher=fisher, theta_star=theta_star, ewc_lambda=args.ewc_lambda,
                 gradient_accumulation_steps=args.effective_batch_size // args.batch_size,
                 gradient_projector=projector, loss_variant=args.loss_variant,
-                return_loss_components=True, gradient_clip_norm=args.gradient_clip_norm, **schedule_kwargs)
+                return_loss_components=True, gradient_clip_norm=args.gradient_clip_norm,
+                active_class_indices=active_class_indices if fixed_head else None,
+                optimizer_step=(
+                    (lambda: class_policy.optimizer_step(optimizer, model.classifier_head))
+                    if class_policy is not None else None
+                ),
+                **schedule_kwargs)
             audit = sampler.last_audit
             expected_replay = (
                 0 if task_id == 0 or args.method != "class_balanced_fixed_budget_replay" else min(
@@ -725,8 +789,17 @@ def run_fold_training(args, *, engine):
                     or losses.optimizer_steps != math.ceil(len(sampler) / args.effective_batch_size)
                     or losses.tail_effective_batch != (len(sampler) - 1) % args.effective_batch_size + 1):
                 raise RuntimeError("Runtime sampler/current coverage/cap/optimizer-step audit mismatch.")
-            result = engine.evaluate_model(model, val_loader, evaluation_criterion, device, invert_class_map(seen_map),
-                                           evaluation_class_indices=list(range(len(seen_map))))
+            result = engine.evaluate_model(
+                model,
+                val_loader,
+                evaluation_criterion,
+                device,
+                invert_class_map(training_label_map),
+                evaluation_class_indices=(
+                    active_class_indices if fixed_head else list(range(len(seen_map)))
+                ),
+                active_class_indices=active_class_indices if fixed_head else None,
+            )
             row = {"task": task_id, "epoch": epoch + 1, **asdict(losses),
                    "classification_weight": 1.0,
                    "validation_macro_f1": result.metrics["macro_f1"],
@@ -758,6 +831,7 @@ def run_fold_training(args, *, engine):
             labels=validation.labels, seen_map=seen_map,
             new_classes=new_classes, criterion=evaluation_criterion, device=device,
             batch_size=args.evaluation_batch_size,
+            global_class_map=global_class_map if fixed_head else None,
         )
         reporting_timings["validation_inference_seconds"] = time.perf_counter() - stage_started
         metrics = [
@@ -768,6 +842,8 @@ def run_fold_training(args, *, engine):
         # Model-only inference snapshot, deliberately not a resumable checkpoint.
         atomic_publish_fold_file(task_root / "best_model.pt", lambda handle:
             torch.save({"model_state": best_state, "seen_class_map": seen_map, "task_id": task_id,
+                        "global_raw_class_order": resolved["global_raw_class_order"],
+                        "head_policy": resolved["head_policy"],
                         "run_id": run_id, "resumable": False, "policy": method_policy(args.method)}, handle))
         prediction_paths = []
         if args.export_member_predictions and "validation" in args.member_prediction_splits:
@@ -799,6 +875,7 @@ def run_fold_training(args, *, engine):
                 labels=test_labels, seen_map=seen_map,
                 new_classes=new_classes, criterion=evaluation_criterion, device=device,
                 batch_size=args.evaluation_batch_size,
+                global_class_map=global_class_map if fixed_head else None,
             )
             reporting_timings["test_inference_seconds"] = time.perf_counter() - stage_started
             metrics.extend(
@@ -836,7 +913,10 @@ def run_fold_training(args, *, engine):
         _publish_json(task_root / "metrics.json", metrics)
         _publish_csv(task_root / "metrics.csv", metrics)
         _publish_csv(task_root / "training_audit.csv", epoch_rows)
-        summary = {"task_id": task_id, "head_size": len(seen_map), "seen_class_map": seen_map,
+        summary = {"task_id": task_id,
+            "head_size": 178 if fixed_head else len(seen_map),
+            "active_class_count": len(seen_map), "head_policy": resolved["head_policy"],
+            "seen_class_map": seen_map,
             "best_epoch": best_epoch, "best_validation_macro_f1": best_score, "epochs_trained": len(epoch_rows),
             "selection_validation_macro_f1": best_validation_metrics["macro_f1"],
             "selection_validation_balanced_accuracy": best_validation_metrics["balanced_accuracy"],
@@ -861,19 +941,33 @@ def run_fold_training(args, *, engine):
         if prediction_paths:
             artifact_hashes.update(fold_artifact_inventory(root, prediction_paths[0].parent))
         if args.method == "ewc":
-            fisher_loader = DataLoader(engine.build_tensor_dataset(current_model.features, remap_labels(current.labels, seen_map)),
+            fisher_loader = DataLoader(engine.build_tensor_dataset(
+                                           current_model.features,
+                                           remap_labels(current.labels, global_class_map)),
                                        batch_size=args.batch_size, shuffle=False,
                                        generator=torch.Generator().manual_seed(seeds.member_seed + task_id))
-            new_fisher = compute_fisher(model, fisher_loader, device)
-            fisher = {k: (new_fisher[k] + (fisher[k] if fisher is not None else 0)).detach().cpu() for k in new_fisher}
-            theta_star = {k: v.detach().cpu().clone() for k, v in model.named_parameters()}
+            new_fisher = compute_fisher(
+                model,
+                fisher_loader,
+                device,
+                active_class_indices=active_class_indices,
+                total_classes=len(global_class_map),
+            )
+            new_theta_star = parameter_snapshot(model)
+            fisher, theta_star = consolidate_quadratic_penalties(
+                fisher,
+                theta_star,
+                new_fisher,
+                new_theta_star,
+            )
         checkpoint_started = time.perf_counter()
         boundary_path = save_fold_replay_checkpoint(root / "checkpoints" / f"task_{task_id}.pt", run_id=run_id,
             completed_task_id=task_id, model_state=best_state, seen_class_map=seen_map, contract=contract,
             buffer=buffer, sampler=sampler, method_state={"fisher": fisher, "theta_star": theta_star} if args.method == "ewc" else {}, run_config_sha256=config_hash, artifact_hashes=artifact_hashes,
             progress={"metric_rows": all_metrics, "epoch_rows": all_epochs, "task_summaries": task_summaries})
         checkpoint_seconds = time.perf_counter() - checkpoint_started
-        logger.log(f"task={task_id} complete head={len(seen_map)} best_epoch={best_epoch} retained={buffer.total_size} "
+        logger.log(f"task={task_id} complete head={178 if fixed_head else len(seen_map)} "
+                   f"active_classes={len(seen_map)} best_epoch={best_epoch} retained={buffer.total_size} "
                    f"checkpoint={boundary_path} checkpoint_bytes={boundary_path.stat().st_size} "
                    f"checkpoint_seconds={checkpoint_seconds:.6f}")
         previous, previous_map = model.cpu(), seen_map
