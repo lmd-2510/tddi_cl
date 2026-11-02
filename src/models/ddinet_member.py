@@ -7,6 +7,7 @@ from dataclasses import dataclass
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 except ImportError:  # pragma: no cover - environment may not have torch yet
     torch = None
     nn = None
@@ -121,6 +122,8 @@ if nn is not None:
             return self.backbone(features)
 
         def classify(self, latent: torch.Tensor) -> torch.Tensor:
+            if getattr(self, "upcl_prototype_head", False):
+                return self.head(F.normalize(latent, dim=1))
             return self.head(latent)
 
         def forward_with_latent(

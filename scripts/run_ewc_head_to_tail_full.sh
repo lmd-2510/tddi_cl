@@ -15,8 +15,12 @@ case "$METHOD" in
     METHOD_LABEL="A-GEM"
     METHOD_RECIPE="A-GEM task-uniform episodic memory; reference batch=256"
     ;;
+  upcl)
+    METHOD_LABEL="UPCL"
+    METHOD_RECIPE="UPCL frozen uniform-prototype head + equal-class iCaRL-style memory replay"
+    ;;
   *)
-    echo "[STOP] CIL_FULL_RUN_METHOD must be 'ewc' or 'agem', got: $METHOD" >&2
+    echo "[STOP] CIL_FULL_RUN_METHOD must be 'ewc', 'agem' or 'upcl', got: $METHOD" >&2
     exit 2
     ;;
 esac

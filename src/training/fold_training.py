@@ -44,7 +44,10 @@ from src.data.task_cache import (
 from src.data.source_shard_cache import load_source_shard, validate_source_shard_cache
 from src.data.fold_preprocessing import load_fold_preprocessing
 from src.data.class_balanced_replay_buffer import BUFFER_POLICY, RANKING_POLICY, four_percent_member_budgets
-from src.data.replay_sampler import FoldReplayFractionSampler, RNG_DERIVATION, SAMPLER_POLICY
+from src.data.replay_sampler import (
+    FoldFullMemorySampler, FoldReplayFractionSampler,
+    FULL_MEMORY_SAMPLER_POLICY, RNG_DERIVATION, SAMPLER_POLICY,
+)
 from src.data.stratified_folds import fold_file_sha256
 from src.data.task_protocols import (
     PROTOCOL_IDS,
@@ -61,6 +64,14 @@ from src.methods.ider import (
     IDERTrainingContext,
     METHOD_POLICY as IDER_POLICY,
     optimizer_step_preserving_future_classes,
+)
+from src.methods.upcl import (
+    METHOD_POLICY as UPCL_POLICY,
+    UPCLTrainingContext,
+    class_log_priors,
+    enable_upcl_prototype_head,
+    prepare_task_prototypes,
+    validate_prototype_state,
 )
 from src.training.class_incremental_policy import ClassIncrementalPolicy
 from src.training.regularization_memory import create_memory
@@ -104,7 +115,7 @@ def _publish_csv(path, rows):
 
 
 def engine_methods():
-    return {"class_balanced_fixed_budget_replay", "ewc", "agem", "ider"}
+    return {"class_balanced_fixed_budget_replay", "ewc", "agem", "ider", "upcl"}
 
 
 def method_policy(method):
@@ -113,12 +124,13 @@ def method_policy(method):
         "ewc": "frozen_fold_fixed_head_original_ewc_v1",
         "agem": "frozen_fold_fixed_head_agem_v1",
         "ider": IDER_POLICY,
+        "upcl": UPCL_POLICY,
     }[method]
 
 
 def validate_fold_options(args):
     if args.method not in engine_methods():
-        raise ValueError("Supported methods are CB-Replay, EWC, A-GEM and IDER.")
+        raise ValueError("Supported methods are CB-Replay, EWC, A-GEM, IDER and UPCL.")
     if args.variant != "tddi_paper_member" or args.norm != "layernorm":
         raise ValueError("Unsupported frozen-fold model/normalization.")
     if args.member_id not in (0, 1, 2) or args.seed != 0 or args.fold_seed != 42:
@@ -142,7 +154,7 @@ def validate_fold_options(args):
     expected_loss = (
         "focal_current_ce_replay"
         if args.method == "class_balanced_fixed_budget_replay"
-        else "ider" if args.method == "ider" else "cross_entropy"
+        else "ider" if args.method == "ider" else "upcl" if args.method == "upcl" else "cross_entropy"
     )
     if args.loss_variant != expected_loss:
         raise ValueError("Loss must match the selected method.")
@@ -154,6 +166,8 @@ def validate_fold_options(args):
         raise ValueError("Replay cap and A-GEM reference batch must be positive.")
     if args.ider_replay_batch_size <= 0:
         raise ValueError("IDER replay batch size must be positive.")
+    if not math.isfinite(args.upcl_temperature) or args.upcl_temperature <= 0:
+        raise ValueError("UPCL temperature must be finite and positive.")
     for name in ("lr", "weight_decay", "focal_gamma", "ewc_lambda"):
         value = getattr(args, name)
         if not math.isfinite(value) or value < 0 or (name == "lr" and value == 0):
@@ -430,6 +444,7 @@ def prepare_fold_run(args, *, engine, context=None):
             "ewc": "fixed_head_cross_entropy_plus_original_cumulative_ewc",
             "agem": "cross_entropy_with_agem_projection",
             "ider": "paper_idempotence_current_and_equal_class_memory_replay",
+            "upcl": "paper_uniform_prototype_contrastive_feature_kd_iCaRL_memory_replay",
         }[args.method],
         "early_stopping": "held_out_all_seen_macro_f1", "validation_only": args.validation_only,
         "test_policy": "integrity_hash_and_pair_IDs_only" if args.validation_only else "report_only_after_best_validation",
@@ -445,7 +460,7 @@ def prepare_fold_run(args, *, engine, context=None):
             "training/fold_training.py", "training/train_cil.py", "eval/evaluation.py",
             "eval/metrics.py", "eval/predictions.py", "data/ddi_dataset.py",
             "data/fold_preprocessing.py", "data/class_balanced_replay_buffer.py", "data/replay_sampler.py",
-            "methods/ewc.py", "methods/agem.py", "methods/ider.py", "methods/replay.py", "models/tddi_paper_member.py",
+            "methods/ewc.py", "methods/agem.py", "methods/ider.py", "methods/upcl.py", "methods/replay.py", "models/tddi_paper_member.py",
             "training/regularization_memory.py", "training/replay_checkpoint.py",
             "training/class_incremental_policy.py")},
     }
@@ -460,13 +475,17 @@ def prepare_fold_run(args, *, engine, context=None):
             "ider_weight_a", "ider_weight_b", "ider_weight_c",
             "ider_uniform_probability", "ider_replay_batch_size",
         ))
+    if args.method == "upcl":
+        hyperparameter_names.append("upcl_temperature")
     contract["hyperparameters"] = {
         key: getattr(args, key) for key in hyperparameter_names
     }
     contract["sampler"] = {
-        "policy": SAMPLER_POLICY, "schema_version": 1, "rng_derivation": RNG_DERIVATION,
+        "policy": FULL_MEMORY_SAMPLER_POLICY if args.method == "upcl" else SAMPLER_POLICY,
+        "schema_version": 1, "rng_derivation": RNG_DERIVATION,
         "replay_fraction": args.replay_fraction if args.method == "class_balanced_fixed_budget_replay" else 0.0,
-        "repeat_cap": args.replay_repeat_cap, "task_boundary_epoch_reset": 0,
+        "repeat_cap": args.replay_repeat_cap if args.method == "class_balanced_fixed_budget_replay" else 1,
+        "task_boundary_epoch_reset": 0,
     }
     contract = json.loads(_json(contract))
     task_cache_contract = None
@@ -563,7 +582,7 @@ def run_fold_training(args, *, engine):
     logger.log(f"Frozen-fold training started policy={method_policy(args.method)} member={args.member_id} stop_after_task={stop}")
     set_configured_seeds(seeds)
     previous, previous_map = None, {}
-    fisher, theta_star = None, None
+    fisher, theta_star, upcl_state = None, None, None
     all_metrics, all_epochs, task_summaries = [], [], []
     artifact_hashes, start_task = {}, 0
     if loaded:
@@ -582,6 +601,13 @@ def run_fold_training(args, *, engine):
         # expansion of the next student, matching a continuous task boundary.
         restore_rng_state(loaded["rng_state"])
         fisher, theta_star = loaded["method_state"].get("fisher"), loaded["method_state"].get("theta_star")
+        upcl_state = loaded["method_state"].get("upcl")
+        if args.method == "upcl":
+            enable_upcl_prototype_head(previous)
+            head = previous.classifier_head
+            upcl_state = validate_prototype_state(
+                upcl_state, total_classes=head.out_features, latent_dim=head.in_features,
+            )
         del loaded
         logger.log(f"Resumed task boundary; next_task={start_task}, preprocessing not refit")
     for task in tasks[start_task:stop + 1]:
@@ -734,14 +760,15 @@ def run_fold_training(args, *, engine):
             raise ValueError("Replay contains non-old classes.")
         if set(_ids(current) + _ids(retained)) & set(_ids(validation)):
             raise ValueError("Training/replay overlaps held-out validation IDs.")
-        memory_ids = _ids(retained) if args.method in {"class_balanced_fixed_budget_replay", "ider"} else []
-        replay_ids = _ids(retained) if args.method == "class_balanced_fixed_budget_replay" else []
-        sampler = FoldReplayFractionSampler(
+        memory_ids = _ids(retained) if args.method in {"class_balanced_fixed_budget_replay", "ider", "upcl"} else []
+        replay_ids = _ids(retained) if args.method in {"class_balanced_fixed_budget_replay", "upcl"} else []
+        sampler_class = FoldFullMemorySampler if args.method == "upcl" else FoldReplayFractionSampler
+        sampler = sampler_class(
             current_sample_ids=_ids(current), replay_sample_ids=replay_ids,
-            replay_raw_labels=retained.labels if args.method == "class_balanced_fixed_budget_replay" else np.empty(0, dtype=np.int64), experiment_seed=args.seed,
+            replay_raw_labels=retained.labels if args.method in {"class_balanced_fixed_budget_replay", "upcl"} else np.empty(0, dtype=np.int64), experiment_seed=args.seed,
             member_id=args.member_id, task_id=task_id,
             replay_fraction=contract["sampler"]["replay_fraction"],
-            repeat_cap=args.replay_repeat_cap,
+            repeat_cap=contract["sampler"]["repeat_cap"],
         )
         _publish_json(task_root / "input_audit.json", {"task_id": task_id, "current_ids": _ids(current),
             "replay_ids_before": memory_ids, "replay_raw_labels_before": retained.labels.tolist() if memory_ids else [],
@@ -754,8 +781,8 @@ def run_fold_training(args, *, engine):
             "buffer_policy": buffer.metadata["policy"], "ranking": buffer.metadata["ranking"]})
         current_inputs = current_model.features
         replay_inputs = (_model_values(retained.features, prep, columns, args.member_id)
-                         if args.method == "class_balanced_fixed_budget_replay" else np.empty((0, len(columns)), dtype=np.float32))
-        replay_labels = retained.labels if args.method == "class_balanced_fixed_budget_replay" else np.empty(0, dtype=np.int64)
+                         if args.method in {"class_balanced_fixed_budget_replay", "upcl"} else np.empty((0, len(columns)), dtype=np.float32))
+        replay_labels = retained.labels if args.method in {"class_balanced_fixed_budget_replay", "upcl"} else np.empty(0, dtype=np.int64)
         ider_replay_features = None
         ider_replay_labels = None
         if args.method == "ider" and len(retained.labels):
@@ -784,6 +811,17 @@ def run_fold_training(args, *, engine):
             active_class_indices=active_class_indices).to(device)
         if class_policy is not None:
             class_policy.validate_linear_head(model.classifier_head)
+        if args.method == "upcl":
+            # Assignment sees only the arriving task's model-view rows.  The
+            # generated candidates are orthogonal to every old assigned row.
+            upcl_state = prepare_task_prototypes(
+                model, upcl_state,
+                current_features=torch.from_numpy(np.asarray(current_model.features, dtype=np.float32)),
+                current_labels=torch.from_numpy(remap_labels(current.labels, global_class_map).astype(np.int64, copy=False)),
+                new_class_indices=[global_class_map[raw] for raw in new_classes],
+                active_class_indices=active_class_indices,
+                seed=args.seed, member_id=args.member_id, task_id=task_id, device=device,
+            )
         if args.method == "ewc" and fisher is not None:
             fisher = {k: v.to(device) for k, v in fisher.items()}
             theta_star = {k: v.to(device) for k, v in theta_star.items()}
@@ -830,6 +868,17 @@ def run_fold_training(args, *, engine):
                     uniform_probability=args.ider_uniform_probability,
                     generator=ider_generator,
                 )
+            if args.method == "upcl":
+                schedule_kwargs["upcl_context"] = UPCLTrainingContext(
+                    old_model=(previous.to(device).eval().requires_grad_(False) if previous is not None else None),
+                    active_class_indices=tuple(active_class_indices),
+                    old_class_indices=tuple(global_class_map[c] for c in sorted(previous_map)),
+                    class_log_priors=class_log_priors(
+                        np.concatenate((current.labels, replay_labels)),
+                        total_classes=len(global_class_map), active_class_indices=active_class_indices,
+                    ),
+                    task_id=task_id, temperature=args.upcl_temperature,
+                )
             losses = engine.train_one_epoch(model, loader, optimizer, criterion, device,
                 old_class_indices=[training_label_map[c] for c in previous_map],
                 fisher=fisher, theta_star=theta_star, ewc_lambda=args.ewc_lambda,
@@ -846,6 +895,7 @@ def run_fold_training(args, *, engine):
                 **schedule_kwargs)
             audit = sampler.last_audit
             expected_replay = (
+                len(retained.labels) if args.method == "upcl" else
                 0 if task_id == 0 or args.method != "class_balanced_fixed_budget_replay" else min(
                     int(len(current.labels) * args.replay_fraction / (1.0 - args.replay_fraction)),
                     args.replay_repeat_cap * len(retained.labels),
@@ -853,7 +903,7 @@ def run_fold_training(args, *, engine):
             )
             expected_current = len(current.labels)
             if (audit is None or audit["epoch"] != epoch or audit["current_draws"] != expected_current
-                    or audit["max_repeat"] > args.replay_repeat_cap or audit["actual_replay_draws"] !=
+                    or audit["max_repeat"] > (1 if args.method == "upcl" else args.replay_repeat_cap) or audit["actual_replay_draws"] !=
                     expected_replay
                     or losses.examples_seen != len(sampler)
                     or losses.optimizer_steps != math.ceil(len(sampler) / args.effective_batch_size)
@@ -876,6 +926,13 @@ def run_fold_training(args, *, engine):
                     "ider_current_idempotence",
                     "ider_replay_supervised",
                     "ider_replay_idempotence",
+                ):
+                    loss_values.pop(key)
+            if args.method != "upcl":
+                for key in (
+                    "upcl_prototype",
+                    "upcl_feature_contrastive",
+                    "upcl_feature_distillation",
                 ):
                     loss_values.pop(key)
             row = {"task": task_id, "epoch": epoch + 1, **loss_values,
@@ -1039,9 +1096,14 @@ def run_fold_training(args, *, engine):
                 new_theta_star,
             )
         checkpoint_started = time.perf_counter()
+        method_state = (
+            {"fisher": fisher, "theta_star": theta_star} if args.method == "ewc"
+            else {"upcl": upcl_state} if args.method == "upcl"
+            else {}
+        )
         boundary_path = save_fold_replay_checkpoint(root / "checkpoints" / f"task_{task_id}.pt", run_id=run_id,
             completed_task_id=task_id, model_state=best_state, seen_class_map=seen_map, contract=contract,
-            buffer=buffer, sampler=sampler, method_state={"fisher": fisher, "theta_star": theta_star} if args.method == "ewc" else {}, run_config_sha256=config_hash, artifact_hashes=artifact_hashes,
+            buffer=buffer, sampler=sampler, method_state=method_state, run_config_sha256=config_hash, artifact_hashes=artifact_hashes,
             progress={"metric_rows": all_metrics, "epoch_rows": all_epochs, "task_summaries": task_summaries})
         checkpoint_seconds = time.perf_counter() - checkpoint_started
         logger.log(f"task={task_id} complete head={178 if fixed_head else len(seen_map)} "

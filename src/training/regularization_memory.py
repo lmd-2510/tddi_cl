@@ -2,7 +2,8 @@
 
 All methods use the same frozen source/ID guards. A-GEM retains a seeded
 uniform subset of each completed task; EWC stores Fisher/parameters separately;
-IDER reuses the proven equal-class reservoir required by its internal replay.
+IDER and UPCL reuse the proven equal-class reservoir required by their
+paper-aligned rehearsal procedures.
 """
 from __future__ import annotations
 
@@ -89,13 +90,13 @@ class RegularizationMemory(ClassBalancedReplayBuffer):
 
 def create_memory(**kwargs):
     method = kwargs.pop("method")
-    if method in {"class_balanced_fixed_budget_replay", "ider"}:
+    if method in {"class_balanced_fixed_budget_replay", "ider", "upcl"}:
         return ClassBalancedReplayBuffer(**kwargs)
     return RegularizationMemory(method=method, **kwargs)
 
 
 def restore_memory(state, **kwargs):
     method = kwargs.pop("method")
-    if method in {"class_balanced_fixed_budget_replay", "ider"}:
+    if method in {"class_balanced_fixed_budget_replay", "ider", "upcl"}:
         return ClassBalancedReplayBuffer.from_state_dict(state, **kwargs)
     return RegularizationMemory.from_state_dict(state, method=method, **kwargs)

@@ -74,7 +74,11 @@ def tiny(monkeypatch):
     monkeypatch.setattr(fold_training, "TDDI_PAPER_INPUT_DIM", 2)
     calls = []
     def expand(previous, previous_map, seen_map, **kwargs):
-        model = TDDIPaperMember(TDDIPaperMemberConfig(input_dim=2, hidden_dims=(8, 4), num_classes=len(seen_map),
+        # UPCL follows the paper's requirement that prototype dimension is at
+        # least the fixed global class vocabulary.  Keep the other methods
+        # deliberately tiny, but exercise the real 178-way UPCL invariant.
+        hidden_dims = (180, 180) if kwargs.get("method") == "upcl" else (8, 4)
+        model = TDDIPaperMember(TDDIPaperMemberConfig(input_dim=2, hidden_dims=hidden_dims, num_classes=len(seen_map),
                                                    dropout=kwargs["dropout"], activation=kwargs["activation"]))
         if kwargs.get("method") == "ider":
             attach_ider_adapter(
@@ -95,8 +99,8 @@ def tiny(monkeypatch):
     torch.set_num_threads(old_threads)
 
 
-@pytest.mark.parametrize("method", [engine.FIXED_BUDGET_METHOD, "ewc", "agem", "ider"])
-def test_four_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
+@pytest.mark.parametrize("method", [engine.FIXED_BUDGET_METHOD, "ewc", "agem", "ider", "upcl"])
+def test_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
     monkeypatch.setattr(sys, "argv", cli(data, extra=["--method", method, "--export-member-predictions",
                                                    "--member-prediction-splits", "validation"]))
     engine.main()
@@ -113,6 +117,12 @@ def test_four_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
         assert {"ider_current_idempotence", "ider_replay_supervised",
                 "ider_replay_idempotence"}.issubset(losses.columns)
         assert "ider_adapter.label_projection.0.weight" in state["model_state"]
+    elif method == "upcl":
+        assert {"upcl_prototype", "upcl_feature_contrastive", "upcl_feature_distillation"}.issubset(losses.columns)
+        assert set(state["method_state"]) == {"upcl"}
+        prototype_state = state["method_state"]["upcl"]
+        assert prototype_state["assigned"].sum().item() == 58
+        assert state["contract"]["sampler"]["policy"] == "icarl_full_current_plus_memory_once_per_epoch_v1"
     else:
         assert not any("idempotence" in name for name in losses.columns)
     assert state["contract"]["head_policy"] == fold_training.FIXED_HEAD_POLICY

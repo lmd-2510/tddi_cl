@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover
 
 SAMPLER_POLICY = "class_round_robin_fraction_capped_v1"
 RNG_DERIVATION = "seedsequence_pcg64_member_task_epoch_stream_v1"
+FULL_MEMORY_SAMPLER_POLICY = "icarl_full_current_plus_memory_once_per_epoch_v1"
 
 
 def _integer(value, name: str) -> int:
@@ -302,4 +303,164 @@ class _EpochIterator:
             self.closed = True
 
     def __del__(self):  # best effort on abandonment; explicit close is portable
+        self.close()
+
+
+class FoldFullMemorySampler(Sampler):
+    """iCaRL-style training sampler: every current and stored row once/epoch.
+
+    UPCL's paper follows the iCaRL rehearsal pipeline rather than requesting a
+    fractional replay exposure.  This sampler therefore concatenates current
+    task rows with the retained equal-class exemplars, draws each exactly once,
+    and only randomises their deterministic ID-canonical ordering.
+    """
+
+    def __init__(self, *, current_sample_ids: Sequence[str], replay_sample_ids: Sequence[str],
+                 replay_raw_labels: Sequence[int], experiment_seed: int, member_id: int,
+                 task_id: int, replay_fraction: float = 0.0, repeat_cap: int = 1) -> None:
+        self._current = _ids(current_sample_ids, "current sample IDs")
+        self._replay = _ids(replay_sample_ids, "replay sample IDs")
+        if set(self._current) & set(self._replay):
+            raise ValueError("Current and replay sample IDs overlap.")
+        labels = np.asarray(replay_raw_labels)
+        if labels.shape != (len(self._replay),) or (labels.size and labels.dtype.kind not in "iu"):
+            raise ValueError("replay_raw_labels must be aligned raw integer class IDs.")
+        task_id, member_id = _integer(task_id, "task_id"), _integer(member_id, "member_id")
+        if member_id not in (0, 1, 2):
+            raise ValueError("member_id must be 0, 1 or 2.")
+        if task_id == 0 and self._replay:
+            raise ValueError("Task0 must have empty replay memory.")
+        seeds = resolve_seed_configuration(_integer(experiment_seed, "experiment_seed"), member_id)
+        self._seed, self._task_id = seeds.member_seed, task_id
+        self._labels = tuple(int(label) for label in labels)
+        self._canonical = np.asarray(
+            sorted(range(len(self._current) + len(self._replay)), key=lambda index: (self._current + self._replay)[index]),
+            dtype=np.int64,
+        )
+        self._metadata = {
+            "policy": FULL_MEMORY_SAMPLER_POLICY, "schema_version": 1,
+            "seeds": asdict(seeds), "task_id": task_id,
+            "current_count": len(self._current), "memory_count": len(self._replay),
+            "current_order_sha256": _digest(self._current),
+            "replay_order_label_sha256": _digest(list(zip(self._replay, self._labels))),
+            "rng_derivation": RNG_DERIVATION, "rng_state_policy": "stateless_keyed_streams_no_global_rng",
+            "mix_policy": "seeded_shuffle_each_current_and_each_memory_row_once", "drop_last": False,
+            "state_boundary": "completed_epoch_only", "reset_policy": "new_instance_at_each_task_epoch0",
+            "replay_fraction_ignored": float(replay_fraction), "repeat_cap_ignored": int(repeat_cap),
+        }
+        self._next_epoch = 0
+        self._active = False
+        self._last_audit = None
+
+    def _rng(self, epoch: int) -> np.random.Generator:
+        return np.random.Generator(np.random.PCG64(np.random.SeedSequence([
+            self._seed, self._task_id, 0x46554C4D, epoch,
+        ])))
+
+    @property
+    def metadata(self) -> dict:
+        return deepcopy(self._metadata)
+
+    @property
+    def next_epoch(self) -> int:
+        return self._next_epoch
+
+    @property
+    def last_audit(self) -> dict | None:
+        return deepcopy(self._last_audit)
+
+    def __len__(self) -> int:
+        return len(self._canonical)
+
+    def _plan(self, epoch: int) -> ReplayEpochPlan:
+        indices = self._canonical[self._rng(epoch).permutation(len(self._canonical))]
+        per_class = {
+            str(label): {"draws": int(sum(value == label for value in self._labels)),
+                         "unique_exemplars": int(sum(value == label for value in self._labels)),
+                         "memory_count": int(sum(value == label for value in self._labels)),
+                         "exemplar_coverage": 1.0}
+            for label in sorted(set(self._labels))
+        }
+        audit = {
+            "policy": FULL_MEMORY_SAMPLER_POLICY, "task_id": self._task_id, "epoch": epoch,
+            "current_draws": len(self._current), "target_replay_draws": len(self._replay),
+            "actual_replay_draws": len(self._replay), "total_draws": len(self),
+            "target_fraction": len(self._replay) / len(self) if len(self) else 0.0,
+            "actual_fraction": len(self._replay) / len(self) if len(self) else 0.0,
+            "capacity_limited": False, "repeat_cap": 1, "memory_size": len(self._replay),
+            "unique_replay_exemplars": len(self._replay),
+            "exemplar_coverage": 1.0 if self._replay else 0.0,
+            "eligible_class_count": len(per_class), "replayed_class_count": len(per_class),
+            "class_coverage": 1.0 if per_class else 0.0,
+            "coverage_denominator": "classes_and_exemplars_present_in_buffer",
+            "per_class": per_class,
+            "repeat_histogram": {"0": 0, "1": len(self._replay)}, "max_repeat": 1 if self._replay else 0,
+            "replay_ids_sha256": _digest(self._replay),
+            "draw_order_ids_sha256": _digest([(self._current + self._replay)[index] for index in indices]),
+        }
+        return ReplayEpochPlan(tuple(int(index) for index in indices), audit)
+
+    def set_epoch(self, epoch: int) -> None:
+        if self._active:
+            raise RuntimeError("Cannot set_epoch during an active iterator.")
+        self._next_epoch = _integer(epoch, "epoch")
+        self._last_audit = None
+
+    def __iter__(self) -> Iterator[int]:
+        if self._active:
+            raise RuntimeError("An epoch iterator is already active.")
+        plan = self._plan(self._next_epoch)
+        self._active = True
+        return _FullMemoryEpochIterator(self, plan)
+
+    def state_dict(self) -> dict:
+        if self._active:
+            raise RuntimeError("Sampler checkpoint requires a completed epoch.")
+        state = {"metadata": self.metadata, "next_epoch": self._next_epoch,
+                 "rng_state": {"derivation": RNG_DERIVATION, "mutable_rng_state": None,
+                               "next_epoch_key": self._next_epoch}}
+        state["state_sha256"] = _digest(state)
+        return state
+
+    @classmethod
+    def from_state_dict(cls, state: dict, **kwargs):
+        result = cls(**kwargs)
+        try:
+            if state.get("state_sha256") != _digest({k: v for k, v in state.items() if k != "state_sha256"}):
+                raise ValueError("Sampler state SHA256 mismatch.")
+            if state["metadata"] != result.metadata:
+                raise ValueError("Sampler metadata/IDs/seed/task mismatch.")
+            result.set_epoch(state["next_epoch"])
+            if state != result.state_dict():
+                raise ValueError("Sampler epoch/RNG state mismatch.")
+        except (KeyError, TypeError, AttributeError) as error:
+            raise ValueError("Malformed full-memory sampler state.") from error
+        return result
+
+
+class _FullMemoryEpochIterator:
+    def __init__(self, owner: FoldFullMemorySampler, plan: ReplayEpochPlan) -> None:
+        self.owner, self.plan, self.position, self.closed = owner, plan, 0, False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.closed:
+            raise StopIteration
+        if self.position == len(self.plan.indices):
+            self.owner._next_epoch += 1
+            self.owner._last_audit = deepcopy(self.plan.audit)
+            self.close()
+            raise StopIteration
+        value = self.plan.indices[self.position]
+        self.position += 1
+        return value
+
+    def close(self):
+        if not self.closed:
+            self.owner._active = False
+            self.closed = True
+
+    def __del__(self):  # pragma: no cover - best effort only
         self.close()

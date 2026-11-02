@@ -214,7 +214,7 @@ def test_missing_completion_evidence_and_model_only_not_resumable(data, monkeypa
         run(data, monkeypatch, stop=1, resume=root / "checkpoints/task_0.pt")
 
 
-@pytest.mark.parametrize("method", ["ewc", "agem", "ider"])
+@pytest.mark.parametrize("method", ["ewc", "agem", "ider", "upcl"])
 def test_non_cb_methods_resume_exactly(data, monkeypatch, tiny, method):
     control = run(data, monkeypatch, method=method, suffix="_control", stop=1)
     split = run(data, monkeypatch, method=method, suffix="_split", stop=0)

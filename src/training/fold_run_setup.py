@@ -93,7 +93,12 @@ def member_command(config, member, *, python=sys.executable):
     args["replay_repeat_cap"] = config["replay"]["repeat_cap"]
     args["buffer_policy"] = config["replay"]["buffer_policy"]
     method = config["training"]["method"]
-    if method != engine.FIXED_BUDGET_METHOD:
+    if method == "upcl":
+        # UPCL consumes the entire retained iCaRL memory once per epoch; these
+        # compatibility arguments are recorded as inert zero/one values.
+        args["replay_fraction"] = 0.0
+        args["replay_repeat_cap"] = 1
+    if method not in {engine.FIXED_BUDGET_METHOD, "upcl"}:
         for key in ("replay_fraction", "replay_repeat_cap", "fold_replay_policy", "focal_gamma"):
             args.pop(key, None)
         if method != "ider":

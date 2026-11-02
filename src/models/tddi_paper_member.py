@@ -8,6 +8,7 @@ from typing import Literal
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 except ImportError:  # pragma: no cover - environment may not have torch yet
     torch = None
     nn = None
@@ -120,7 +121,11 @@ if nn is not None:
 
         def classify(self, latent: torch.Tensor) -> torch.Tensor:
             """Map latent vectors to the configured global class logits."""
-
+            # UPCL keeps the same fixed 178-way vocabulary, but interprets its
+            # frozen, unit-norm rows as cosine prototypes rather than a learnt
+            # affine classifier.  The flag is installed by src.methods.upcl.
+            if getattr(self, "upcl_prototype_head", False):
+                return self.head(F.normalize(latent, dim=1))
             return self.head(latent)
 
         def forward_with_latent(

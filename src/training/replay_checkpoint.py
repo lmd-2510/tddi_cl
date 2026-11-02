@@ -191,8 +191,12 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
     NumPy/Python RNG state and are loaded with weights_only=False.
     """
     from src.training.regularization_memory import restore_memory
-    from src.data.replay_sampler import FoldReplayFractionSampler
+    from src.data.replay_sampler import (
+        FoldFullMemorySampler, FoldReplayFractionSampler,
+        FULL_MEMORY_SAMPLER_POLICY,
+    )
     from src.data.stratified_folds import fold_file_sha256
+    from src.methods.upcl import validate_prototype_state
     path, root = Path(path).resolve(), Path(root).resolve()
     try:
         state = torch.load(path, map_location="cpu", weights_only=False)
@@ -311,7 +315,12 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             replay_raw_labels=audit["replay_raw_labels_before"], experiment_seed=expected_contract["seeds"]["experiment_seed"],
             member_id=expected_contract["seeds"]["member_id"], task_id=completed,
             replay_fraction=expected_contract["sampler"]["replay_fraction"], repeat_cap=expected_contract["sampler"]["repeat_cap"])
-        sampler = FoldReplayFractionSampler.from_state_dict(state["sampler_state"], **kwargs)
+        sampler_class = (
+            FoldFullMemorySampler
+            if expected_contract["sampler"]["policy"] == FULL_MEMORY_SAMPLER_POLICY
+            else FoldReplayFractionSampler
+        )
+        sampler = sampler_class.from_state_dict(state["sampler_state"], **kwargs)
         if sampler.state_dict()["next_epoch"] != summaries[-1]["epochs_trained"]:
             raise ValueError("Completed sampler epoch mismatch.")
         expected_schedule = {"task_id": completed + 1, "epoch": 0,
@@ -331,6 +340,20 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
                         raise ValueError("EWC state shape/finite mismatch.")
                     if name == "fisher" and (tensor < 0).any():
                         raise ValueError("EWC Fisher must be nonnegative.")
+        elif expected_contract["method"] == "upcl":
+            if set(method_state) != {"upcl"}:
+                raise ValueError("UPCL checkpoint requires frozen prototype state.")
+            head = model["head.weight"]
+            prototype_state = validate_prototype_state(
+                method_state["upcl"], total_classes=head.shape[0], latent_dim=head.shape[1],
+            )
+            expected_rows = sorted(expected_map.values())
+            assigned = prototype_state["assigned"]
+            if set(torch.nonzero(assigned, as_tuple=False).flatten().tolist()) != set(expected_rows):
+                raise ValueError("UPCL prototype assignment must cover exactly the seen fixed-head rows.")
+            indices = torch.as_tensor(expected_rows, dtype=torch.long)
+            if not torch.equal(head[indices], prototype_state["prototypes"][indices]):
+                raise ValueError("UPCL frozen head rows do not match checkpoint prototype state.")
         elif method_state:
             raise ValueError("Unexpected method state.")
         # Validate RNG without changing caller's streams or consuming randomness.

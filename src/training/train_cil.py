@@ -33,6 +33,13 @@ from src.methods.ider import (
     attach_ider_adapter,
     compute_ider_loss,
 )
+from src.methods.upcl import (
+    METHOD_NAME as UPCL_METHOD,
+    METHOD_POLICY as UPCL_POLICY,
+    UPCLTrainingContext,
+    compute_upcl_loss,
+    enable_upcl_prototype_head,
+)
 from src.methods.replay import classification_loss as replay_classification_loss
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, TDDIPaperMember, TDDIPaperMemberConfig
 from src.training.class_incremental_policy import (
@@ -41,12 +48,13 @@ from src.training.class_incremental_policy import (
 )
 
 FIXED_BUDGET_METHOD = "class_balanced_fixed_budget_replay"
-METHODS = (FIXED_BUDGET_METHOD, "ewc", "agem", IDER_METHOD)
+METHODS = (FIXED_BUDGET_METHOD, "ewc", "agem", IDER_METHOD, UPCL_METHOD)
 METHOD_POLICIES = {
     FIXED_BUDGET_METHOD: "frozen_fold_fixed_head_class_balanced_replay_v1",
     "ewc": "frozen_fold_fixed_head_original_ewc_v1",
     "agem": "frozen_fold_fixed_head_agem_v1",
     IDER_METHOD: IDER_POLICY,
+    UPCL_METHOD: UPCL_POLICY,
 }
 
 class FocalLoss(nn.Module if nn is not None else object):
@@ -82,7 +90,7 @@ def parse_args(argv=None):
     parser.add_argument("--fold-replay-policy", choices=["stratified_fraction_v1"], default="stratified_fraction_v1")
     parser.add_argument("--buffer-policy", choices=[BUFFER_POLICY], default=BUFFER_POLICY)
     parser.add_argument("--exemplar-ranking-policy", choices=[RANKING_POLICY], default=RANKING_POLICY)
-    parser.add_argument("--loss-variant", choices=["focal_current_ce_replay", "cross_entropy", "ider"],
+    parser.add_argument("--loss-variant", choices=["focal_current_ce_replay", "cross_entropy", "ider", "upcl"],
                         help="Derived from method when omitted.")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--effective-batch-size", type=int, default=None)
@@ -111,6 +119,8 @@ def parse_args(argv=None):
                         help="Probability of the paper's uniform initial class signal.")
     parser.add_argument("--ider-replay-batch-size", type=int,
                         help="IDER memory examples per current minibatch; defaults to microbatch size.")
+    parser.add_argument("--upcl-temperature", type=float, default=0.07,
+                        help="UPCL cosine-prototype temperature (paper does not report a numeric value).")
     parser.add_argument("--stop-after-task", type=int)
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--resume-fold-checkpoint", type=Path)
@@ -136,7 +146,7 @@ def parse_args(argv=None):
     expected_loss = (
         "focal_current_ce_replay"
         if args.method == FIXED_BUDGET_METHOD
-        else "ider" if args.method == IDER_METHOD else "cross_entropy"
+        else "ider" if args.method == IDER_METHOD else "upcl" if args.method == UPCL_METHOD else "cross_entropy"
     )
     if args.loss_variant is None:
         args.loss_variant = expected_loss
@@ -229,6 +239,16 @@ def model_manifest(args):
                 "total_classes": 178,
             },
         }
+    if args.method == UPCL_METHOD:
+        manifest = {
+            **manifest,
+            "method_classifier": {
+                "method": UPCL_METHOD,
+                "policy": UPCL_POLICY,
+                "placement": "frozen_unit_norm_prototypes_as_shared_fixed_head_rows",
+                "total_classes": 178,
+            },
+        }
     return manifest
 
 def expand_model_for_seen_classes(
@@ -267,6 +287,8 @@ def expand_model_for_seen_classes(
         if active_class_indices is None:
             raise ValueError("IDER expansion requires active_class_indices.")
         attach_ider_adapter(model, active_class_indices=active_class_indices)
+    if method == UPCL_METHOD:
+        enable_upcl_prototype_head(model)
     if previous_model is None or previous_seen_map is None:
         return model
     return copy_previous_state_to_expanded_model(
@@ -323,6 +345,9 @@ class EpochLossComponents:
     ider_current_idempotence: float
     ider_replay_supervised: float
     ider_replay_idempotence: float
+    upcl_prototype: float
+    upcl_feature_contrastive: float
+    upcl_feature_distillation: float
     total_loss: float
     optimizer_steps: int = 0
     examples_seen: int = 0
@@ -451,15 +476,18 @@ def train_one_epoch(
     active_class_indices=None,
     optimizer_step=None,
     ider_context: IDERTrainingContext | None = None,
+    upcl_context: UPCLTrainingContext | None = None,
 ):
     if gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive.")
-    if loss_variant not in {"cross_entropy", "focal_current_ce_replay", "ider"}:
+    if loss_variant not in {"cross_entropy", "focal_current_ce_replay", "ider", "upcl"}:
         raise ValueError(f"Unsupported loss_variant: {loss_variant}")
     if (loss_variant == "ider") != (ider_context is not None):
         raise ValueError("IDER loss requires exactly one IDERTrainingContext.")
+    if (loss_variant == "upcl") != (upcl_context is not None):
+        raise ValueError("UPCL loss requires exactly one UPCLTrainingContext.")
     model.train()
-    totals = np.zeros(7, dtype=np.float64)
+    totals = np.zeros(10, dtype=np.float64)
     examples = steps = 0
     optimizer.zero_grad(set_to_none=True)
     for batch_index, (features, labels) in enumerate(loader):
@@ -472,6 +500,22 @@ def train_one_epoch(
             current_id = breakdown.current_idempotence_distillation
             replay_supervised = breakdown.replay_supervised
             replay_id = breakdown.replay_idempotence_distillation
+            loss = breakdown.total
+            raw = loss.new_zeros(())
+            scaled = loss.new_zeros(())
+            logits = None
+            upcl_prototype = loss.new_zeros(())
+            upcl_feature = loss.new_zeros(())
+            upcl_distillation = loss.new_zeros(())
+        elif loss_variant == "upcl":
+            breakdown = compute_upcl_loss(model, features, labels, upcl_context)
+            classification = breakdown.prototype
+            upcl_prototype = breakdown.prototype
+            upcl_feature = breakdown.feature_contrastive
+            upcl_distillation = breakdown.feature_distillation
+            current_id = classification.new_zeros(())
+            replay_supervised = classification.new_zeros(())
+            replay_id = classification.new_zeros(())
             loss = breakdown.total
             raw = loss.new_zeros(())
             scaled = loss.new_zeros(())
@@ -508,7 +552,7 @@ def train_one_epoch(
         else:
             logits = model(features)
             classification = criterion(logits, labels)
-        if loss_variant != "ider":
+        if loss_variant not in {"ider", "upcl"}:
             current_id = classification.new_zeros(())
             replay_supervised = classification.new_zeros(())
             replay_id = classification.new_zeros(())
@@ -519,6 +563,9 @@ def train_one_epoch(
             )
             scaled = ewc_lambda * raw
             loss = classification + scaled
+            upcl_prototype = classification.new_zeros(())
+            upcl_feature = classification.new_zeros(())
+            upcl_distillation = classification.new_zeros(())
         group_start = (batch_index // gradient_accumulation_steps) * gradient_accumulation_steps
         group_end = min(group_start + gradient_accumulation_steps, len(loader))
         group_samples = min(group_end * loader.batch_size, len(loader.sampler)) - group_start * loader.batch_size
@@ -536,7 +583,8 @@ def train_one_epoch(
             steps += 1
         count = len(labels)
         totals += count * np.array([float(v.detach()) for v in (
-            classification, raw, scaled, current_id, replay_supervised, replay_id, loss
+            classification, raw, scaled, current_id, replay_supervised, replay_id,
+            upcl_prototype, upcl_feature, upcl_distillation, loss
         )])
         examples += count
     means = totals / max(examples, 1)
