@@ -36,9 +36,9 @@ from src.training.class_incremental_policy import (
 FIXED_BUDGET_METHOD = "class_balanced_fixed_budget_replay"
 METHODS = (FIXED_BUDGET_METHOD, "ewc", "agem")
 METHOD_POLICIES = {
-    FIXED_BUDGET_METHOD: "frozen_fold_class_balanced_replay_v1",
+    FIXED_BUDGET_METHOD: "frozen_fold_fixed_head_class_balanced_replay_v1",
     "ewc": "frozen_fold_fixed_head_original_ewc_v1",
-    "agem": "frozen_fold_agem_v1",
+    "agem": "frozen_fold_fixed_head_agem_v1",
 }
 
 class FocalLoss(nn.Module if nn is not None else object):
@@ -308,11 +308,12 @@ def compute_episodic_reference_gradient(
     criterion: nn.Module,
     memory_features: np.ndarray,
     memory_raw_labels: np.ndarray,
-    current_seen_map: dict[int, int],
+    label_map: dict[int, int],
     device: str,
     parameters: list["torch.nn.Parameter"],
     *,
     reference_batch_size: int,
+    active_class_indices=None,
 ) -> "torch.Tensor":
     """Compute an exact mean memory gradient in bounded-size chunks.
 
@@ -325,7 +326,7 @@ def compute_episodic_reference_gradient(
         raise ValueError("Cannot compute a reference gradient from empty memory.")
     if reference_batch_size <= 0:
         raise ValueError("reference_batch_size must be positive.")
-    local_labels = remap_labels(memory_raw_labels, current_seen_map)
+    local_labels = remap_labels(memory_raw_labels, label_map)
 
     was_training = model.training
     model.eval()
@@ -340,12 +341,21 @@ def compute_episodic_reference_gradient(
             labels_tensor = torch.from_numpy(
                 np.asarray(local_labels[start:end], dtype=np.int64)
             ).to(device)
-            _, _, reference_loss = classification_forward(
-                model,
-                features_tensor,
-                labels_tensor,
-                criterion,
-            )
+            if active_class_indices is None:
+                _, _, reference_loss = classification_forward(
+                    model,
+                    features_tensor,
+                    labels_tensor,
+                    criterion,
+                )
+            else:
+                logits = model(features_tensor)
+                reference_loss = fixed_head_cross_entropy(
+                    logits,
+                    labels_tensor,
+                    active_class_indices,
+                    total_classes=logits.shape[1],
+                )
             gradients = torch.autograd.grad(
                 reference_loss,
                 parameters,
@@ -363,12 +373,23 @@ def compute_episodic_reference_gradient(
         raise RuntimeError("Reference gradient accumulation produced no chunks.")
     return accumulated
 
-def apply_agem_projection(model, criterion, memory_features, memory_labels, seen_map, device):
+def apply_agem_projection(
+    model,
+    criterion,
+    memory_features,
+    memory_labels,
+    label_map,
+    device,
+    *,
+    active_class_indices=None,
+):
     parameters = trainable_parameters(model)
     current_gradient = flatten_gradients(parameters)
     reference = compute_episodic_reference_gradient(
-        model, criterion, memory_features, memory_labels, seen_map, device, parameters,
-        reference_batch_size=len(memory_labels))
+        model, criterion, memory_features, memory_labels, label_map, device, parameters,
+        reference_batch_size=len(memory_labels),
+        active_class_indices=active_class_indices,
+    )
     projected = project_agem_gradient(current_gradient, reference)
     assign_gradients(parameters, projected)
     return GradientProjectionAudit(1, bool(torch.dot(current_gradient, reference) < 0),

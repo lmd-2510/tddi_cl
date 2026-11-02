@@ -5,6 +5,23 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$PROJECT_ROOT/scripts/run_ewc_head_to_tail_full.sh"
 PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
+METHOD="${CIL_FULL_RUN_METHOD:-ewc}"
+case "$METHOD" in
+  ewc)
+    METHOD_LABEL="EWC"
+    METHOD_RECIPE="EWC without episodic replay memory"
+    ;;
+  agem)
+    METHOD_LABEL="A-GEM"
+    METHOD_RECIPE="A-GEM task-uniform episodic memory; reference batch=256"
+    ;;
+  *)
+    echo "[STOP] CIL_FULL_RUN_METHOD must be 'ewc' or 'agem', got: $METHOD" >&2
+    exit 2
+    ;;
+esac
+LAUNCHER_COMMAND="${CIL_FULL_RUN_LAUNCHER:-scripts/run_ewc_head_to_tail_full.sh}"
+
 CONFIG="$PROJECT_ROOT/configs/ordered_baseline.json"
 TRAIN="$PROJECT_ROOT/data/train_extracted.parquet"
 VALIDATION="$PROJECT_ROOT/data/validation_extracted.parquet"
@@ -17,18 +34,18 @@ PREPROCESSING_ROOT="$PROJECT_ROOT/study_assets/preprocessing_ordered_seed0_fold4
 SOURCE_SHARD_CACHE_ROOT="$PROJECT_ROOT/study_assets/source_shard_cache_ordered_seed0_fold42"
 COMMON_TASK_CACHE_ROOT="$PROJECT_ROOT/study_assets/common_task_cache_ordered_seed0_fold42"
 
-MONITOR_ROOT="$PROJECT_ROOT/outputs/ewc_head_to_tail_full_monitor"
+MONITOR_ROOT="$PROJECT_ROOT/outputs/${METHOD}_head_to_tail_full_monitor"
 LATEST_FILE="$MONITOR_ROOT/latest.txt"
 
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage:
-  bash scripts/run_ewc_head_to_tail_full.sh check
-  bash scripts/run_ewc_head_to_tail_full.sh start
-  bash scripts/run_ewc_head_to_tail_full.sh status
-  bash scripts/run_ewc_head_to_tail_full.sh follow
-  bash scripts/run_ewc_head_to_tail_full.sh resume
-  bash scripts/run_ewc_head_to_tail_full.sh package
+  bash $LAUNCHER_COMMAND check
+  bash $LAUNCHER_COMMAND start
+  bash $LAUNCHER_COMMAND status
+  bash $LAUNCHER_COMMAND follow
+  bash $LAUNCHER_COMMAND resume
+  bash $LAUNCHER_COMMAND package
 
 Commands:
   check    Validate CUDA, data, folds, preprocessing, cache and the dry-run plan.
@@ -39,9 +56,10 @@ Commands:
   package  Rebuild report, visualization and lightweight review ZIP only.
 
 Recipe:
-  protocol=head_to_tail, backbone=TDDI, method=EWC, fixed 178-class head,
+  protocol=head_to_tail, backbone=TDDI, fixed 178-class head,
   members=0,1,2 sequentially, tasks=0..7, then offline ensemble.
 EOF
+  printf '\nMethod: %s\nLauncher: %s\n' "$METHOD_LABEL" "$LAUNCHER_COMMAND"
 }
 
 die() {
@@ -76,7 +94,7 @@ full_command() {
   local command=(
     "$PYTHON" "$PROJECT_ROOT/src/training/fold_ensemble3_full.py"
     --config "$CONFIG"
-    --method ewc
+    --method "$METHOD"
     --train "$TRAIN"
     --validation "$VALIDATION"
     --test "$TEST"
@@ -135,12 +153,12 @@ check_all() {
   export CIL_SOURCE_SHARD_CACHE_ROOT="$SOURCE_SHARD_CACHE_ROOT"
   export CIL_COMMON_TASK_CACHE_ROOT="$COMMON_TASK_CACHE_ROOT"
 
-  local dry_root="$PROJECT_ROOT/outputs/_ewc_head_to_tail_dry_run_only"
+  local dry_root="$PROJECT_ROOT/outputs/_${METHOD}_head_to_tail_dry_run_only"
   echo "[CHECK] Validating the immutable full-run plan; no model will be trained."
   local command
   command="$(full_command "$dry_root")"
   eval "$command"
-  echo "[OK] EWC full-run preflight passed."
+  echo "[OK] $METHOD_LABEL full-run preflight passed."
   echo "[OK] Common method-independent cache: $COMMON_TASK_CACHE_ROOT"
 }
 
@@ -188,7 +206,8 @@ worker() {
   printf '%s\n' "$attempt" > "$run_home/runner_attempts.txt"
   echo "[RUNNER_ATTEMPT] $attempt"
   echo "[OUTPUT] $output_root"
-  echo "[RECIPE] EWC + TDDI + fixed 178-class head + head-to-tail + 3 sequential members"
+  echo "[RECIPE] $METHOD_LABEL + TDDI + fixed 178-class head + head-to-tail + 3 sequential members"
+  echo "[METHOD] $METHOD_RECIPE"
 
   export CIL_SOURCE_SHARD_CACHE_ROOT="$SOURCE_SHARD_CACHE_ROOT"
   export CIL_COMMON_TASK_CACHE_ROOT="$COMMON_TASK_CACHE_ROOT"
@@ -205,7 +224,7 @@ worker() {
   printf '%s\n' "$exit_code" > "$run_home/exit_code.txt"
   printf '%s\n' "$exit_code" > "$output_root/runner_exit_code.txt"
   if [[ $exit_code -eq 0 ]]; then
-    echo "[COMPLETED] Full EWC run, offline ensemble and review package are ready."
+    echo "[COMPLETED] Full $METHOD_LABEL run, offline ensemble and review package are ready."
     echo "[REVIEW] $output_root/${output_root##*/}_metrics_review.zip"
   else
     echo "[FAILED] exit_code=$exit_code; inspect $run_home/main.log"
@@ -228,7 +247,7 @@ start_new() {
   local run_id run_home output_root
   run_id="$(date -u +%Y%m%dT%H%M%SZ)"
   run_home="$MONITOR_ROOT/run_${run_id}"
-  output_root="$PROJECT_ROOT/outputs/ewc_head_to_tail_fixed_head_full_seed0_${run_id}"
+  output_root="$PROJECT_ROOT/outputs/${METHOD}_head_to_tail_fixed_head_full_seed0_${run_id}"
   mkdir -p "$run_home" "$output_root"
   printf '%s\n' "$run_id" > "$run_home/run_id.txt"
   printf '%s\n' "$output_root" > "$run_home/output_root.txt"
@@ -242,7 +261,7 @@ start_new() {
   echo "[STARTED] PID=$pid"
   echo "[OUTPUT] $output_root"
   echo "[LOG] $run_home/main.log"
-  echo "You may close SSH after 'bash scripts/run_ewc_head_to_tail_full.sh status' reports RUNNING."
+  echo "You may close SSH after 'bash $LAUNCHER_COMMAND status' reports RUNNING."
 }
 
 show_status() {

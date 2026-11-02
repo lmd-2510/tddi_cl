@@ -73,8 +73,10 @@ from src.training.replay_checkpoint import (
     save_fold_replay_checkpoint, restore_rng_state,
 )
 
-TRAINING_POLICY = "frozen_fold_class_balanced_replay_v1"
-EWC_FIXED_HEAD_POLICY = "fixed_global_178_seen_class_mask_v1"
+TRAINING_POLICY = "frozen_fold_fixed_head_class_balanced_replay_v1"
+FIXED_HEAD_POLICY = "fixed_global_178_seen_class_mask_v1"
+# Retained as a compatibility alias for callers that imported the old name.
+EWC_FIXED_HEAD_POLICY = FIXED_HEAD_POLICY
 FULL_TASK_LAYOUT = TASK_LAYOUT
 SUPPORTED_TASK_PROTOCOLS = PROTOCOL_IDS
 
@@ -104,7 +106,7 @@ def method_policy(method):
     return {
         "class_balanced_fixed_budget_replay": TRAINING_POLICY,
         "ewc": "frozen_fold_fixed_head_original_ewc_v1",
-        "agem": "frozen_fold_agem_v1",
+        "agem": "frozen_fold_fixed_head_agem_v1",
     }[method]
 
 
@@ -388,9 +390,7 @@ def prepare_fold_run(args, *, engine, context=None):
         "task_protocol_id": SUPPORTED_TASK_PROTOCOLS[spec["protocol"]],
         "task_file_sha256": task_hash,
         "task_layout": FULL_TASK_LAYOUT, "protocol_task_count": 8, "stop_after_task": stop,
-        "head_policy": (
-            EWC_FIXED_HEAD_POLICY if args.method == "ewc" else "expanding_seen_class_head_v1"
-        ),
+        "head_policy": FIXED_HEAD_POLICY,
         "global_raw_class_order": global_raw_class_order,
         "assignment_sha256": manifest["assignment_sha256"], "fold_manifest_sha256": context.manifest_sha256,
         "sources": buffer.metadata["sources"], "preprocessing_sha256": prep_hash,
@@ -506,7 +506,9 @@ def run_fold_training(args, *, engine):
     seeds, device, stop, arguments, resolved, contract = (prepared[k] for k in
         ("seeds", "device", "stop", "arguments", "resolved", "contract"))
     global_class_map = prepared["global_class_map"]
-    fixed_head = args.method == "ewc"
+    # Every retained CIL method shares the same 178-row classifier.  Only rows
+    # belonging to classes observed by this task boundary are active.
+    fixed_head = True
     task_cache_contract = prepared.get("task_cache_contract")
     task_cache_root = prepared.get("task_cache_root")
     source_shard_root = prepared.get("source_shard_cache_root")
@@ -761,7 +763,8 @@ def run_fold_training(args, *, engine):
                     idx = rng.choice(len(retained.labels), min(args.agem_reference_batch_size, len(retained.labels)), replace=False)
                     engine.apply_agem_projection(model, criterion,
                         _model_values(retained.features[idx], prep, columns, args.member_id),
-                        retained.labels[idx], seen_map, device)
+                        retained.labels[idx], training_label_map, device,
+                        active_class_indices=active_class_indices)
             losses = engine.train_one_epoch(model, loader, optimizer, criterion, device,
                 old_class_indices=[training_label_map[c] for c in previous_map],
                 fisher=fisher, theta_star=theta_star, ewc_lambda=args.ewc_lambda,
