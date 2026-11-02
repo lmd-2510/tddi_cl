@@ -1,0 +1,18 @@
+# DDI-CIL Experiment Metrics Summary
+
+File này là bảng tổng hợp chung cho các run hoàn chỉnh. Mỗi run dùng kết quả test full-coverage của offline ensemble; không dùng selective metric nếu coverage nhỏ hơn 100%.
+
+## Bảng kết quả
+
+| Run | Method | Protocol | Backbone | Final Accuracy | Final Balanced Accuracy | Final Macro-F1 | Final Weighted-F1 | Mean Task Macro-F1 | BWT | Forgetting | Chi tiết |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `ewc_head_to_tail_fixed_head_full_seed0_20261102T071912Z` | EWC | Head-to-Tail | TDDI | 0.569257 | 0.548442 | **0.377209** | 0.668461 | 0.575171 | -0.210327 | 0.217414 | [EWC results](EWC_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
+
+## Quy ước
+
+- `Final`: kết quả ở task boundary cuối, trên toàn bộ test samples của các class đã thấy.
+- `Mean Task Macro-F1`: trung bình Macro-F1 của tám task boundary, mỗi boundary có trọng số bằng nhau.
+- `BWT`: trung bình backward transfer trên các task cũ; càng gần 0 hoặc dương càng tốt.
+- `Forgetting`: best Macro-F1 trước đây trừ Macro-F1 cuối; càng thấp càng tốt.
+- Một run gồm ba ensemble member nhưng vẫn chỉ là một experiment seed.
+
