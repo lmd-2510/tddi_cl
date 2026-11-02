@@ -384,10 +384,13 @@ def build_ensemble_plan(
     if not selected or len(set(selected)) != len(selected) or any(value not in MEMBER_IDS for value in selected):
         raise ValueError("Select a unique non-empty subset of members 0/1/2.")
     members: list[MemberPlan] = []
+    completed_implementations: list[str] = []
     for member_id in MEMBER_IDS:
         command = member_command(config, member_id, python=python)
         info = inspector(config, member_id, command, require_inputs=require_inputs)
         status = str(info["status"])
+        if status == "complete" and info.get("implementation_sha256_digest"):
+            completed_implementations.append(str(info["implementation_sha256_digest"]))
         resume = Path(info["resume_checkpoint"]) if info.get("resume_checkpoint") else None
         if status == "resume":
             command.extend(("--resume-fold-checkpoint", str(resume)))
@@ -404,6 +407,12 @@ def build_ensemble_plan(
             )
         )
     all_complete = all(member.status == "complete" for member in members)
+    if (all_complete and len(completed_implementations) == len(MEMBER_IDS)
+            and len(set(completed_implementations)) != 1):
+        raise ValueError(
+            "Completed members were trained under different frozen contracts; "
+            "offline ensemble is not valid."
+        )
     evaluations = tuple(
         _eval_plan(config, task_id, python, all_complete)
         for task_id in _task_ids(config)

@@ -451,10 +451,18 @@ def prepare_fold_run(args, *, engine, context=None):
     }
     # Scope/path relocation may change; learning/provenance contract may not.
     contract = {k: v for k, v in resolved.items() if k != "stop_after_task"}
-    contract["hyperparameters"] = {k: getattr(args, k) for k in (
+    hyperparameter_names = [
         "epochs", "patience", "lr", "weight_decay", "dropout", "activation", "norm", "focal_gamma",
-        "loss_variant", "ewc_lambda", "agem_reference_batch_size", "ider_weight_a",
-        "ider_weight_b", "ider_weight_c", "ider_uniform_probability", "ider_replay_batch_size")}
+        "loss_variant", "ewc_lambda", "agem_reference_batch_size",
+    ]
+    if args.method == "ider":
+        hyperparameter_names.extend((
+            "ider_weight_a", "ider_weight_b", "ider_weight_c",
+            "ider_uniform_probability", "ider_replay_batch_size",
+        ))
+    contract["hyperparameters"] = {
+        key: getattr(args, key) for key in hyperparameter_names
+    }
     contract["sampler"] = {
         "policy": SAMPLER_POLICY, "schema_version": 1, "rng_derivation": RNG_DERIVATION,
         "replay_fraction": args.replay_fraction if args.method == "class_balanced_fixed_budget_replay" else 0.0,

@@ -1,5 +1,6 @@
 """Shared locked configuration, command construction and read-only run inspection."""
 from __future__ import annotations
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -22,6 +23,52 @@ MODEL = dict(variant="tddi_paper_member", input_dim=3780, hidden_dims=[7560, 756
 REPLAY = dict(buffer_policy="equal_class_fixed_budget", ranking_policy="sample_normalized_class_mean",
               fraction=0.125, repeat_cap=3, replay_starts_at_task=1)
 INPUT_KEYS = {"train", "validation", "test", "feature_cols", "fold_assignments", "fold_manifest"}
+
+
+def _validation_contract_for_existing_run(
+    root: Path,
+    checkpoint: Path,
+    fresh_contract: dict,
+    *,
+    requested_stop_after_task: int,
+) -> tuple[dict, bool]:
+    """Use a completed run's frozen contract despite later source-only drift.
+
+    This deliberately permits only ``implementation_sha256`` to differ, and
+    only after the checkpoint covers the requested execution scope. An
+    incomplete checkpoint must still match the current implementation exactly
+    before it may resume.
+    """
+
+    try:
+        checkpoint_task = int(checkpoint.stem.removeprefix("task_"))
+    except ValueError as error:
+        raise ValueError(f"Invalid task checkpoint name: {checkpoint}") from error
+    if checkpoint_task < requested_stop_after_task:
+        return fresh_contract, False
+
+    config_path = root / "run_config.json"
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Cannot read completed run contract: {config_path}") from error
+    stored_contract = payload.get("checkpoint_contract")
+    if not isinstance(stored_contract, dict):
+        raise ValueError("Completed run_config has no valid checkpoint_contract.")
+
+    fresh_learning = {k: v for k, v in fresh_contract.items() if k != "implementation_sha256"}
+    stored_learning = {k: v for k, v in stored_contract.items() if k != "implementation_sha256"}
+    if fresh_learning != stored_learning:
+        differences = sorted(
+            key
+            for key in set(fresh_learning) | set(stored_learning)
+            if fresh_learning.get(key) != stored_learning.get(key)
+        )
+        raise ValueError(
+            "Completed run differs from the requested learning/data contract: "
+            f"{differences}"
+        )
+    return stored_contract, stored_contract != fresh_contract
 
 def _default_runner(command, cwd: Path) -> None:
     """Run one member command synchronously; callers enforce sequential execution."""
@@ -87,8 +134,17 @@ def inspect_member(config, member, command, *, require_inputs=False):
     if prepared["manifest"]["assignment_row_count"] != config["development_count"]:
         raise ValueError("Development count differs from config; never recompute budget from the task prefix.")
     contract = prepared["contract"]
+    implementation_drift_accepted = False
+    if existing:
+        contract, implementation_drift_accepted = _validation_contract_for_existing_run(
+            root,
+            existing[-1],
+            contract,
+            requested_stop_after_task=int(config["execution"]["stop_after_task"]),
+        )
     info = {"status": "fresh", "run_id": None, "completed_task_id": None, "resume_checkpoint": None,
             "contract_sha256": _digest(contract), "assignment_sha256": contract["assignment_sha256"],
+            "implementation_sha256_digest": _digest(contract["implementation_sha256"]),
             "fold_manifest_sha256": contract["fold_manifest_sha256"], "source_hashes": contract["sources"],
             "preprocessing_sha256": contract["preprocessing_sha256"], "buffer": contract["buffer"],
             "sampler": contract["sampler"], "task_file_sha256": contract["task_file_sha256"]}
@@ -100,5 +156,6 @@ def inspect_member(config, member, command, *, require_inputs=False):
             completed_task_id=state["completed_task_id"], full_trajectory_complete=state["full_trajectory_complete"],
             resume_checkpoint=str(existing[-1]), checkpoint_sha256=fold_file_sha256(existing[-1]),
             task_summaries=state["progress"]["task_summaries"], run_config=str(root / "run_config.json"),
-            run_config_sha256=state["run_config_sha256"], )
+            run_config_sha256=state["run_config_sha256"],
+            implementation_drift_accepted=implementation_drift_accepted, )
     return info

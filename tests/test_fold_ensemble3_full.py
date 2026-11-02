@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+import pytest
+
 from src.training import fold_ensemble3_runner as shared
 from src.training.fold_ensemble3_full import (
     MANIFEST_KIND,
@@ -124,6 +126,21 @@ def test_full_selected_member_skip_and_resume(tmp_path: Path) -> None:
     assert plan.members[1].command is not None
     assert _arg(plan.members[1].command, "--resume-fold-checkpoint") == str(resume)
     assert plan.members[2].command is None
+
+
+def test_offline_ensemble_rejects_different_completed_member_contracts(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    def inspect(config, member, command, *, require_inputs=False):
+        return {
+            "status": "complete",
+            "completed_task_id": 7,
+            "resume_checkpoint": None,
+            "implementation_sha256_digest": f"implementation-{member}",
+        }
+
+    with pytest.raises(ValueError, match="different frozen contracts"):
+        shared.build_ensemble_plan(config, inspector=inspect)
 
 
 def test_full_members_are_sequential_then_all_eight_tasks_are_evaluated(
