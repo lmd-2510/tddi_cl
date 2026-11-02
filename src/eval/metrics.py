@@ -400,6 +400,52 @@ def compute_forgetting(result_matrix: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def compute_backward_transfer(result_matrix: np.ndarray) -> pd.DataFrame:
+    """Compute final backward transfer (BWT) for every old task.
+
+    For a task-performance matrix ``R`` whose rows are training boundaries and
+    columns are evaluation task groups, the final BWT contribution of task
+    ``i`` is ``R[T, i] - R[i, i]``.  The final task is excluded because it has
+    no later boundary at which backward transfer can be observed.  Positive
+    values indicate improvement after learning later tasks; negative values
+    indicate interference.
+    """
+
+    matrix = np.asarray(result_matrix, dtype=np.float64)
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1] or matrix.shape[0] == 0:
+        raise ValueError("result_matrix must be a non-empty square matrix.")
+
+    final_row = matrix.shape[0] - 1
+    rows: list[dict[str, Any]] = []
+    finite_values: list[float] = []
+    for task_id in range(final_row):
+        initial = float(matrix[task_id, task_id])
+        final = float(matrix[final_row, task_id])
+        bwt = final - initial if np.isfinite(initial) and np.isfinite(final) else np.nan
+        rows.append(
+            {
+                "task_id": task_id,
+                "initial_macro_f1": initial,
+                "final_macro_f1": final,
+                "backward_transfer": bwt,
+            }
+        )
+        if np.isfinite(bwt):
+            finite_values.append(float(bwt))
+
+    rows.append(
+        {
+            "task_id": "mean_old_tasks",
+            "initial_macro_f1": np.nan,
+            "final_macro_f1": np.nan,
+            "backward_transfer": (
+                float(np.mean(finite_values)) if finite_values else np.nan
+            ),
+        }
+    )
+    return pd.DataFrame(rows)
+
+
 def result_matrix_to_frame(result_matrix: np.ndarray) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for train_task in range(result_matrix.shape[0]):

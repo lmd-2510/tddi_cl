@@ -280,6 +280,10 @@ def test_builds_extended_report_without_training(tmp_path: Path) -> None:
     assert forgetting["task_id"].astype(str).tolist() == ["0", "1", "mean_old_tasks"]
     assert float(forgetting.iloc[-1]["forgetting"]) > 0.0
 
+    bwt = pd.read_csv(paths["ensemble_bwt"])
+    assert bwt["task_id"].astype(str).tolist() == ["0", "mean_old_tasks"]
+    assert np.isfinite(float(bwt.iloc[-1]["backward_transfer"]))
+
     member_forgetting = pd.read_csv(paths["member_forgetting"])
     assert member_forgetting["member_id"].tolist() == [0, 1, 2]
     assert member_forgetting["zero_f1_classes_final"].tolist() == [1, 1, 1]
@@ -291,6 +295,7 @@ def test_builds_extended_report_without_training(tmp_path: Path) -> None:
     report = paths["report"].read_text(encoding="utf-8")
     assert "Full Balanced Accuracy" in report
     assert "Full Weighted F1" in report
+    assert "Backward Transfer (BWT)" in report
     assert "Forgettting" not in report
     assert "Ensemble diversity" in report
     assert "no training or inference" not in report.casefold()

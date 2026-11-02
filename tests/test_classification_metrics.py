@@ -5,10 +5,34 @@ import warnings
 
 import numpy as np
 
-from src.eval.metrics import compute_aurc, compute_classification_metrics
+from src.eval.metrics import (
+    compute_aurc,
+    compute_backward_transfer,
+    compute_classification_metrics,
+)
 
 
 class ClassificationMetricsTest(unittest.TestCase):
+    def test_backward_transfer_uses_final_minus_learning_boundary(self) -> None:
+        matrix = np.array(
+            [
+                [0.80, np.nan, np.nan],
+                [0.70, 0.60, np.nan],
+                [0.50, 0.65, 0.90],
+            ]
+        )
+
+        result = compute_backward_transfer(matrix)
+
+        self.assertEqual(result["task_id"].astype(str).tolist(), ["0", "1", "mean_old_tasks"])
+        self.assertAlmostEqual(result.iloc[0]["backward_transfer"], -0.30)
+        self.assertAlmostEqual(result.iloc[1]["backward_transfer"], 0.05)
+        self.assertAlmostEqual(result.iloc[2]["backward_transfer"], -0.125)
+
+    def test_backward_transfer_rejects_non_square_matrix(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-empty square"):
+            compute_backward_transfer(np.zeros((2, 3)))
+
     def test_explicit_labels_exclude_prediction_only_classes_from_macro_average(self) -> None:
         y_true = np.array([0, 0, 1, 1])
         y_pred = np.array([0, 2, 1, 2])

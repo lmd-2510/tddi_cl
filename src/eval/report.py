@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.eval.metrics import compute_classification_metrics  # noqa: E402
 from src.eval.metrics import (  # noqa: E402
+    compute_backward_transfer,
     compute_forgetting,
     result_matrix_to_frame,
 )
@@ -281,7 +282,7 @@ def _build_task_row(
 def _build_ensemble_continual_metrics(
     artifacts: Sequence[OfflineEnsembleArtifact],
     task_groups: Sequence[Sequence[int]],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     task_count = len(task_groups)
     matrix = np.full((task_count, task_count), np.nan, dtype=np.float64)
     for train_task, artifact in enumerate(artifacts):
@@ -298,7 +299,11 @@ def _build_ensemble_continual_metrics(
                 labels=class_ids,
             )
             matrix[train_task, eval_task] = metrics["macro_f1"]
-    return result_matrix_to_frame(matrix), compute_forgetting(matrix)
+    return (
+        result_matrix_to_frame(matrix),
+        compute_forgetting(matrix),
+        compute_backward_transfer(matrix),
+    )
 
 
 def _load_member_forgetting(
@@ -445,6 +450,7 @@ def _build_markdown(
     task_summary: pd.DataFrame,
     paper_table: pd.DataFrame,
     ensemble_forgetting: pd.DataFrame,
+    ensemble_bwt: pd.DataFrame,
     member_forgetting: pd.DataFrame,
     diversity: pd.DataFrame,
     *,
@@ -474,6 +480,12 @@ def _build_markdown(
         ensemble_forgetting["task_id"].astype(str) == "mean_old_tasks"
     ]
     ensemble_mean_forgetting = float(ensemble_mean_row.iloc[0]["forgetting"])
+    ensemble_bwt_mean_row = ensemble_bwt[
+        ensemble_bwt["task_id"].astype(str) == "mean_old_tasks"
+    ]
+    ensemble_mean_bwt = float(
+        ensemble_bwt_mean_row.iloc[0]["backward_transfer"]
+    )
     member_task_mean = float(member_forgetting["task_forgetting_mean_old_tasks"].mean())
     member_task_std = float(
         member_forgetting["task_forgetting_mean_old_tasks"].std(ddof=0)
@@ -542,6 +554,16 @@ def _build_markdown(
             "Forgetting của task là best Macro-F1 từng đạt trừ Macro-F1 tại task cuối. "
             "`mean_old_tasks` chỉ lấy các task cũ, không tính task cuối vừa học.",
             "",
+            "## Backward Transfer (BWT)",
+            "",
+            f"- Ensemble mean BWT trên các old task: `{ensemble_mean_bwt:.6f}`.",
+            "",
+            _markdown_table(ensemble_bwt),
+            "",
+            "BWT của task là Macro-F1 tại boundary cuối trừ Macro-F1 ngay sau khi "
+            "task đó được học. BWT dương là chuyển giao có lợi; BWT âm là nhiễu/quên. "
+            "Task cuối không được đưa vào trung bình vì chưa có task tương lai tác động lên nó.",
+            "",
             "## Ensemble diversity",
             "",
             _markdown_table(diversity),
@@ -580,6 +602,7 @@ def _prepare_outputs(
         "paper_table": outdir / f"{output_prefix}_paper_table.csv",
         "ensemble_matrix": outdir / f"{output_prefix}_task_matrix.csv",
         "ensemble_forgetting": outdir / f"{output_prefix}_forgetting_summary.csv",
+        "ensemble_bwt": outdir / f"{output_prefix}_bwt_summary.csv",
         "member_forgetting": outdir / f"{output_prefix}_member_forgetting_summary.csv",
         "diversity": outdir / f"{output_prefix}_diversity_summary.csv",
         "report": outdir / f"{output_prefix}_final_report.md",
@@ -732,7 +755,7 @@ def build_final_report(
             "mean_total_probability_variance",
         ]
     ].rename(columns={"full_samples": "sample_count"})
-    ensemble_matrix, ensemble_forgetting = _build_ensemble_continual_metrics(
+    ensemble_matrix, ensemble_forgetting, ensemble_bwt = _build_ensemble_continual_metrics(
         artifacts,
         task_groups,
     )
@@ -745,6 +768,7 @@ def build_final_report(
         task_summary,
         paper_table,
         ensemble_forgetting,
+        ensemble_bwt,
         member_forgetting,
         diversity,
         shared_context=shared_context,
@@ -757,6 +781,7 @@ def build_final_report(
     _atomic_write_csv(paper_table, paths["paper_table"])
     _atomic_write_csv(ensemble_matrix, paths["ensemble_matrix"])
     _atomic_write_csv(ensemble_forgetting, paths["ensemble_forgetting"])
+    _atomic_write_csv(ensemble_bwt, paths["ensemble_bwt"])
     _atomic_write_csv(member_forgetting, paths["member_forgetting"])
     _atomic_write_csv(diversity, paths["diversity"])
     _atomic_write_text(markdown, paths["report"])
