@@ -8,6 +8,7 @@ File này là bảng tổng hợp chung cho các run hoàn chỉnh. Mỗi run d�
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | `ewc_head_to_tail_fixed_head_full_seed0_20261102T071912Z` | EWC | Head-to-Tail | TDDI | 0.569257 | 0.548442 | **0.377209** | 0.668461 | 0.575171 | -0.210327 | 0.217414 | [EWC results](EWC_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 | `agem_head_to_tail_fixed_head_full_seed0_20261102T125708Z` | A-GEM | Head-to-Tail | TDDI | 0.665885 | 0.507593 | **0.388085** | 0.755299 | 0.593823 | -0.325515 | 0.333314 | [A-GEM results](AGEM_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
+| `er_head_to_tail_fixed_head_full_seed0_20261103T032635Z` | ER | Head-to-Tail | TDDI | 0.889145 | 0.549176 | **0.500563** | 0.902237 | 0.745165 | -0.237162 | 0.237162 | [ER results](ER_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 
 ## Quy ước
 
