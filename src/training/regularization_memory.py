@@ -19,6 +19,16 @@ ER_BUFFER_POLICY = "reservoir_uniform_v1"
 ER_RANKING_POLICY = "reservoir_uniform_v1"
 
 
+def _python_scalar(value):
+    """Convert NumPy scalar metadata without assuming ``.item()`` exists.
+
+    Arrow-backed string columns can arrive as plain Python ``str`` objects,
+    while numeric columns commonly arrive as ``np.generic`` scalars.  ER
+    stores metadata in JSON/state dictionaries, so normalize both forms here.
+    """
+    return value.item() if isinstance(value, np.generic) else value
+
+
 class RegularizationMemory(ClassBalancedReplayBuffer):
     def __init__(self, *, method, **kwargs):
         if method not in {"ewc", "agem"}:
@@ -136,9 +146,7 @@ class ReservoirReplayBuffer(ClassBalancedReplayBuffer):
         return {
             "features": np.asarray(current.features[index], dtype=np.float64).copy(),
             "label": int(current.labels[index]),
-            "metadata": {key: np.asarray(current.metadata[key])[index].item()
-                         if isinstance(np.asarray(current.metadata[key])[index].item(), np.generic)
-                         else np.asarray(current.metadata[key])[index].item()
+            "metadata": {key: _python_scalar(np.asarray(current.metadata[key])[index])
                          for key in META_KEYS},
         }
 
@@ -179,7 +187,7 @@ class ReservoirReplayBuffer(ClassBalancedReplayBuffer):
                 records.append({
                     "features": np.asarray(entry.features[index], dtype=np.float64).copy(),
                     "label": int(entry.labels[index]),
-                    "metadata": {key: entry.metadata[key][index].item()
+                    "metadata": {key: _python_scalar(entry.metadata[key][index])
                                  for key in META_KEYS},
                 })
         for index in range(len(current.labels)):
