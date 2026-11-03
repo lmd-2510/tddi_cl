@@ -311,8 +311,20 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             raise ValueError("Boundary model fixed-head policy/global vocabulary mismatch.")
         # Validate completed scheduling from identity-only input audit; no old features.
         audit = json.loads((last_dir / "input_audit.json").read_text(encoding="utf-8"))
-        kwargs = dict(current_sample_ids=audit["current_ids"], replay_sample_ids=audit["replay_ids_before"],
-            replay_raw_labels=audit["replay_raw_labels_before"], experiment_seed=expected_contract["seeds"]["experiment_seed"],
+        # IDER stores exemplars for its own loss but intentionally has no
+        # generic replay rows in the DataLoader sampler.  New audits record
+        # sampler IDs explicitly; old IDER audits are reconstructed as empty
+        # sampler replay for backward-compatible validation.
+        if "sampler_replay_ids_before" in audit:
+            sampler_replay_ids = audit["sampler_replay_ids_before"]
+            sampler_replay_labels = audit.get("sampler_replay_raw_labels_before", [])
+        elif expected_contract["method"] == "ider":
+            sampler_replay_ids, sampler_replay_labels = [], []
+        else:
+            sampler_replay_ids = audit["replay_ids_before"]
+            sampler_replay_labels = audit["replay_raw_labels_before"]
+        kwargs = dict(current_sample_ids=audit["current_ids"], replay_sample_ids=sampler_replay_ids,
+            replay_raw_labels=sampler_replay_labels, experiment_seed=expected_contract["seeds"]["experiment_seed"],
             member_id=expected_contract["seeds"]["member_id"], task_id=completed,
             replay_fraction=expected_contract["sampler"]["replay_fraction"], repeat_cap=expected_contract["sampler"]["repeat_cap"])
         sampler_class = (

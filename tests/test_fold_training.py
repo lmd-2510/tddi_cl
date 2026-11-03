@@ -147,6 +147,9 @@ def test_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
     for t in (0, 1):
         audit = json.loads((root / f"task_{t}/input_audit.json").read_text())
         assert not set(audit["current_ids"] + audit["replay_ids_before"]) & set(audit["validation_ids"])
+        if method == "ider":
+            assert audit["sampler_replay_ids_before"] == []
+            assert audit["sampler_replay_raw_labels_before"] == []
     if method == engine.FIXED_BUDGET_METHOD:
         audit = json.loads((root / "task_1/epoch_1_audit.json").read_text())["sampling"]
         assert audit["current_draws"] == 80

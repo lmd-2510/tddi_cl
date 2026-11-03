@@ -223,3 +223,17 @@ def test_non_cb_methods_resume_exactly(data, monkeypatch, tiny, method):
     left, right = load(control, 1), load(split, 1)
     for key in ("model_state", "buffer_state", "method_state", "sampler_state", "rng_state"):
         assert checkpoint.fold_state_digest(left[key]) == checkpoint.fold_state_digest(right[key]), key
+
+
+def test_ider_resume_reconstructs_sampler_without_memory_rows(data, monkeypatch, tiny):
+    """IDER memory rows must not be mistaken for generic sampler replay rows."""
+    control = run(data, monkeypatch, method="ider", suffix="_ider_control", stop=2)
+    split = run(data, monkeypatch, method="ider", suffix="_ider_split", stop=1)
+    task_one_audit = json.loads((split / "task_1/input_audit.json").read_text())
+    assert task_one_audit["replay_ids_before"]
+    assert task_one_audit["sampler_replay_ids_before"] == []
+    run(data, monkeypatch, method="ider", suffix="_ider_split", stop=2,
+        resume=split / "checkpoints/task_1.pt")
+    left, right = load(control, 2), load(split, 2)
+    for key in ("model_state", "buffer_state", "method_state", "sampler_state", "rng_state"):
+        assert checkpoint.fold_state_digest(left[key]) == checkpoint.fold_state_digest(right[key]), key

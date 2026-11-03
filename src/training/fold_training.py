@@ -787,6 +787,12 @@ def run_fold_training(args, *, engine):
         )
         _publish_json(task_root / "input_audit.json", {"task_id": task_id, "current_ids": _ids(current),
             "replay_ids_before": memory_ids, "replay_raw_labels_before": retained.labels.tolist() if memory_ids else [],
+            # IDER keeps exemplars for its idempotence loss but does not feed
+            # them through the generic replay sampler.  Record the sampler's
+            # actual IDs separately so checkpoint reconstruction cannot confuse
+            # method memory with DataLoader replay rows.
+            "sampler_replay_ids_before": replay_ids,
+            "sampler_replay_raw_labels_before": retained.labels.tolist() if replay_ids else [],
             "validation_ids": _ids(validation),
             "current_raw_classes": new_classes, "seen_class_map": seen_map,
             "head_size": 178 if fixed_head else len(seen_map),
