@@ -890,12 +890,20 @@ def run_fold_training(args, *, engine):
                     generator=ider_generator,
                 )
             if args.method == "upcl":
+                # UPCL's prior computation is defined over the dense fixed-head
+                # indices, whereas current/replay arrays retain raw DDI class
+                # IDs for provenance.  Remap before bincounting; otherwise
+                # non-contiguous raw IDs make active dense rows appear empty.
+                upcl_prior_labels = remap_labels(
+                    np.concatenate((current.labels, replay_labels)),
+                    global_class_map,
+                )
                 schedule_kwargs["upcl_context"] = UPCLTrainingContext(
                     old_model=(previous.to(device).eval().requires_grad_(False) if previous is not None else None),
                     active_class_indices=tuple(active_class_indices),
                     old_class_indices=tuple(global_class_map[c] for c in sorted(previous_map)),
                     class_log_priors=class_log_priors(
-                        np.concatenate((current.labels, replay_labels)),
+                        upcl_prior_labels,
                         total_classes=len(global_class_map), active_class_indices=active_class_indices,
                     ),
                     task_id=task_id, temperature=args.upcl_temperature,

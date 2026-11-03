@@ -361,7 +361,17 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             prototype_state = validate_prototype_state(
                 method_state["upcl"], total_classes=head.shape[0], latent_dim=head.shape[1],
             )
-            expected_rows = sorted(expected_map.values())
+            # UPCL stores prototypes in the shared fixed-head coordinate
+            # system.  ``expected_map`` is intentionally the compact
+            # seen-class map used by metrics/checkpoints (0..n_seen-1), so
+            # its values must not be compared directly with prototype rows.
+            # Convert the seen raw class IDs back to their global 178-class
+            # head rows before validating the causal prototype assignment.
+            if fixed_head:
+                global_index = {raw: index for index, raw in enumerate(global_raw_class_order)}
+                expected_rows = sorted(global_index[raw] for raw in expected_map)
+            else:
+                expected_rows = sorted(expected_map.values())
             assigned = prototype_state["assigned"]
             if set(torch.nonzero(assigned, as_tuple=False).flatten().tolist()) != set(expected_rows):
                 raise ValueError("UPCL prototype assignment must cover exactly the seen fixed-head rows.")

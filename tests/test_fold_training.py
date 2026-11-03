@@ -142,7 +142,7 @@ def test_methods_train_on_frozen_folds(data, monkeypatch, tiny, method):
         fisher = state["method_state"]["fisher"]
         assert torch.count_nonzero(fisher["head.weight"][future_rows]).item() == 0
         assert torch.count_nonzero(fisher["head.bias"][future_rows]).item() == 0
-    else:
+    elif method not in {"ewc", "upcl"}:
         assert state["method_state"] == {}
     for t in (0, 1):
         audit = json.loads((root / f"task_{t}/input_audit.json").read_text())
