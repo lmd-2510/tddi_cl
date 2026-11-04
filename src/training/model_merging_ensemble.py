@@ -13,16 +13,22 @@ import pandas as pd
 from src.eval.metrics import compute_classification_metrics
 
 
+def _log(message: str) -> None:
+    print(f"[MODEL-MERGING-ENSEMBLE] {message}", flush=True)
+
+
 def _json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
 def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path:
+    _log(f"start method={method} root={root}")
     member_roots = [root / f"member_{member}" for member in (0, 1, 2)]
     rows: list[dict[str, object]] = []
     ensemble_dir = root / "ensemble"
     ensemble_dir.mkdir(parents=True, exist_ok=True)
     for task_id in range(8):
+        _log(f"boundary_start task={task_id} loading_member_predictions")
         artifacts = [
             np.load(member_root / "merged" / f"task_{task_id}" / "test_predictions.npz", allow_pickle=False)
             for member_root in member_roots
@@ -46,6 +52,10 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
             ensemble_dir / f"task_{task_id}_test.npz",
             sample_id=sample_ids[0], labels=labels[0], predictions=predictions,
             probabilities=mean_probabilities.astype(np.float32), class_ids=class_ids[0],
+        )
+        _log(
+            f"boundary_complete task={task_id} samples={len(labels[0])} "
+            f"macro_f1={float(metrics['macro_f1']):.6f}"
         )
     frame = pd.DataFrame(rows)
     frame.to_csv(root / "ensemble_metrics.csv", index=False)
@@ -116,6 +126,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
             if path.suffix == ".pt" or path.name in {"train.log", "stdout.log", "events.csv"}:
                 continue
             handle.write(path, rel.as_posix())
+    _log(f"complete archive={archive}")
     return archive
 
 

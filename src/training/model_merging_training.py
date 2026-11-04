@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
@@ -19,10 +20,14 @@ from torch.utils.data import DataLoader
 
 from src.data.class_mapping import build_global_class_map, invert_class_map, remap_labels
 from src.data.ddi_dataset import (
+    DEFAULT_META_COLS,
+    DDIBatchArrays,
     load_development_fold_arrays,
     load_feature_columns,
+    load_split_frame,
     prepare_development_fold_context,
 )
+from src.data.sample_identity import build_stable_sample_ids
 from src.data.fold_preprocessing import load_fold_preprocessing
 from src.data.source_shard_cache import load_source_shard
 from src.data.stratified_folds import fold_file_sha256
@@ -37,6 +42,12 @@ from src.training.fold_training import _model_values, validate_fold_task_spec
 from src.utils.seed import resolve_seed_configuration, set_configured_seeds
 
 
+def _log(message: str) -> None:
+    """Flush progress immediately so nohup/main.log is useful while running."""
+
+    print(f"[MODEL-MERGING] {message}", flush=True)
+
+
 def _dump_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -47,7 +58,43 @@ def _state_cpu(model: torch.nn.Module) -> dict[str, torch.Tensor]:
 
 
 def _load_task_arrays(args, *, context, prep, columns, task_classes, role: str, source_shard_root: Path | None = None):
-    if source_shard_root is not None and role in {"train", "validation"}:
+    source_kind = "development_parquet"
+    if role == "test":
+        # Test is deliberately outside DevelopmentFoldContext.  That context
+        # only owns the train/validation frozen folds, so passing role="test"
+        # to load_development_fold_arrays would (correctly) raise.  Load the
+        # immutable test split through the ordinary split loader and attach
+        # the same identity metadata used by fold evaluation/export.
+        source_kind = "test_parquet"
+        frame = load_split_frame(
+            args.test,
+            columns,
+            class_ids=list(task_classes),
+            include_metadata=True,
+            meta_cols=DEFAULT_META_COLS,
+        )
+        metadata = {
+            column: frame[column].to_numpy(copy=False)
+            for column in DEFAULT_META_COLS
+            if column in frame.columns
+        }
+        metadata["sample_id"] = build_stable_sample_ids(
+            {
+                "drugid-drug_a": metadata["drugid-drug_a"],
+                "drugid-drug_b": metadata["drugid-drug_b"],
+            },
+            len(frame),
+        )
+        metadata["source_split"] = np.full(len(frame), "test", dtype=np.str_)
+        metadata["source_row_index"] = np.arange(len(frame), dtype=np.int64)
+        metadata["fold_id"] = np.full(len(frame), -1, dtype=np.int16)
+        arrays = DDIBatchArrays(
+            features=frame[columns].to_numpy(dtype=np.float64, copy=False),
+            labels=frame["class"].to_numpy(dtype=np.int64, copy=False),
+            metadata=metadata,
+        )
+    elif source_shard_root is not None and role in {"train", "validation"}:
+        source_kind = "source_shard_cache"
         arrays = load_source_shard(
             source_shard_root,
             member_id=args.member_id,
@@ -68,6 +115,11 @@ def _load_task_arrays(args, *, context, prep, columns, task_classes, role: str, 
             class_ids=list(task_classes),
         )
     values = _model_values(arrays.features, prep, columns, args.member_id)
+    _log(
+        f"loaded role={role} task={getattr(args, '_merging_task_id', '?')} "
+        f"rows={len(arrays.labels)} classes={len(np.unique(arrays.labels))} "
+        f"source={source_kind} transformed_shape={tuple(values.shape)}"
+    )
     return values, arrays.labels.astype(np.int64, copy=False), arrays.metadata
 
 
@@ -116,6 +168,7 @@ def _evaluate(engine, model, values, labels, *, global_map, active_rows, device,
 def _train_expert(
     args,
     *,
+    task_id: int,
     engine,
     initial_state: dict[str, torch.Tensor] | None,
     train_values: np.ndarray,
@@ -126,6 +179,12 @@ def _train_expert(
     owned_rows: list[int],
     device: str,
 ):
+    started = time.perf_counter()
+    _log(
+        f"expert_start task={task_id} rows={len(train_labels)} "
+        f"validation_rows={len(validation_labels)} owned_classes={len(owned_rows)} "
+        f"reset_from_base={initial_state is not None}"
+    )
     model = engine.expand_model_for_seen_classes(
         None,
         None,
@@ -185,8 +244,21 @@ def _train_expert(
         else:
             stale += 1
             if stale >= args.patience:
+                _log(
+                    f"expert_early_stop task={task_id} epoch={epoch} "
+                    f"best_val_macro_f1={best_score:.6f} patience={args.patience}"
+                )
                 break
+        _log(
+            f"expert_epoch task={task_id} epoch={epoch}/{args.epochs} "
+            f"train_loss={float(loss):.6f} val_macro_f1={float(metrics['macro_f1']):.6f} "
+            f"best_val_macro_f1={best_score:.6f} elapsed_s={time.perf_counter() - started:.1f}"
+        )
     model.load_state_dict(best_state, strict=True)
+    _log(
+        f"expert_complete task={task_id} epochs={len(epoch_rows)} "
+        f"best_val_macro_f1={best_score:.6f} elapsed_s={time.perf_counter() - started:.1f}"
+    )
     return model, best_state, epoch_rows
 
 
@@ -200,6 +272,10 @@ def run_model_merging_member(args, *, engine) -> None:
     set_configured_seeds(resolve_seed_configuration(args.seed, args.member_id))
     device = engine.resolve_device(args.device)
     columns = load_feature_columns(args.feature_cols)
+    _log(
+        f"member_start member={args.member_id} method={args.method} device={device} "
+        f"feature_count={len(columns)}"
+    )
     context = prepare_development_fold_context(
         args.fold_assignments,
         args.fold_manifest,
@@ -207,6 +283,10 @@ def run_model_merging_member(args, *, engine) -> None:
     )
     tasks = validate_fold_task_spec(engine.load_task_spec(args.task_file), context)
     global_map = build_global_class_map(raw for task in tasks for raw in task["classes"])
+    _log(
+        f"fold_ready member={args.member_id} tasks={len(tasks)} "
+        f"global_classes={len(global_map)} validation_fold={args.member_id}"
+    )
     prep_hash = fold_file_sha256(args.fold_preprocessing)
     prep = load_fold_preprocessing(
         args.fold_preprocessing,
@@ -224,6 +304,11 @@ def run_model_merging_member(args, *, engine) -> None:
         if getattr(args, "source_shard_cache_root", None) is not None
         and Path(args.source_shard_cache_root).is_dir()
         else None
+    )
+    _log(
+        f"preprocessing_ready policy={args.preprocessing_policy} "
+        f"cache={'source_shard' if source_shard_root is not None else 'direct_parquet'} "
+        f"prep_sha256={prep_hash[:12]}"
     )
     recipe = ModelMergingRecipe.paper_task_arithmetic() if args.method == TASK_ARITHMETIC_METHOD else ModelMergingRecipe.paper_ties()
     _dump_json(root / "run_config.json", {
@@ -256,8 +341,16 @@ def run_model_merging_member(args, *, engine) -> None:
             args, context=context, prep=prep, columns=columns,
             task_classes=task["classes"], role="validation", source_shard_root=source_shard_root,
         )
+    _log(
+        "all_task_data_ready "
+        + ", ".join(
+            f"task_{task_id}=train:{len(train_data[task_id][1])}/val:{len(validation_data[task_id][1])}"
+            for task_id in range(len(tasks))
+        )
+    )
     base_model, base_state, base_epochs = _train_expert(
         args,
+        task_id=0,
         engine=engine,
         initial_state=None,
         train_values=train_data[0][0], train_labels=train_data[0][1],
@@ -269,11 +362,13 @@ def run_model_merging_member(args, *, engine) -> None:
     experts: dict[int, dict[str, torch.Tensor]] = {}
     epochs_by_task = {"0": base_epochs}
     torch.save({"model_state": base_state, "task_id": 0}, root / "experts" / "task_0.pt")
+    _log("expert_saved task=0 path=experts/task_0.pt")
     for task in tasks[1:]:
         task_id = int(task["task_id"])
         owned_rows = [global_map[c] for c in task["classes"]]
         _, expert_state, epoch_rows = _train_expert(
             args,
+            task_id=task_id,
             engine=engine,
             initial_state=base_state,
             train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
@@ -285,12 +380,14 @@ def run_model_merging_member(args, *, engine) -> None:
         experts[task_id] = expert_state
         epochs_by_task[str(task_id)] = epoch_rows
         torch.save({"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows}, root / "experts" / f"task_{task_id}.pt")
+        _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt")
 
     args._merging_task_id = 0
     test_values, test_labels, test_metadata = _load_task_arrays(
         args, context=context, prep=prep, columns=columns,
         task_classes=list(global_map), role="test",
     )
+    _log(f"test_ready rows={len(test_labels)}")
     rows_by_task = {
         int(task["task_id"]): [global_map[c] for c in task["classes"]]
         for task in tasks
@@ -300,6 +397,10 @@ def run_model_merging_member(args, *, engine) -> None:
     merged_dir = root / "merged"
     merged_dir.mkdir(parents=True, exist_ok=True)
     for boundary in range(len(tasks)):
+        _log(
+            f"merge_start boundary={boundary} experts_used={boundary} "
+            f"seen_classes={sum(len(task['classes']) for task in tasks[:boundary + 1])}"
+        )
         model = engine.expand_model_for_seen_classes(
             None, None, global_map,
             variant=args.variant, input_dim=len(columns), dropout=args.dropout,
@@ -342,6 +443,10 @@ def run_model_merging_member(args, *, engine) -> None:
             probabilities=outputs.probabilities,
             class_ids=outputs.class_ids,
         )
+        _log(
+            f"merge_complete boundary={boundary} test_samples={int(keep.sum())} "
+            f"macro_f1={float(metric['macro_f1']):.6f}"
+        )
     pd.DataFrame(metrics_rows).to_csv(root / "merged_metrics.csv", index=False)
     _dump_json(root / "expert_epochs.json", epochs_by_task)
     _dump_json(root / "run_summary.json", {
@@ -353,6 +458,7 @@ def run_model_merging_member(args, *, engine) -> None:
         "independent_experts": True,
         "future_experts_used": False,
     })
+    _log(f"member_complete member={args.member_id} output={root}")
     print(f"MODEL MERGING MEMBER COMPLETE: method={args.method} member={args.member_id} output={root}", flush=True)
 
 
