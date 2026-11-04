@@ -66,7 +66,8 @@ worker(){
       exit "$code"
     fi
   done
-  "$PYTHON" "$PROJECT_ROOT/src/training/model_merging_ensemble.py" --root "$output" --method "$METHOD"; code=$?
+  PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON" "$PROJECT_ROOT/src/training/model_merging_ensemble.py" --root "$output" --method "$METHOD"; code=$?
   if [[ $code -eq 0 ]]; then sha256sum "$output/${output##*/}_metrics_review.zip" > "$output/${output##*/}_metrics_review.zip.sha256"; fi
   printf '%s\n' "$code" > "$home/exit_code.txt"
   printf '%s\n' "$code" > "$output/runner_exit_code.txt"

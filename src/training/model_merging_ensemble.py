@@ -5,10 +5,19 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import json
+import sys
 import zipfile
 
 import numpy as np
 import pandas as pd
+
+# This file is launched by an absolute path from the nohup worker.  In that
+# mode Python puts ``src/training`` on sys.path, not the repository root, so
+# ``from src...`` imports fail on a clean server.  Bootstrap the package root
+# explicitly instead of relying on the caller's working directory.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.eval.metrics import compute_classification_metrics
 
