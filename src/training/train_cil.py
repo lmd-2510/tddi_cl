@@ -51,7 +51,10 @@ from src.training.class_incremental_policy import (
 
 FIXED_BUDGET_METHOD = "class_balanced_fixed_budget_replay"
 ER_METHOD = "er"
-METHODS = (FIXED_BUDGET_METHOD, ER_METHOD, "ewc", "agem", IDER_METHOD, UPCL_METHOD)
+TASK_ARITHMETIC_METHOD = "task_arithmetic"
+TIES_METHOD = "ties"
+MERGING_METHODS = (TASK_ARITHMETIC_METHOD, TIES_METHOD)
+METHODS = (FIXED_BUDGET_METHOD, ER_METHOD, "ewc", "agem", IDER_METHOD, UPCL_METHOD, *MERGING_METHODS)
 METHOD_POLICIES = {
     FIXED_BUDGET_METHOD: "frozen_fold_fixed_head_class_balanced_replay_v1",
     "ewc": "frozen_fold_fixed_head_original_ewc_v1",
@@ -59,6 +62,8 @@ METHOD_POLICIES = {
     IDER_METHOD: IDER_POLICY,
     UPCL_METHOD: UPCL_POLICY,
     ER_METHOD: "frozen_fold_fixed_head_experience_replay_v1",
+    TASK_ARITHMETIC_METHOD: "frozen_fold_fixed_head_task_arithmetic_independent_experts_v1",
+    TIES_METHOD: "frozen_fold_fixed_head_ties_independent_experts_v1",
 }
 
 class FocalLoss(nn.Module if nn is not None else object):
@@ -604,6 +609,10 @@ def main():
                       ("source_shard_cache_root", "CIL_SOURCE_SHARD_CACHE_ROOT")):
         if getattr(args, attr) is None and os.environ.get(key):
             setattr(args, attr, Path(os.environ[key]).expanduser())
+    if args.method in MERGING_METHODS:
+        from src.training.model_merging_training import run_model_merging_member
+        run_model_merging_member(args, engine=sys.modules[__name__])
+        return
     from src.training.fold_training import run_fold_training
     run_fold_training(args, engine=sys.modules[__name__])
 
