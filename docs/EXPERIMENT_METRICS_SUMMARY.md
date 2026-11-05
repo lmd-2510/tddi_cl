@@ -12,6 +12,7 @@ File này là bảng tổng hợp chung cho các run hoàn chỉnh. Mỗi run d�
 | `ider_head_to_tail_fixed_head_full_seed0_20261103T104614Z` | IDER | Head-to-Tail | TDDI | 0.727418 | 0.604937 | **0.376521** | 0.784882 | 0.589979 | -0.028054 | 0.105573 | [IDER results](IDER_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 | `upcl_head_to_tail_fixed_head_full_seed0_20261103T165325Z` | UPCL | Head-to-Tail | TDDI | 0.322388 | 0.653767 | **0.219061** | 0.381671 | 0.389315 | 0.147812 | 0.029976 | [UPCL results](UPCL_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 | `task_arithmetic_head_to_tail_fixed_head_full_seed0_20261104T120427Z` | Task Arithmetic | Head-to-Tail | TDDI | 0.819018 | 0.184912 | **0.208722** | 0.802104 | 0.446440 | n.a. | n.a. | [Task Arithmetic results](TASK_ARITHMETIC_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
+| `ties_head_to_tail_fixed_head_full_seed0_20261104T235759Z` | TIES | Head-to-Tail | TDDI | 0.854148 | 0.208110 | **0.231388** | 0.837363 | 0.460646 | n.a. | n.a. | [TIES results](TIES_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 
 ## Quy ước
 
