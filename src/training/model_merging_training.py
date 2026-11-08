@@ -572,6 +572,17 @@ def run_model_merging_member(args, *, engine) -> None:
                 model.load_state_dict(merged_state, strict=True)
             else:
                 assert opcm_previous_state is not None
+                scope = inspect_neural_merge_scope(model)
+                # Online OPCM only knows the current expert at this point.
+                # Register its task-vector norm before constructing the
+                # boundary average; future-task norms must not be required.
+                opcm_task_vector_norms[boundary] = float(
+                    _state_vector_norm(
+                        pretrained_reference_state,
+                        task_states[boundary],
+                        scope.backbone_parameter_keys,
+                    )
+                )
                 opcm_result = merge_opcm_task_boundary(
                     model,
                     pretrained_state=pretrained_reference_state,
