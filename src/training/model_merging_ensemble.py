@@ -89,7 +89,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
         "sequential_merge": is_opcm or is_magmax,
         "execution_schedule": (
             "online_train_current_expert_then_merge" if is_opcm
-            else "sequential_train_then_boundary_merge" if is_magmax
+            else "online_sequential_finetune_then_magmax_merge" if is_magmax
             else "train_experts_then_causal_boundary_recompute"
         ),
         "future_experts_used": False,
@@ -116,7 +116,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
         "merge_scope": "learned_backbone_parameters_only",
         "execution_schedule": (
             "online_train_current_expert_then_merge" if is_opcm
-            else "sequential_train_then_boundary_merge" if is_magmax
+            else "online_sequential_finetune_then_magmax_merge" if is_magmax
             else "train_experts_then_causal_boundary_recompute"
         ),
         "future_experts_used": False,

@@ -58,7 +58,7 @@ worker(){
   if [[ "$METHOD" == opcm ]]; then
     echo "[RECIPE] OPCM paper-faithful online train-current-then-merge + shared-initialization experts + TDDI + fixed 178-class head + head-to-tail"
   elif [[ "$METHOD" == magmax ]]; then
-    echo "[RECIPE] MagMax paper-faithful sequential fine-tuning + maximum-magnitude merge (lambda=0.5) + TDDI + fixed 178-class head + head-to-tail"
+    echo "[RECIPE] MagMax paper-faithful online sequential fine-tuning + immediate maximum-magnitude merge (lambda=0.5) + TDDI + fixed 178-class head + head-to-tail"
   else
     echo "[RECIPE] $METHOD + independent experts + TDDI + fixed 178-class head + head-to-tail"
   fi
@@ -66,7 +66,7 @@ worker(){
     if [[ "$METHOD" == opcm ]]; then
       echo "[RUN] member=$member; train task t from shared initialization, merge immediately, then expose task t+1"
     elif [[ "$METHOD" == magmax ]]; then
-      echo "[RUN] member=$member; sequential fine-tuning and MagMax merge"
+      echo "[RUN] member=$member; train task t, merge immediately, then continue to task t+1"
     else
       echo "[RUN] member=$member; each expert resets from task-0 base"
     fi

@@ -1,10 +1,11 @@
-"""Expert training and causal merging for Task Arithmetic, TIES, and OPCM.
+"""Expert training and causal merging for Task Arithmetic, TIES, OPCM, and MagMax.
 
 The ordinary frozen-fold trainer is causal/sequential.  Model merging needs a
 different trajectory: Task Arithmetic/TIES use task-0 as their common base,
 while paper-faithful OPCM creates task experts from one shared initialization
-and merges them sequentially. Only backbone tensors are merged; fixed-head
-rows are stitched by ownership.
+and merges them online. MagMax fine-tunes sequentially and merges online after
+each task. Only backbone tensors are merged; fixed-head rows are stitched by
+ownership.
 """
 
 from __future__ import annotations
@@ -354,7 +355,7 @@ def run_model_merging_member(args, *, engine) -> None:
         ),
         "execution_schedule": (
             "online_train_current_expert_then_merge" if opcm_mode
-            else "sequential_train_then_boundary_merge" if magmax_mode
+            else "online_sequential_finetune_then_magmax_merge" if magmax_mode
             else "train_experts_then_causal_boundary_recompute"
         ),
         "pretrained_reference": "model_initialization_before_task0" if (opcm_mode or magmax_mode) else None,
@@ -371,10 +372,10 @@ def run_model_merging_member(args, *, engine) -> None:
     validation_data: dict[int, tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]] = {}
     (root / "experts").mkdir(parents=True, exist_ok=True)
     sample_counts: dict[int, int] = {}
-    if opcm_mode:
-        # OPCM is online: only the current task's train/validation arrays are
-        # loaded immediately before its expert is trained.  Future task data
-        # is not materialized before the current merge boundary.
+    if opcm_mode or magmax_mode:
+        # Both paper-faithful sequential methods expose only the current task
+        # to the training loop.  Future train/validation arrays are loaded at
+        # the corresponding boundary, immediately before that task is trained.
         _log("online_task_data_ready policy=current_task_only")
     else:
         for task in tasks:
@@ -415,34 +416,12 @@ def run_model_merging_member(args, *, engine) -> None:
         # loop below: train task t, merge it, then expose task t+1.
         base_state = None
     elif magmax_mode:
-        # MagMax's paper setting uses sequential fine-tuning: task t starts
-        # from the checkpoint obtained after task t-1, while task vectors are
-        # all measured against the shared initialization.
+        # MagMax expert training is deferred to the online boundary loop below.
+        # The next task starts from the raw sequential checkpoint, while the
+        # merged model is produced for evaluation/serving at each boundary.
         assert pretrained_reference_state is not None
-        sequential_state = pretrained_reference_state
-        for task in tasks:
-            task_id = int(task["task_id"])
-            owned_rows = [global_map[c] for c in task["classes"]]
-            _, expert_state, epoch_rows = _train_expert(
-                args,
-                task_id=task_id,
-                engine=engine,
-                initial_state=sequential_state,
-                train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
-                validation_values=validation_data[task_id][0], validation_labels=validation_data[task_id][1],
-                global_map=global_map,
-                owned_rows=owned_rows,
-                device=device,
-            )
-            task_states[task_id] = expert_state
-            sequential_state = expert_state
-            epochs_by_task[str(task_id)] = epoch_rows
-            torch.save(
-                {"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows},
-                root / "experts" / f"task_{task_id}.pt",
-            )
-            _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt sequential_previous=True")
-        base_state = task_states[0]
+        base_state = None
+        sequential_state: dict[str, torch.Tensor] | None = pretrained_reference_state
     else:
         _, base_state, base_epochs = _train_expert(
             args,
@@ -494,10 +473,9 @@ def run_model_merging_member(args, *, engine) -> None:
     opcm_previous_lambda = 1.0
     opcm_task_vector_norms: dict[int, float] = {}
     for boundary in range(len(tasks)):
-        if opcm_mode:
-            # Paper-faithful OPCM schedule: an incoming expert is trained from
-            # the common pretrained initialization, merged immediately, and
-            # only then do we proceed to the next task.
+        if opcm_mode or magmax_mode:
+            # Paper-faithful online schedule: train only the current task,
+            # merge it immediately, evaluate the boundary, then expose t+1.
             task_id = boundary
             task = tasks[task_id]
             args._merging_task_id = task_id
@@ -510,13 +488,18 @@ def run_model_merging_member(args, *, engine) -> None:
                 task_classes=task["classes"], role="validation", source_shard_root=source_shard_root,
             )
             sample_counts[task_id] = int(len(train_data[task_id][1]))
-            assert pretrained_reference_state is not None
             owned_rows = [global_map[c] for c in task["classes"]]
+            if opcm_mode:
+                assert pretrained_reference_state is not None
+                initial_state = pretrained_reference_state
+            else:
+                assert sequential_state is not None
+                initial_state = sequential_state
             _, expert_state, epoch_rows = _train_expert(
                 args,
                 task_id=task_id,
                 engine=engine,
-                initial_state=pretrained_reference_state,
+                initial_state=initial_state,
                 train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
                 validation_values=validation_data[task_id][0], validation_labels=validation_data[task_id][1],
                 global_map=global_map,
@@ -525,11 +508,18 @@ def run_model_merging_member(args, *, engine) -> None:
             )
             task_states[task_id] = expert_state
             epochs_by_task[str(task_id)] = epoch_rows
+            if magmax_mode:
+                # Keep the raw sequential checkpoint for the next task;
+                # MagMax's merged model is not the fine-tuning initializer.
+                sequential_state = expert_state
             torch.save(
                 {"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows},
                 root / "experts" / f"task_{task_id}.pt",
             )
-            _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt online_before_merge=True")
+            _log(
+                f"expert_saved task={task_id} path=experts/task_{task_id}.pt "
+                f"online_before_merge=True method={args.method}"
+            )
             if base_state is None:
                 base_state = expert_state
         _log(
@@ -679,7 +669,7 @@ def run_model_merging_member(args, *, engine) -> None:
         "sequential_merge": opcm_mode or magmax_mode,
         "execution_schedule": (
             "online_train_current_expert_then_merge" if opcm_mode
-            else "sequential_train_then_boundary_merge" if magmax_mode
+            else "online_sequential_finetune_then_magmax_merge" if magmax_mode
             else "train_experts_then_causal_boundary_recompute"
         ),
         "future_experts_used": False,
