@@ -518,7 +518,12 @@ def run_model_merging_member(args, *, engine) -> None:
         if opcm_mode:
             assert pretrained_reference_state is not None
             if boundary == 0:
-                merged_state = _state_cpu(task_states[0])
+                # ``task_states`` already stores CPU state-dicts.  Do not call
+                # _state_cpu here: that helper is for nn.Module instances.
+                merged_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in task_states[0].items()
+                }
                 opcm_previous_state = merged_state
                 opcm_previous_lambda = 1.0
                 scope = inspect_neural_merge_scope(model)
