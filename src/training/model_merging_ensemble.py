@@ -70,6 +70,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
     frame.to_csv(root / "ensemble_metrics.csv", index=False)
     final = frame.iloc[-1]
     is_opcm = method == "opcm"
+    is_magmax = method == "magmax"
     summary = {
         "method": method,
         "members": [0, 1, 2],
@@ -81,9 +82,11 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
         "final_weighted_f1": float(final["weighted_f1"]),
         "mean_task_macro_f1": float(frame["macro_f1"].mean()),
         "expert_generation": (
-            "independent_from_shared_initialization" if is_opcm else "independent_from_task0_checkpoint"
+            "sequential_finetuning_from_previous_task" if is_magmax
+            else "independent_from_shared_initialization" if is_opcm
+            else "independent_from_task0_checkpoint"
         ),
-        "sequential_merge": is_opcm,
+        "sequential_merge": is_opcm or is_magmax,
         "future_experts_used": False,
     }
     _json(root / "ensemble_summary.json", summary)
@@ -99,7 +102,9 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
         "method": method,
         "members": [0, 1, 2],
         "trajectory": (
-            "shared_initialization_experts_with_sequential_opcm_merge"
+            "sequential_finetuning_with_sequential_magmax_merge"
+            if is_magmax
+            else "shared_initialization_experts_with_sequential_opcm_merge"
             if is_opcm
             else "task_0_base_then_independent_task_experts"
         ),
@@ -115,7 +120,9 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
         f"# {method} model-merging ensemble",
         "",
         (
-            "- Three frozen-fold members; OPCM merges experts sequentially from a shared initialization."
+            "- Three frozen-fold members; MagMax uses sequential fine-tuning and sequential maximum-magnitude merging."
+            if is_magmax
+            else "- Three frozen-fold members; OPCM merges experts sequentially from a shared initialization."
             if is_opcm
             else "- Three frozen-fold members; each task expert was reset from task-0 base."
         ),
@@ -154,7 +161,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--method", required=True, choices=["task_arithmetic", "ties", "opcm"])
+    parser.add_argument("--method", required=True, choices=["task_arithmetic", "ties", "opcm", "magmax"])
     args = parser.parse_args()
     archive = build_ensemble(args.root, method=args.method)
     print(f"REVIEW: {archive}", flush=True)

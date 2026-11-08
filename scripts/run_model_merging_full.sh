@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Full model-merging run for Task Arithmetic, TIES, or paper-faithful OPCM.
-# Usage: bash scripts/run_model_merging_full.sh {task_arithmetic|ties|opcm} {check|start|status|follow}
+# Full model-merging run for Task Arithmetic, TIES, OPCM, or MagMax.
+# Usage: bash scripts/run_model_merging_full.sh {task_arithmetic|ties|opcm|magmax} {check|start|status|follow}
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 METHOD="${1:-task_arithmetic}"
 ACTION="${2:-check}"
-[[ "$METHOD" == task_arithmetic || "$METHOD" == ties || "$METHOD" == opcm ]] || { echo "[STOP] method must be task_arithmetic, ties, or opcm" >&2; exit 2; }
+[[ "$METHOD" == task_arithmetic || "$METHOD" == ties || "$METHOD" == opcm || "$METHOD" == magmax ]] || { echo "[STOP] method must be task_arithmetic, ties, opcm, or magmax" >&2; exit 2; }
 
 TRAIN="$PROJECT_ROOT/data/train_extracted.parquet"
 VALIDATION="$PROJECT_ROOT/data/validation_extracted.parquet"
@@ -31,7 +31,7 @@ check(){
   for p in "$PYTHON" "$TRAIN" "$VALIDATION" "$TEST" "$FEATURE_COLUMNS" "$TASK_FILE" "$FOLD_ASSIGNMENTS" "$FOLD_MANIFEST"; do require_file "$p"; done
   for m in 0 1 2; do require_file "$PREPROCESSING_ROOT/member_${m}/fold_preprocessing.json"; done
   "$PYTHON" -m py_compile src/training/train_cil.py src/training/model_merging_training.py src/training/model_merging_ensemble.py src/methods/model_merging.py
-  "$PYTHON" src/training/train_cil.py --help | grep -E "task_arithmetic|ties|opcm" >/dev/null || die "train_cil does not expose merging methods"
+  "$PYTHON" src/training/train_cil.py --help | grep -E "task_arithmetic|ties|opcm|magmax" >/dev/null || die "train_cil does not expose merging methods"
   echo "[OK] $METHOD model-merging plan validated; no training started."
 }
 
@@ -57,12 +57,16 @@ worker(){
   set +e
   if [[ "$METHOD" == opcm ]]; then
     echo "[RECIPE] OPCM paper-faithful sequential merge + shared-initialization experts + TDDI + fixed 178-class head + head-to-tail"
+  elif [[ "$METHOD" == magmax ]]; then
+    echo "[RECIPE] MagMax paper-faithful sequential fine-tuning + maximum-magnitude merge (lambda=0.5) + TDDI + fixed 178-class head + head-to-tail"
   else
     echo "[RECIPE] $METHOD + independent experts + TDDI + fixed 178-class head + head-to-tail"
   fi
   for member in 0 1 2; do
     if [[ "$METHOD" == opcm ]]; then
       echo "[RUN] member=$member; experts use shared initialization and OPCM merges sequentially"
+    elif [[ "$METHOD" == magmax ]]; then
+      echo "[RUN] member=$member; sequential fine-tuning and MagMax merge"
     else
       echo "[RUN] member=$member; each expert resets from task-0 base"
     fi
@@ -105,5 +109,5 @@ case "$ACTION" in
   start) start;;
   status) status;;
   follow) tail -n 100 -F "$(latest_home)/main.log";;
-  *) echo "Usage: bash scripts/run_model_merging_full.sh {task_arithmetic|ties|opcm} {check|start|status|follow}"; exit 2;;
+  *) echo "Usage: bash scripts/run_model_merging_full.sh {task_arithmetic|ties|opcm|magmax} {check|start|status|follow}"; exit 2;;
 esac

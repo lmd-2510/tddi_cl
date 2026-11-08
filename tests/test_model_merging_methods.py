@@ -6,11 +6,15 @@ from src.methods.model_merging import (
     BATCHNORM_POLICY,
     HEAD_POLICY,
     ModelMergingRecipe,
+    MAGMAX_METHOD,
+    MAGMAX_PAPER_SCALE,
     OPCM_METHOD,
     OPCM_PAPER_ALPHA,
     inspect_neural_merge_scope,
     merge_opcm_task_boundary,
+    merge_magmax_task_boundary,
     merge_task_boundary,
+    magmax_state,
     opcm_merge_task_vector,
     task_arithmetic_state,
     ties_state,
@@ -71,6 +75,10 @@ def test_paper_recipes_are_locked_without_merger_validation_tuning():
     assert opcm.method == OPCM_METHOD
     assert opcm.alpha == OPCM_PAPER_ALPHA
     assert opcm.manifest()["source"] == "paper_fixed_recipe_no_merger_validation_tuning"
+    magmax = ModelMergingRecipe.paper_magmax()
+    assert magmax.method == MAGMAX_METHOD
+    assert magmax.scale == MAGMAX_PAPER_SCALE
+    assert magmax.manifest()["source"] == "paper_fixed_recipe_no_merger_validation_tuning"
     base = {"weight": torch.zeros(5)}
     expert = {"weight": torch.tensor([5.0, 4.0, 3.0, 2.0, 1.0])}
     torch.testing.assert_close(
@@ -149,6 +157,53 @@ def test_opcm_projection_is_finite_and_adaptively_scaled():
     assert audit["projected_linear_layer_count"] == 1
     assert all(bool(torch.isfinite(value).all()) for value in merged.values())
     assert not torch.equal(merged["weight"], task["weight"])
+
+
+def test_magmax_selects_maximum_absolute_task_vector_entry():
+    pretrained = {"weight": torch.zeros(2, 2), "bias": torch.zeros(2)}
+    task0 = {"weight": torch.tensor([[1.0, -4.0], [2.0, 0.5]]), "bias": torch.tensor([1.0, -3.0])}
+    task1 = {"weight": torch.tensor([[-3.0, 2.0], [5.0, -0.25]]), "bias": torch.tensor([2.0, 4.0])}
+    merged, audit = magmax_state(
+        pretrained,
+        [task0, task1],
+        keys=("weight", "bias"),
+        scale=0.5,
+    )
+    torch.testing.assert_close(
+        merged["weight"],
+        torch.tensor([[-1.5, -2.0], [2.5, 0.25]]),
+    )
+    torch.testing.assert_close(merged["bias"], torch.tensor([1.0, 2.0]))
+    assert audit["selection"] == "elementwise_maximum_absolute_task_vector"
+
+
+def test_magmax_boundary_accepts_sequential_head_checkpoints_and_stitches_rows():
+    model = TinyMergeModel()
+    with torch.no_grad():
+        for value in model.parameters():
+            value.zero_()
+    pretrained = _state(model)
+    task0 = _expert(pretrained, backbone_delta=[[1.0, 0.0], [0.0, 1.0]], rows={0: 10.0, 1: 11.0})
+    # A sequential task-1 checkpoint keeps task-0 head rows and updates only
+    # its own rows, while the backbone continues from task 0.
+    task1 = {key: value.clone() for key, value in task0.items()}
+    task1["backbone.0.weight"].add_(torch.tensor([[0.0, 1.0], [1.0, 0.0]]))
+    task1["head.weight"][2].fill_(12.0)
+    task1["head.weight"][3].fill_(13.0)
+    task1["head.bias"][2] = 12.5
+    task1["head.bias"][3] = 13.5
+    result = merge_magmax_task_boundary(
+        model,
+        pretrained_state=pretrained,
+        task_states_by_task={0: task0, 1: task1},
+        rows_by_task={0: [0, 1], 1: [2, 3]},
+        train_sample_counts_by_task={0: 20, 1: 10},
+        upto_task_id=1,
+        recipe=ModelMergingRecipe.paper_magmax(),
+    )
+    assert result.audit["future_experts_used"] is False
+    assert torch.equal(result.state_dict["head.weight"][0], task0["head.weight"][0])
+    assert torch.equal(result.state_dict["head.weight"][2], task1["head.weight"][2])
 
 
 def test_opcm_boundary_stitches_task_zero_head_and_reports_causal_audit():

@@ -35,11 +35,13 @@ from src.data.stratified_folds import fold_file_sha256
 from src.eval.metrics import compute_classification_metrics
 from src.methods.model_merging import (
     ModelMergingRecipe,
+    MAGMAX_METHOD,
     OPCM_METHOD,
     TASK_ARITHMETIC_METHOD,
     TIES_METHOD,
     _state_vector_norm,
     inspect_neural_merge_scope,
+    merge_magmax_task_boundary,
     merge_opcm_task_boundary,
     merge_task_boundary,
 )
@@ -268,7 +270,7 @@ def _train_expert(
 
 
 def run_model_merging_member(args, *, engine) -> None:
-    if args.method not in {TASK_ARITHMETIC_METHOD, TIES_METHOD, OPCM_METHOD}:
+    if args.method not in {TASK_ARITHMETIC_METHOD, TIES_METHOD, OPCM_METHOD, MAGMAX_METHOD}:
         raise ValueError(f"Unsupported model-merging method: {args.method}")
     root = Path(args.outdir)
     if root.exists():
@@ -319,14 +321,19 @@ def run_model_merging_member(args, *, engine) -> None:
         recipe = ModelMergingRecipe.paper_task_arithmetic()
     elif args.method == TIES_METHOD:
         recipe = ModelMergingRecipe.paper_ties()
-    else:
+    elif args.method == OPCM_METHOD:
         recipe = ModelMergingRecipe.paper_opcm()
+    else:
+        recipe = ModelMergingRecipe.paper_magmax()
     opcm_mode = args.method == OPCM_METHOD
+    magmax_mode = args.method == MAGMAX_METHOD
     _dump_json(root / "run_config.json", {
         "method": args.method,
         "method_policy": (
             "frozen_fold_fixed_head_opcm_sequential_paper_v1"
             if opcm_mode
+            else "frozen_fold_fixed_head_magmax_sequential_paper_v1"
+            if magmax_mode
             else f"frozen_fold_fixed_head_{args.method}_independent_experts_v1"
         ),
         "protocol": "head_to_tail",
@@ -334,12 +341,18 @@ def run_model_merging_member(args, *, engine) -> None:
         "head_policy": "task_owned_fixed_head_rows_v1",
         "merge_scope": "learned_backbone_parameters_only_v1",
         "expert_generation": (
-            "independent_task_experts_from_shared_initialization"
+            "sequential_finetuning_from_previous_task"
+            if magmax_mode
+            else "independent_task_experts_from_shared_initialization"
             if opcm_mode
             else "independent_task_experts_from_task0_checkpoint"
         ),
-        "merge_trajectory": "sequential_opcm" if opcm_mode else "causal_boundary_recompute",
-        "pretrained_reference": "model_initialization_before_task0" if opcm_mode else None,
+        "merge_trajectory": (
+            "sequential_magmax" if magmax_mode
+            else "sequential_opcm" if opcm_mode
+            else "causal_boundary_recompute"
+        ),
+        "pretrained_reference": "model_initialization_before_task0" if (opcm_mode or magmax_mode) else None,
         "recipe": recipe.manifest(),
         "experiment_seed": args.seed,
         "member_id": args.member_id,
@@ -371,7 +384,7 @@ def run_model_merging_member(args, *, engine) -> None:
         )
     )
     pretrained_reference_state: dict[str, torch.Tensor] | None = None
-    if opcm_mode:
+    if opcm_mode or magmax_mode:
         reference_model = engine.expand_model_for_seen_classes(
             None, None, global_map,
             variant=args.variant, input_dim=len(columns), dropout=args.dropout,
@@ -379,7 +392,7 @@ def run_model_merging_member(args, *, engine) -> None:
             active_class_indices=list(range(len(global_map))),
         )
         pretrained_reference_state = _state_cpu(reference_model)
-        _log("opcm_reference_ready shared_initialization_before_task0=True")
+        _log("shared_reference_ready initialization_before_task0=True")
 
     experts: dict[int, dict[str, torch.Tensor]] = {}
     epochs_by_task: dict[str, object] = {}
@@ -409,6 +422,35 @@ def run_model_merging_member(args, *, engine) -> None:
                 root / "experts" / f"task_{task_id}.pt",
             )
             _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt")
+        base_state = task_states[0]
+    elif magmax_mode:
+        # MagMax's paper setting uses sequential fine-tuning: task t starts
+        # from the checkpoint obtained after task t-1, while task vectors are
+        # all measured against the shared initialization.
+        assert pretrained_reference_state is not None
+        sequential_state = pretrained_reference_state
+        for task in tasks:
+            task_id = int(task["task_id"])
+            owned_rows = [global_map[c] for c in task["classes"]]
+            _, expert_state, epoch_rows = _train_expert(
+                args,
+                task_id=task_id,
+                engine=engine,
+                initial_state=sequential_state,
+                train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
+                validation_values=validation_data[task_id][0], validation_labels=validation_data[task_id][1],
+                global_map=global_map,
+                owned_rows=owned_rows,
+                device=device,
+            )
+            task_states[task_id] = expert_state
+            sequential_state = expert_state
+            epochs_by_task[str(task_id)] = epoch_rows
+            torch.save(
+                {"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows},
+                root / "experts" / f"task_{task_id}.pt",
+            )
+            _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt sequential_previous=True")
         base_state = task_states[0]
     else:
         _, base_state, base_epochs = _train_expert(
@@ -464,7 +506,7 @@ def run_model_merging_member(args, *, engine) -> None:
     for boundary in range(len(tasks)):
         _log(
             f"merge_start boundary={boundary} "
-            f"experts_used={boundary + 1 if opcm_mode else boundary} "
+            f"experts_used={boundary + 1 if (opcm_mode or magmax_mode) else boundary} "
             f"seen_classes={sum(len(task['classes']) for task in tasks[:boundary + 1])}"
         )
         model = engine.expand_model_for_seen_classes(
@@ -531,6 +573,23 @@ def run_model_merging_member(args, *, engine) -> None:
                     f"opcm_projection boundary={boundary} lambda_t={opcm_previous_lambda:.6f} "
                     f"avg_task_vector_norm={merge_audit['projection']['average_task_vector_norm']:.6f}"
                 )
+        elif magmax_mode:
+            assert pretrained_reference_state is not None
+            result = merge_magmax_task_boundary(
+                model,
+                pretrained_state=pretrained_reference_state,
+                task_states_by_task={task_id: task_states[task_id] for task_id in range(boundary + 1)},
+                rows_by_task=rows_by_task,
+                train_sample_counts_by_task={task_id: sample_counts[task_id] for task_id in range(boundary + 1)},
+                upto_task_id=boundary,
+                recipe=recipe,
+            )
+            merged_state = result.state_dict
+            merge_audit = result.audit
+            _log(
+                f"magmax_selection boundary={boundary} tasks_used={boundary + 1} "
+                f"scale={recipe.scale:.3f}"
+            )
         else:
             result = merge_task_boundary(
                 model,
@@ -583,9 +642,11 @@ def run_model_merging_member(args, *, engine) -> None:
         "final_macro_f1": metrics_rows[-1]["macro_f1"],
         "mean_task_macro_f1": float(np.mean([row["macro_f1"] for row in metrics_rows])),
         "expert_generation": (
-            "independent_from_shared_initialization" if opcm_mode else "independent_from_task0_checkpoint"
+            "sequential_finetuning_from_previous_task" if magmax_mode
+            else "independent_from_shared_initialization" if opcm_mode
+            else "independent_from_task0_checkpoint"
         ),
-        "sequential_merge": opcm_mode,
+        "sequential_merge": opcm_mode or magmax_mode,
         "future_experts_used": False,
     })
     _log(f"member_complete member={args.member_id} output={root}")
