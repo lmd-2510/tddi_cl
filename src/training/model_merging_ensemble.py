@@ -69,6 +69,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
     frame = pd.DataFrame(rows)
     frame.to_csv(root / "ensemble_metrics.csv", index=False)
     final = frame.iloc[-1]
+    is_opcm = method == "opcm"
     summary = {
         "method": method,
         "members": [0, 1, 2],
@@ -79,7 +80,10 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
         "final_macro_f1": float(final["macro_f1"]),
         "final_weighted_f1": float(final["weighted_f1"]),
         "mean_task_macro_f1": float(frame["macro_f1"].mean()),
-        "independent_experts": True,
+        "expert_generation": (
+            "independent_from_shared_initialization" if is_opcm else "independent_from_task0_checkpoint"
+        ),
+        "sequential_merge": is_opcm,
         "future_experts_used": False,
     }
     _json(root / "ensemble_summary.json", summary)
@@ -94,7 +98,11 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
         "kind": "ddi_cil_model_merging_full_manifest",
         "method": method,
         "members": [0, 1, 2],
-        "trajectory": "task_0_base_then_independent_task_experts",
+        "trajectory": (
+            "shared_initialization_experts_with_sequential_opcm_merge"
+            if is_opcm
+            else "task_0_base_then_independent_task_experts"
+        ),
         "merge_scope": "learned_backbone_parameters_only",
         "future_experts_used": False,
         "review_archive_excludes": ["*.pt", "*.npz", "train.log", "stdout.log", "events.csv"],
@@ -104,9 +112,13 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
     except (ImportError, ModuleNotFoundError):
         table = "```csv\n" + frame.to_csv(index=False) + "```"
     report = [
-        f"# {method} independent-expert ensemble",
+        f"# {method} model-merging ensemble",
         "",
-        "- Three frozen-fold members; each task expert was reset from task-0 base.",
+        (
+            "- Three frozen-fold members; OPCM merges experts sequentially from a shared initialization."
+            if is_opcm
+            else "- Three frozen-fold members; each task expert was reset from task-0 base."
+        ),
         "- Only backbone parameters were merged; fixed-head rows were stitched by task ownership.",
         "- No future expert was used at an earlier boundary.",
         "",
@@ -142,7 +154,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--method", required=True, choices=["task_arithmetic", "ties"])
+    parser.add_argument("--method", required=True, choices=["task_arithmetic", "ties", "opcm"])
     args = parser.parse_args()
     archive = build_ensemble(args.root, method=args.method)
     print(f"REVIEW: {archive}", flush=True)

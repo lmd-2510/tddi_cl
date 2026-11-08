@@ -53,7 +53,8 @@ FIXED_BUDGET_METHOD = "class_balanced_fixed_budget_replay"
 ER_METHOD = "er"
 TASK_ARITHMETIC_METHOD = "task_arithmetic"
 TIES_METHOD = "ties"
-MERGING_METHODS = (TASK_ARITHMETIC_METHOD, TIES_METHOD)
+OPCM_METHOD = "opcm"
+MERGING_METHODS = (TASK_ARITHMETIC_METHOD, TIES_METHOD, OPCM_METHOD)
 METHODS = (FIXED_BUDGET_METHOD, ER_METHOD, "ewc", "agem", IDER_METHOD, UPCL_METHOD, *MERGING_METHODS)
 METHOD_POLICIES = {
     FIXED_BUDGET_METHOD: "frozen_fold_fixed_head_class_balanced_replay_v1",
@@ -64,6 +65,7 @@ METHOD_POLICIES = {
     ER_METHOD: "frozen_fold_fixed_head_experience_replay_v1",
     TASK_ARITHMETIC_METHOD: "frozen_fold_fixed_head_task_arithmetic_independent_experts_v1",
     TIES_METHOD: "frozen_fold_fixed_head_ties_independent_experts_v1",
+    OPCM_METHOD: "frozen_fold_fixed_head_opcm_sequential_paper_v1",
 }
 
 class FocalLoss(nn.Module if nn is not None else object):

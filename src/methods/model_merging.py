@@ -1,4 +1,4 @@
-"""Causal Task Arithmetic and TIES merging for fixed-head DDI models.
+"""Causal Task Arithmetic, TIES, and OPCM merging for fixed-head DDI models.
 
 Only learned neural-network parameters outside the classifier head participate
 in arithmetic merging.  Fixed-head rows are composed from the task expert that
@@ -19,20 +19,22 @@ from torch import nn
 
 TASK_ARITHMETIC_METHOD = "task_arithmetic"
 TIES_METHOD = "ties"
-MODEL_MERGING_METHODS = (TASK_ARITHMETIC_METHOD, TIES_METHOD)
+OPCM_METHOD = "opcm"
+MODEL_MERGING_METHODS = (TASK_ARITHMETIC_METHOD, TIES_METHOD, OPCM_METHOD)
 
 TASK_ARITHMETIC_PAPER_SCALE = 0.4
 TIES_PAPER_DENSITY = 0.20
 TIES_PAPER_SCALE = 1.0
 TIES_PAPER_SIGN = "mass"
 TIES_PAPER_REDUCTION = "disjoint_mean"
+OPCM_PAPER_ALPHA = 0.5
 
 HEAD_POLICY = "task_owned_fixed_head_rows_v1"
 BATCHNORM_POLICY = "weighted_pooled_expert_moments_v1"
 MERGE_SCOPE_POLICY = "learned_backbone_parameters_only_v1"
 
 StateDict = Mapping[str, torch.Tensor]
-MergeMethod = Literal["task_arithmetic", "ties"]
+MergeMethod = Literal["task_arithmetic", "ties", "opcm"]
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class ModelMergingRecipe:
     density: float | None = None
     sign_election: str | None = None
     reduction: str | None = None
+    alpha: float | None = None
 
     def __post_init__(self) -> None:
         if self.method not in MODEL_MERGING_METHODS:
@@ -86,15 +89,22 @@ class ModelMergingRecipe:
         if not math.isfinite(self.scale) or self.scale < 0:
             raise ValueError("Model-merging scale must be finite and non-negative.")
         if self.method == TASK_ARITHMETIC_METHOD:
-            if any(value is not None for value in (self.density, self.sign_election, self.reduction)):
+            if any(value is not None for value in (self.density, self.sign_election, self.reduction, self.alpha)):
                 raise ValueError("Task Arithmetic does not use TIES hyperparameters.")
-        else:
+        elif self.method == TIES_METHOD:
+            if self.alpha is not None:
+                raise ValueError("TIES does not use OPCM alpha.")
             if self.density is None or not 0 < self.density <= 1:
                 raise ValueError("TIES density must be in (0, 1].")
             if self.sign_election != TIES_PAPER_SIGN:
                 raise ValueError("The locked TIES recipe uses mass sign election.")
             if self.reduction != TIES_PAPER_REDUCTION:
                 raise ValueError("The locked TIES recipe uses a disjoint mean.")
+        else:
+            if any(value is not None for value in (self.density, self.sign_election, self.reduction)):
+                raise ValueError("OPCM does not use TIES hyperparameters.")
+            if self.alpha is None or not math.isfinite(self.alpha) or not 0 < self.alpha <= 1:
+                raise ValueError("OPCM alpha must be finite and in (0, 1].")
 
     @classmethod
     def paper_task_arithmetic(cls) -> "ModelMergingRecipe":
@@ -110,6 +120,10 @@ class ModelMergingRecipe:
             reduction=TIES_PAPER_REDUCTION,
         )
 
+    @classmethod
+    def paper_opcm(cls) -> "ModelMergingRecipe":
+        return cls(method=OPCM_METHOD, scale=1.0, alpha=OPCM_PAPER_ALPHA)
+
     def manifest(self) -> dict[str, object]:
         paper_locked = (
             self.method == TASK_ARITHMETIC_METHOD
@@ -123,8 +137,15 @@ class ModelMergingRecipe:
             and self.density == TIES_PAPER_DENSITY
             and self.sign_election == TIES_PAPER_SIGN
             and self.reduction == TIES_PAPER_REDUCTION
+        ) or (
+            self.method == OPCM_METHOD
+            and self.scale == 1.0
+            and self.alpha == OPCM_PAPER_ALPHA
+            and self.density is None
+            and self.sign_election is None
+            and self.reduction is None
         )
-        return {
+        manifest = {
             **asdict(self),
             "source": (
                 "paper_fixed_recipe_no_merger_validation_tuning"
@@ -132,12 +153,22 @@ class ModelMergingRecipe:
                 else "explicit_nonpaper_override"
             ),
         }
+        if self.alpha is None:
+            manifest.pop("alpha", None)
+        return manifest
 
 
 @dataclass(frozen=True)
 class BoundaryMergeResult:
     state_dict: dict[str, torch.Tensor]
     audit: dict[str, object]
+
+
+@dataclass(frozen=True)
+class OPCMBoundaryResult:
+    state_dict: dict[str, torch.Tensor]
+    audit: dict[str, object]
+    lambda_t: float
 
 
 def inspect_neural_merge_scope(model: nn.Module) -> NeuralMergeScope:
@@ -334,8 +365,9 @@ def stitch_task_head_rows(
     rows_by_task: Mapping[int, Sequence[int]],
     scope: NeuralMergeScope,
     upto_task_id: int,
+    task0_source: StateDict | None = None,
 ) -> None:
-    """Compose fixed-head rows; task zero remains owned by the base model."""
+    """Compose fixed-head rows; optionally use a task-0 expert as owner."""
 
     if upto_task_id < 0:
         raise ValueError("upto_task_id must be non-negative.")
@@ -355,7 +387,7 @@ def stitch_task_head_rows(
         if overlap:
             raise ValueError(f"Fixed-head rows have multiple owners: {sorted(overlap)}")
         seen_rows.update(rows)
-        source = base if task_id == 0 else experts_by_task.get(task_id)
+        source = (task0_source if task0_source is not None else base) if task_id == 0 else experts_by_task.get(task_id)
         if source is None:
             raise ValueError(f"Missing expert state for task {task_id}.")
         index = torch.as_tensor(rows, dtype=torch.long, device=weight.device)
@@ -447,6 +479,221 @@ def pool_batchnorm_moments(
             dtype=state[group.num_batches_tracked].dtype,
             device=state[group.num_batches_tracked].device,
         )
+
+
+def _state_vector_norm(reference: StateDict, state: StateDict, keys: Sequence[str]) -> float:
+    """Compute a stable L2 norm without materializing one giant parameter vector."""
+
+    squared = torch.zeros((), dtype=torch.float64)
+    for key in keys:
+        delta = state[key].detach() - reference[key].detach()
+        if not delta.is_floating_point():
+            continue
+        squared = squared + torch.sum(delta.float() * delta.float(), dtype=torch.float64)
+    return float(torch.sqrt(squared).item())
+
+
+def _opcm_linear_cleaned_delta(
+    previous_delta: torch.Tensor,
+    task_delta: torch.Tensor,
+    *,
+    alpha: float,
+) -> tuple[torch.Tensor, int]:
+    """Project a linear-layer task vector using the paper OPCM SVD rule."""
+
+    if previous_delta.ndim != 2 or task_delta.ndim != 2:
+        raise ValueError("OPCM linear projection requires two-dimensional weight tensors.")
+    if previous_delta.shape != task_delta.shape:
+        raise ValueError("OPCM linear task-vector shapes must match.")
+    if not bool(torch.isfinite(previous_delta).all()) or not bool(torch.isfinite(task_delta).all()):
+        raise FloatingPointError("OPCM received a non-finite task vector.")
+    previous_norm = torch.linalg.vector_norm(previous_delta)
+    if float(previous_norm) == 0.0:
+        return task_delta.clone(), 0
+
+    # The official implementation uses a full SVD, then removes the diagonal
+    # and the dominant singular subspace whose cumulative energy reaches alpha.
+    u, singular_values, vh = torch.linalg.svd(previous_delta, full_matrices=True)
+    v = vh.transpose(-2, -1)
+    singular_sum = singular_values.sum()
+    if float(singular_sum) == 0.0:
+        return task_delta.clone(), 0
+    cumulative = singular_values.cumsum(dim=0) / singular_sum
+    reached = torch.nonzero(cumulative > alpha, as_tuple=False)
+    split_rank = int(reached[0].item()) if reached.numel() else int(singular_values.numel())
+
+    projected = u.transpose(-2, -1) @ task_delta @ v
+    diagonal = projected.diagonal(offset=0, dim1=-2, dim2=-1)
+    diagonal.zero_()
+    if split_rank > 0:
+        projected[:split_rank, :split_rank] = 0
+    cleaned = u @ projected @ v.transpose(-2, -1)
+    return cleaned, split_rank
+
+
+def opcm_merge_task_vector(
+    pretrained_state: StateDict,
+    previous_state: StateDict,
+    task_state: StateDict,
+    *,
+    keys: Sequence[str],
+    previous_lambda: float,
+    average_task_vector_norm: float,
+    alpha: float = OPCM_PAPER_ALPHA,
+) -> tuple[dict[str, torch.Tensor], float, dict[str, object]]:
+    """Perform one paper-faithful sequential OPCM update.
+
+    ``pretrained_state`` is the shared initialization, ``previous_state`` is
+    the already merged model, and ``task_state`` is the next independently
+    fine-tuned expert.  The update is training-free and only touches learned
+    backbone parameters supplied in ``keys``.
+    """
+
+    _validate_state_compatibility(pretrained_state, [previous_state, task_state])
+    merge_keys = _validate_merge_keys(pretrained_state, keys)
+    if not math.isfinite(previous_lambda) or previous_lambda <= 0:
+        raise ValueError("OPCM previous_lambda must be finite and positive.")
+    if not math.isfinite(average_task_vector_norm) or average_task_vector_norm < 0:
+        raise ValueError("OPCM average task-vector norm must be finite and non-negative.")
+    if not math.isfinite(alpha) or not 0 < alpha <= 1:
+        raise ValueError("OPCM alpha must be finite and in (0, 1].")
+
+    raw_state = _clone_state(previous_state)
+    projected_layers = 0
+    projected_rank_sum = 0
+    with torch.no_grad():
+        for key in merge_keys:
+            previous_delta = previous_state[key] - pretrained_state[key]
+            task_delta = task_state[key] - pretrained_state[key]
+            if previous_delta.ndim == 2:
+                cleaned, split_rank = _opcm_linear_cleaned_delta(
+                    previous_delta, task_delta, alpha=alpha
+                )
+                projected_layers += 1
+                projected_rank_sum += split_rank
+            else:
+                cleaned = task_delta
+            raw_state[key] = pretrained_state[key] + previous_lambda * previous_delta + cleaned
+
+        raw_norm = _state_vector_norm(pretrained_state, raw_state, merge_keys)
+        if raw_norm == 0.0 or average_task_vector_norm == 0.0:
+            lambda_t = 1.0
+            merged = raw_state
+        else:
+            lambda_t = raw_norm / average_task_vector_norm
+            merged = _clone_state(raw_state)
+            for key in merge_keys:
+                merged[key] = pretrained_state[key] + (raw_state[key] - pretrained_state[key]) / lambda_t
+
+    audit = {
+        "method": OPCM_METHOD,
+        "alpha": float(alpha),
+        "previous_lambda_t": float(previous_lambda),
+        "lambda_t": float(lambda_t),
+        "average_task_vector_norm": float(average_task_vector_norm),
+        "raw_merged_task_vector_norm": float(raw_norm),
+        "projected_linear_layer_count": int(projected_layers),
+        "projected_split_rank_sum": int(projected_rank_sum),
+        "projection": "full_svd_remove_diagonal_and_dominant_subspace",
+        "adaptive_scaling": "average_seen_task_vector_norm",
+    }
+    return merged, float(lambda_t), audit
+
+
+def merge_opcm_task_boundary(
+    model: nn.Module,
+    *,
+    pretrained_state: StateDict,
+    previous_state: StateDict,
+    task_state: StateDict,
+    task_states_by_task: Mapping[int, StateDict],
+    rows_by_task: Mapping[int, Sequence[int]],
+    train_sample_counts_by_task: Mapping[int, int],
+    task_vector_norms_by_task: Mapping[int, float],
+    upto_task_id: int,
+    previous_lambda: float,
+    recipe: ModelMergingRecipe,
+) -> OPCMBoundaryResult:
+    """Merge the next expert into a causal OPCM state and compose fixed-head rows."""
+
+    if recipe.method != OPCM_METHOD:
+        raise ValueError("merge_opcm_task_boundary requires an OPCM recipe.")
+    if upto_task_id <= 0:
+        raise ValueError("OPCM boundary updates start at task 1; task 0 is the first expert.")
+    expected_tasks = set(range(upto_task_id + 1))
+    if set(task_states_by_task) != expected_tasks:
+        raise ValueError(
+            "OPCM boundary requires exactly the seen task experts; "
+            f"expected={sorted(expected_tasks)}, got={sorted(task_states_by_task)}."
+        )
+    if set(task_vector_norms_by_task) != expected_tasks:
+        raise ValueError("OPCM task-vector norms must cover exactly the seen tasks.")
+    if set(train_sample_counts_by_task) != expected_tasks:
+        raise ValueError("OPCM train sample counts must cover exactly the seen tasks.")
+    for task_id, count in train_sample_counts_by_task.items():
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError(f"Task {task_id} requires a positive integer train sample count.")
+
+    scope = inspect_neural_merge_scope(model)
+    _validate_state_compatibility(pretrained_state, [previous_state, task_state, *task_states_by_task.values()])
+    validate_expert_head_isolation(
+        base=pretrained_state,
+        experts_by_task=task_states_by_task,
+        rows_by_task=rows_by_task,
+        scope=scope,
+    )
+    average_norm = float(sum(task_vector_norms_by_task.values()) / len(task_vector_norms_by_task))
+    merged, lambda_t, projection_audit = opcm_merge_task_vector(
+        pretrained_state,
+        previous_state,
+        task_state,
+        keys=scope.backbone_parameter_keys,
+        previous_lambda=previous_lambda,
+        average_task_vector_norm=average_norm,
+        alpha=float(recipe.alpha),
+    )
+    stitch_task_head_rows(
+        merged,
+        base=pretrained_state,
+        experts_by_task=task_states_by_task,
+        rows_by_task=rows_by_task,
+        scope=scope,
+        upto_task_id=upto_task_id,
+        task0_source=task_states_by_task[0],
+    )
+    if scope.batchnorm:
+        pool_batchnorm_moments(
+            merged,
+            states_by_task=task_states_by_task,
+            sample_counts_by_task=train_sample_counts_by_task,
+            scope=scope,
+            upto_task_id=upto_task_id,
+        )
+    model.load_state_dict(merged, strict=True)
+    seen_rows = [int(row) for task_id in range(upto_task_id + 1) for row in rows_by_task[task_id]]
+    audit = {
+        "artifact_kind": "ddi_cil_sequential_opcm_boundary",
+        "base_task_id": 0,
+        "upto_task_id": int(upto_task_id),
+        "expert_task_ids": sorted(task_states_by_task),
+        "future_experts_used": False,
+        "recipe": recipe.manifest(),
+        "scope": scope.manifest(),
+        "head_policy": HEAD_POLICY,
+        "seen_head_rows": seen_rows,
+        "batchnorm_policy": BATCHNORM_POLICY if scope.batchnorm else "not_applicable",
+        "batchnorm_uses_stored_samples": False,
+        "train_sample_counts_by_task": {
+            str(task_id): int(train_sample_counts_by_task[task_id])
+            for task_id in range(upto_task_id + 1)
+        },
+        "task_vector_norms_by_task": {
+            str(task_id): float(task_vector_norms_by_task[task_id])
+            for task_id in range(upto_task_id + 1)
+        },
+        "projection": projection_audit,
+    }
+    return OPCMBoundaryResult(state_dict=merged, audit=audit, lambda_t=lambda_t)
 
 
 def merge_task_boundary(
@@ -554,13 +801,18 @@ __all__ = [
     "MERGE_SCOPE_POLICY",
     "ModelMergingRecipe",
     "NeuralMergeScope",
+    "OPCM_METHOD",
+    "OPCM_PAPER_ALPHA",
+    "OPCMBoundaryResult",
     "TASK_ARITHMETIC_METHOD",
     "TASK_ARITHMETIC_PAPER_SCALE",
     "TIES_METHOD",
     "TIES_PAPER_DENSITY",
     "TIES_PAPER_SCALE",
     "inspect_neural_merge_scope",
+    "merge_opcm_task_boundary",
     "merge_task_boundary",
+    "opcm_merge_task_vector",
     "pool_batchnorm_moments",
     "stitch_task_head_rows",
     "task_arithmetic_state",

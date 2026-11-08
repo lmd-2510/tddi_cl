@@ -1,9 +1,10 @@
-"""Independent-expert training for Task Arithmetic and TIES.
+"""Expert training and causal merging for Task Arithmetic, TIES, and OPCM.
 
 The ordinary frozen-fold trainer is causal/sequential.  Model merging needs a
-different trajectory: task 0 is trained once as the common base and every
-later task expert is reset to that base before fine-tuning on its own task.
-Only backbone tensors are merged; fixed-head rows are stitched by ownership.
+different trajectory: Task Arithmetic/TIES use task-0 as their common base,
+while paper-faithful OPCM creates task experts from one shared initialization
+and merges them sequentially. Only backbone tensors are merged; fixed-head
+rows are stitched by ownership.
 """
 
 from __future__ import annotations
@@ -34,8 +35,12 @@ from src.data.stratified_folds import fold_file_sha256
 from src.eval.metrics import compute_classification_metrics
 from src.methods.model_merging import (
     ModelMergingRecipe,
+    OPCM_METHOD,
     TASK_ARITHMETIC_METHOD,
     TIES_METHOD,
+    _state_vector_norm,
+    inspect_neural_merge_scope,
+    merge_opcm_task_boundary,
     merge_task_boundary,
 )
 from src.training.fold_training import _model_values, validate_fold_task_spec
@@ -183,7 +188,7 @@ def _train_expert(
     _log(
         f"expert_start task={task_id} rows={len(train_labels)} "
         f"validation_rows={len(validation_labels)} owned_classes={len(owned_rows)} "
-        f"reset_from_base={initial_state is not None}"
+        f"initial_state_loaded={initial_state is not None}"
     )
     model = engine.expand_model_for_seen_classes(
         None,
@@ -263,8 +268,8 @@ def _train_expert(
 
 
 def run_model_merging_member(args, *, engine) -> None:
-    if args.method not in {TASK_ARITHMETIC_METHOD, TIES_METHOD}:
-        raise ValueError(f"Unsupported independent-expert method: {args.method}")
+    if args.method not in {TASK_ARITHMETIC_METHOD, TIES_METHOD, OPCM_METHOD}:
+        raise ValueError(f"Unsupported model-merging method: {args.method}")
     root = Path(args.outdir)
     if root.exists():
         raise FileExistsError(f"Model-merging output already exists; never overwrite: {root}")
@@ -310,14 +315,31 @@ def run_model_merging_member(args, *, engine) -> None:
         f"cache={'source_shard' if source_shard_root is not None else 'direct_parquet'} "
         f"prep_sha256={prep_hash[:12]}"
     )
-    recipe = ModelMergingRecipe.paper_task_arithmetic() if args.method == TASK_ARITHMETIC_METHOD else ModelMergingRecipe.paper_ties()
+    if args.method == TASK_ARITHMETIC_METHOD:
+        recipe = ModelMergingRecipe.paper_task_arithmetic()
+    elif args.method == TIES_METHOD:
+        recipe = ModelMergingRecipe.paper_ties()
+    else:
+        recipe = ModelMergingRecipe.paper_opcm()
+    opcm_mode = args.method == OPCM_METHOD
     _dump_json(root / "run_config.json", {
         "method": args.method,
-        "method_policy": f"frozen_fold_fixed_head_{args.method}_independent_experts_v1",
+        "method_policy": (
+            "frozen_fold_fixed_head_opcm_sequential_paper_v1"
+            if opcm_mode
+            else f"frozen_fold_fixed_head_{args.method}_independent_experts_v1"
+        ),
         "protocol": "head_to_tail",
         "task_layout": [len(task["classes"]) for task in tasks],
         "head_policy": "task_owned_fixed_head_rows_v1",
         "merge_scope": "learned_backbone_parameters_only_v1",
+        "expert_generation": (
+            "independent_task_experts_from_shared_initialization"
+            if opcm_mode
+            else "independent_task_experts_from_task0_checkpoint"
+        ),
+        "merge_trajectory": "sequential_opcm" if opcm_mode else "causal_boundary_recompute",
+        "pretrained_reference": "model_initialization_before_task0" if opcm_mode else None,
         "recipe": recipe.manifest(),
         "experiment_seed": args.seed,
         "member_id": args.member_id,
@@ -348,39 +370,79 @@ def run_model_merging_member(args, *, engine) -> None:
             for task_id in range(len(tasks))
         )
     )
-    base_model, base_state, base_epochs = _train_expert(
-        args,
-        task_id=0,
-        engine=engine,
-        initial_state=None,
-        train_values=train_data[0][0], train_labels=train_data[0][1],
-        validation_values=validation_data[0][0], validation_labels=validation_data[0][1],
-        global_map=global_map,
-        owned_rows=[global_map[c] for c in tasks[0]["classes"]],
-        device=device,
-    )
+    pretrained_reference_state: dict[str, torch.Tensor] | None = None
+    if opcm_mode:
+        reference_model = engine.expand_model_for_seen_classes(
+            None, None, global_map,
+            variant=args.variant, input_dim=len(columns), dropout=args.dropout,
+            activation=args.activation, norm=args.norm, method=None,
+            active_class_indices=list(range(len(global_map))),
+        )
+        pretrained_reference_state = _state_cpu(reference_model)
+        _log("opcm_reference_ready shared_initialization_before_task0=True")
+
     experts: dict[int, dict[str, torch.Tensor]] = {}
-    epochs_by_task = {"0": base_epochs}
-    torch.save({"model_state": base_state, "task_id": 0}, root / "experts" / "task_0.pt")
-    _log("expert_saved task=0 path=experts/task_0.pt")
-    for task in tasks[1:]:
-        task_id = int(task["task_id"])
-        owned_rows = [global_map[c] for c in task["classes"]]
-        _, expert_state, epoch_rows = _train_expert(
+    epochs_by_task: dict[str, object] = {}
+    task_states: dict[int, dict[str, torch.Tensor]] = {}
+    if opcm_mode:
+        # OPCM's paper setting: each task expert is fine-tuned from the same
+        # pretrained reference, while the *merge* is performed sequentially.
+        assert pretrained_reference_state is not None
+        for task in tasks:
+            task_id = int(task["task_id"])
+            owned_rows = [global_map[c] for c in task["classes"]]
+            _, expert_state, epoch_rows = _train_expert(
+                args,
+                task_id=task_id,
+                engine=engine,
+                initial_state=pretrained_reference_state,
+                train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
+                validation_values=validation_data[task_id][0], validation_labels=validation_data[task_id][1],
+                global_map=global_map,
+                owned_rows=owned_rows,
+                device=device,
+            )
+            task_states[task_id] = expert_state
+            epochs_by_task[str(task_id)] = epoch_rows
+            torch.save(
+                {"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows},
+                root / "experts" / f"task_{task_id}.pt",
+            )
+            _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt")
+        base_state = task_states[0]
+    else:
+        _, base_state, base_epochs = _train_expert(
             args,
-            task_id=task_id,
+            task_id=0,
             engine=engine,
-            initial_state=base_state,
-            train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
-            validation_values=validation_data[task_id][0], validation_labels=validation_data[task_id][1],
+            initial_state=None,
+            train_values=train_data[0][0], train_labels=train_data[0][1],
+            validation_values=validation_data[0][0], validation_labels=validation_data[0][1],
             global_map=global_map,
-            owned_rows=owned_rows,
+            owned_rows=[global_map[c] for c in tasks[0]["classes"]],
             device=device,
         )
-        experts[task_id] = expert_state
-        epochs_by_task[str(task_id)] = epoch_rows
-        torch.save({"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows}, root / "experts" / f"task_{task_id}.pt")
-        _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt")
+        epochs_by_task["0"] = base_epochs
+        torch.save({"model_state": base_state, "task_id": 0}, root / "experts" / "task_0.pt")
+        _log("expert_saved task=0 path=experts/task_0.pt")
+        for task in tasks[1:]:
+            task_id = int(task["task_id"])
+            owned_rows = [global_map[c] for c in task["classes"]]
+            _, expert_state, epoch_rows = _train_expert(
+                args,
+                task_id=task_id,
+                engine=engine,
+                initial_state=base_state,
+                train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
+                validation_values=validation_data[task_id][0], validation_labels=validation_data[task_id][1],
+                global_map=global_map,
+                owned_rows=owned_rows,
+                device=device,
+            )
+            experts[task_id] = expert_state
+            epochs_by_task[str(task_id)] = epoch_rows
+            torch.save({"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows}, root / "experts" / f"task_{task_id}.pt")
+            _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt")
 
     args._merging_task_id = 0
     test_values, test_labels, test_metadata = _load_task_arrays(
@@ -396,9 +458,13 @@ def run_model_merging_member(args, *, engine) -> None:
     metrics_rows: list[dict[str, object]] = []
     merged_dir = root / "merged"
     merged_dir.mkdir(parents=True, exist_ok=True)
+    opcm_previous_state: dict[str, torch.Tensor] | None = None
+    opcm_previous_lambda = 1.0
+    opcm_task_vector_norms: dict[int, float] = {}
     for boundary in range(len(tasks)):
         _log(
-            f"merge_start boundary={boundary} experts_used={boundary} "
+            f"merge_start boundary={boundary} "
+            f"experts_used={boundary + 1 if opcm_mode else boundary} "
             f"seen_classes={sum(len(task['classes']) for task in tasks[:boundary + 1])}"
         )
         model = engine.expand_model_for_seen_classes(
@@ -407,15 +473,76 @@ def run_model_merging_member(args, *, engine) -> None:
             activation=args.activation, norm=args.norm, method=None,
             active_class_indices=[global_map[c] for task in tasks[: boundary + 1] for c in task["classes"]],
         ).to(device)
-        result = merge_task_boundary(
-            model,
-            base_state=base_state,
-            experts_by_task={task_id: experts[task_id] for task_id in range(1, boundary + 1)},
-            rows_by_task=rows_by_task,
-            train_sample_counts_by_task={task_id: sample_counts[task_id] for task_id in range(boundary + 1)},
-            upto_task_id=boundary,
-            recipe=recipe,
-        )
+        if opcm_mode:
+            assert pretrained_reference_state is not None
+            if boundary == 0:
+                merged_state = _state_cpu(task_states[0])
+                opcm_previous_state = merged_state
+                opcm_previous_lambda = 1.0
+                scope = inspect_neural_merge_scope(model)
+                opcm_task_vector_norms = {
+                    task_id: float(
+                        _state_vector_norm(
+                            pretrained_reference_state,
+                            task_states[task_id],
+                            scope.backbone_parameter_keys,
+                        )
+                    )
+                    for task_id in range(len(tasks))
+                }
+                merge_audit = {
+                    "artifact_kind": "ddi_cil_sequential_opcm_boundary",
+                    "base_task_id": 0,
+                    "upto_task_id": 0,
+                    "expert_task_ids": [0],
+                    "future_experts_used": False,
+                    "recipe": recipe.manifest(),
+                    "scope": scope.manifest(),
+                    "head_policy": "task_owned_fixed_head_rows_v1",
+                    "seen_head_rows": rows_by_task[0],
+                    "batchnorm_policy": "expert_task0_state",
+                    "projection": {
+                        "applied": False,
+                        "reason": "task_0_is_the_first_sequential_expert",
+                        "task_vector_norm": opcm_task_vector_norms[0],
+                    },
+                }
+                model.load_state_dict(merged_state, strict=True)
+            else:
+                assert opcm_previous_state is not None
+                opcm_result = merge_opcm_task_boundary(
+                    model,
+                    pretrained_state=pretrained_reference_state,
+                    previous_state=opcm_previous_state,
+                    task_state=task_states[boundary],
+                    task_states_by_task={task_id: task_states[task_id] for task_id in range(boundary + 1)},
+                    rows_by_task=rows_by_task,
+                    train_sample_counts_by_task={task_id: sample_counts[task_id] for task_id in range(boundary + 1)},
+                    task_vector_norms_by_task={task_id: opcm_task_vector_norms[task_id] for task_id in range(boundary + 1)},
+                    upto_task_id=boundary,
+                    previous_lambda=opcm_previous_lambda,
+                    recipe=recipe,
+                )
+                merged_state = opcm_result.state_dict
+                merge_audit = opcm_result.audit
+                opcm_previous_state = merged_state
+                opcm_previous_lambda = opcm_result.lambda_t
+                _log(
+                    f"opcm_projection boundary={boundary} lambda_t={opcm_previous_lambda:.6f} "
+                    f"avg_task_vector_norm={merge_audit['projection']['average_task_vector_norm']:.6f}"
+                )
+        else:
+            result = merge_task_boundary(
+                model,
+                base_state=base_state,
+                experts_by_task={task_id: experts[task_id] for task_id in range(1, boundary + 1)},
+                rows_by_task=rows_by_task,
+                train_sample_counts_by_task={task_id: sample_counts[task_id] for task_id in range(boundary + 1)},
+                upto_task_id=boundary,
+                recipe=recipe,
+            )
+            merged_state = result.state_dict
+            merge_audit = result.audit
         seen_rows = [row for task_id in range(boundary + 1) for row in rows_by_task[task_id]]
         seen_raw = [raw for raw, index in global_map.items() if index in set(seen_rows)]
         keep = np.isin(test_labels, np.asarray(seen_raw, dtype=np.int64))
@@ -433,8 +560,8 @@ def run_model_merging_member(args, *, engine) -> None:
         metrics_rows.append(task_row)
         task_dir = merged_dir / f"task_{boundary}"
         task_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"model_state": result.state_dict, "task_id": boundary, "audit": result.audit}, task_dir / "model.pt")
-        _dump_json(task_dir / "merge_audit.json", result.audit)
+        torch.save({"model_state": merged_state, "task_id": boundary, "audit": merge_audit}, task_dir / "model.pt")
+        _dump_json(task_dir / "merge_audit.json", merge_audit)
         np.savez_compressed(
             task_dir / "test_predictions.npz",
             sample_id=np.asarray(test_metadata["sample_id"])[keep],
@@ -455,7 +582,10 @@ def run_model_merging_member(args, *, engine) -> None:
         "final_task": len(tasks) - 1,
         "final_macro_f1": metrics_rows[-1]["macro_f1"],
         "mean_task_macro_f1": float(np.mean([row["macro_f1"] for row in metrics_rows])),
-        "independent_experts": True,
+        "expert_generation": (
+            "independent_from_shared_initialization" if opcm_mode else "independent_from_task0_checkpoint"
+        ),
+        "sequential_merge": opcm_mode,
         "future_experts_used": False,
     })
     _log(f"member_complete member={args.member_id} output={root}")

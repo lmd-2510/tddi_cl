@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Independent-expert Task Arithmetic/TIES full run.
-# Usage: bash scripts/run_model_merging_full.sh {task_arithmetic|ties} {check|start|status|follow}
+# Full model-merging run for Task Arithmetic, TIES, or paper-faithful OPCM.
+# Usage: bash scripts/run_model_merging_full.sh {task_arithmetic|ties|opcm} {check|start|status|follow}
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 METHOD="${1:-task_arithmetic}"
 ACTION="${2:-check}"
-[[ "$METHOD" == task_arithmetic || "$METHOD" == ties ]] || { echo "[STOP] method must be task_arithmetic or ties" >&2; exit 2; }
+[[ "$METHOD" == task_arithmetic || "$METHOD" == ties || "$METHOD" == opcm ]] || { echo "[STOP] method must be task_arithmetic, ties, or opcm" >&2; exit 2; }
 
 TRAIN="$PROJECT_ROOT/data/train_extracted.parquet"
 VALIDATION="$PROJECT_ROOT/data/validation_extracted.parquet"
@@ -31,8 +31,8 @@ check(){
   for p in "$PYTHON" "$TRAIN" "$VALIDATION" "$TEST" "$FEATURE_COLUMNS" "$TASK_FILE" "$FOLD_ASSIGNMENTS" "$FOLD_MANIFEST"; do require_file "$p"; done
   for m in 0 1 2; do require_file "$PREPROCESSING_ROOT/member_${m}/fold_preprocessing.json"; done
   "$PYTHON" -m py_compile src/training/train_cil.py src/training/model_merging_training.py src/training/model_merging_ensemble.py src/methods/model_merging.py
-  "$PYTHON" src/training/train_cil.py --help | grep -E "task_arithmetic|ties" >/dev/null || die "train_cil does not expose merging methods"
-  echo "[OK] Independent-expert $METHOD plan validated; no training started."
+  "$PYTHON" src/training/train_cil.py --help | grep -E "task_arithmetic|ties|opcm" >/dev/null || die "train_cil does not expose merging methods"
+  echo "[OK] $METHOD model-merging plan validated; no training started."
 }
 
 member_command(){
@@ -55,9 +55,17 @@ worker(){
   local home="$1" output="$2"; mkdir -p "$home" "$output"
   exec > >(tee -a "$home/main.log") 2>&1
   set +e
-  echo "[RECIPE] $METHOD + independent experts + TDDI + fixed 178-class head + head-to-tail"
+  if [[ "$METHOD" == opcm ]]; then
+    echo "[RECIPE] OPCM paper-faithful sequential merge + shared-initialization experts + TDDI + fixed 178-class head + head-to-tail"
+  else
+    echo "[RECIPE] $METHOD + independent experts + TDDI + fixed 178-class head + head-to-tail"
+  fi
   for member in 0 1 2; do
-    echo "[RUN] member=$member; each expert resets from task-0 base"
+    if [[ "$METHOD" == opcm ]]; then
+      echo "[RUN] member=$member; experts use shared initialization and OPCM merges sequentially"
+    else
+      echo "[RUN] member=$member; each expert resets from task-0 base"
+    fi
     member_command "$member" "$output"; code=$?
     if [[ $code -ne 0 ]]; then
       printf '%s\n' "$code" > "$home/exit_code.txt"
@@ -97,5 +105,5 @@ case "$ACTION" in
   start) start;;
   status) status;;
   follow) tail -n 100 -F "$(latest_home)/main.log";;
-  *) echo "Usage: bash scripts/run_model_merging_full.sh {task_arithmetic|ties} {check|start|status|follow}"; exit 2;;
+  *) echo "Usage: bash scripts/run_model_merging_full.sh {task_arithmetic|ties|opcm} {check|start|status|follow}"; exit 2;;
 esac

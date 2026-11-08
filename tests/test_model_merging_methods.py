@@ -6,8 +6,12 @@ from src.methods.model_merging import (
     BATCHNORM_POLICY,
     HEAD_POLICY,
     ModelMergingRecipe,
+    OPCM_METHOD,
+    OPCM_PAPER_ALPHA,
     inspect_neural_merge_scope,
+    merge_opcm_task_boundary,
     merge_task_boundary,
+    opcm_merge_task_vector,
     task_arithmetic_state,
     ties_state,
 )
@@ -63,6 +67,10 @@ def test_paper_recipes_are_locked_without_merger_validation_tuning():
     assert ties.density == 0.2
     assert ties.sign_election == "mass"
     assert ties.reduction == "disjoint_mean"
+    opcm = ModelMergingRecipe.paper_opcm()
+    assert opcm.method == OPCM_METHOD
+    assert opcm.alpha == OPCM_PAPER_ALPHA
+    assert opcm.manifest()["source"] == "paper_fixed_recipe_no_merger_validation_tuning"
     base = {"weight": torch.zeros(5)}
     expert = {"weight": torch.tensor([5.0, 4.0, 3.0, 2.0, 1.0])}
     torch.testing.assert_close(
@@ -122,6 +130,53 @@ def test_ties_trim_elect_mass_and_disjoint_mean():
     trimmed = ties_state(base, [expert_1, expert_2], keys=["weight"])
     # Paper density 20% retains exactly one largest-magnitude coordinate per expert.
     torch.testing.assert_close(trimmed["weight"], torch.tensor([10.0, 0.0, 0.0, 0.0, 0.0]))
+
+
+def test_opcm_projection_is_finite_and_adaptively_scaled():
+    pretrained = {"weight": torch.zeros(2, 2), "bias": torch.zeros(2)}
+    previous = {"weight": torch.eye(2), "bias": torch.ones(2)}
+    task = {"weight": torch.ones(2, 2), "bias": torch.full((2,), 2.0)}
+    merged, lambda_t, audit = opcm_merge_task_vector(
+        pretrained,
+        previous,
+        task,
+        keys=("weight", "bias"),
+        previous_lambda=1.0,
+        average_task_vector_norm=2.0,
+        alpha=0.5,
+    )
+    assert lambda_t > 0
+    assert audit["projected_linear_layer_count"] == 1
+    assert all(bool(torch.isfinite(value).all()) for value in merged.values())
+    assert not torch.equal(merged["weight"], task["weight"])
+
+
+def test_opcm_boundary_stitches_task_zero_head_and_reports_causal_audit():
+    model = TinyMergeModel()
+    with torch.no_grad():
+        for value in model.parameters():
+            value.zero_()
+    pretrained = _state(model)
+    task0 = _expert(pretrained, backbone_delta=[[1.0, 0.0], [0.0, 1.0]], rows={0: 10.0, 1: 11.0})
+    task1 = _expert(pretrained, backbone_delta=[[0.0, 1.0], [1.0, 0.0]], rows={2: 12.0, 3: 13.0})
+    result = merge_opcm_task_boundary(
+        model,
+        pretrained_state=pretrained,
+        previous_state=task0,
+        task_state=task1,
+        task_states_by_task={0: task0, 1: task1},
+        rows_by_task={0: [0, 1], 1: [2, 3]},
+        train_sample_counts_by_task={0: 20, 1: 10},
+        task_vector_norms_by_task={0: 2.0, 1: 2.0},
+        upto_task_id=1,
+        previous_lambda=1.0,
+        recipe=ModelMergingRecipe.paper_opcm(),
+    )
+    assert result.lambda_t > 0
+    assert result.audit["future_experts_used"] is False
+    assert result.audit["projection"]["projected_linear_layer_count"] == 1
+    assert torch.equal(result.state_dict["head.weight"][0], task0["head.weight"][0])
+    assert torch.equal(result.state_dict["head.weight"][2], task1["head.weight"][2])
 
 
 def test_batchnorm_moments_use_weighted_total_variance_without_samples():
