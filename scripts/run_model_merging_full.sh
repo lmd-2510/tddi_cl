@@ -56,7 +56,7 @@ worker(){
   exec > >(tee -a "$home/main.log") 2>&1
   set +e
   if [[ "$METHOD" == opcm ]]; then
-    echo "[RECIPE] OPCM paper-faithful sequential merge + shared-initialization experts + TDDI + fixed 178-class head + head-to-tail"
+    echo "[RECIPE] OPCM paper-faithful online train-current-then-merge + shared-initialization experts + TDDI + fixed 178-class head + head-to-tail"
   elif [[ "$METHOD" == magmax ]]; then
     echo "[RECIPE] MagMax paper-faithful sequential fine-tuning + maximum-magnitude merge (lambda=0.5) + TDDI + fixed 178-class head + head-to-tail"
   else
@@ -64,7 +64,7 @@ worker(){
   fi
   for member in 0 1 2; do
     if [[ "$METHOD" == opcm ]]; then
-      echo "[RUN] member=$member; experts use shared initialization and OPCM merges sequentially"
+      echo "[RUN] member=$member; train task t from shared initialization, merge immediately, then expose task t+1"
     elif [[ "$METHOD" == magmax ]]; then
       echo "[RUN] member=$member; sequential fine-tuning and MagMax merge"
     else

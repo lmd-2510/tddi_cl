@@ -352,6 +352,11 @@ def run_model_merging_member(args, *, engine) -> None:
             else "sequential_opcm" if opcm_mode
             else "causal_boundary_recompute"
         ),
+        "execution_schedule": (
+            "online_train_current_expert_then_merge" if opcm_mode
+            else "sequential_train_then_boundary_merge" if magmax_mode
+            else "train_experts_then_causal_boundary_recompute"
+        ),
         "pretrained_reference": "model_initialization_before_task0" if (opcm_mode or magmax_mode) else None,
         "recipe": recipe.manifest(),
         "experiment_seed": args.seed,
@@ -365,24 +370,32 @@ def run_model_merging_member(args, *, engine) -> None:
     train_data: dict[int, tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]] = {}
     validation_data: dict[int, tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]] = {}
     (root / "experts").mkdir(parents=True, exist_ok=True)
-    for task in tasks:
-        task_id = int(task["task_id"])
-        args._merging_task_id = task_id
-        train_data[task_id] = _load_task_arrays(
-            args, context=context, prep=prep, columns=columns,
-            task_classes=task["classes"], role="train", source_shard_root=source_shard_root,
+    sample_counts: dict[int, int] = {}
+    if opcm_mode:
+        # OPCM is online: only the current task's train/validation arrays are
+        # loaded immediately before its expert is trained.  Future task data
+        # is not materialized before the current merge boundary.
+        _log("online_task_data_ready policy=current_task_only")
+    else:
+        for task in tasks:
+            task_id = int(task["task_id"])
+            args._merging_task_id = task_id
+            train_data[task_id] = _load_task_arrays(
+                args, context=context, prep=prep, columns=columns,
+                task_classes=task["classes"], role="train", source_shard_root=source_shard_root,
+            )
+            validation_data[task_id] = _load_task_arrays(
+                args, context=context, prep=prep, columns=columns,
+                task_classes=task["classes"], role="validation", source_shard_root=source_shard_root,
+            )
+            sample_counts[task_id] = int(len(train_data[task_id][1]))
+        _log(
+            "all_task_data_ready "
+            + ", ".join(
+                f"task_{task_id}=train:{len(train_data[task_id][1])}/val:{len(validation_data[task_id][1])}"
+                for task_id in range(len(tasks))
+            )
         )
-        validation_data[task_id] = _load_task_arrays(
-            args, context=context, prep=prep, columns=columns,
-            task_classes=task["classes"], role="validation", source_shard_root=source_shard_root,
-        )
-    _log(
-        "all_task_data_ready "
-        + ", ".join(
-            f"task_{task_id}=train:{len(train_data[task_id][1])}/val:{len(validation_data[task_id][1])}"
-            for task_id in range(len(tasks))
-        )
-    )
     pretrained_reference_state: dict[str, torch.Tensor] | None = None
     if opcm_mode or magmax_mode:
         reference_model = engine.expand_model_for_seen_classes(
@@ -398,31 +411,9 @@ def run_model_merging_member(args, *, engine) -> None:
     epochs_by_task: dict[str, object] = {}
     task_states: dict[int, dict[str, torch.Tensor]] = {}
     if opcm_mode:
-        # OPCM's paper setting: each task expert is fine-tuned from the same
-        # pretrained reference, while the *merge* is performed sequentially.
-        assert pretrained_reference_state is not None
-        for task in tasks:
-            task_id = int(task["task_id"])
-            owned_rows = [global_map[c] for c in task["classes"]]
-            _, expert_state, epoch_rows = _train_expert(
-                args,
-                task_id=task_id,
-                engine=engine,
-                initial_state=pretrained_reference_state,
-                train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
-                validation_values=validation_data[task_id][0], validation_labels=validation_data[task_id][1],
-                global_map=global_map,
-                owned_rows=owned_rows,
-                device=device,
-            )
-            task_states[task_id] = expert_state
-            epochs_by_task[str(task_id)] = epoch_rows
-            torch.save(
-                {"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows},
-                root / "experts" / f"task_{task_id}.pt",
-            )
-            _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt")
-        base_state = task_states[0]
+        # Expert training is intentionally deferred to the online boundary
+        # loop below: train task t, merge it, then expose task t+1.
+        base_state = None
     elif magmax_mode:
         # MagMax's paper setting uses sequential fine-tuning: task t starts
         # from the checkpoint obtained after task t-1, while task vectors are
@@ -496,7 +487,6 @@ def run_model_merging_member(args, *, engine) -> None:
         int(task["task_id"]): [global_map[c] for c in task["classes"]]
         for task in tasks
     }
-    sample_counts = {task_id: int(len(train_data[task_id][1])) for task_id in range(len(tasks))}
     metrics_rows: list[dict[str, object]] = []
     merged_dir = root / "merged"
     merged_dir.mkdir(parents=True, exist_ok=True)
@@ -504,6 +494,44 @@ def run_model_merging_member(args, *, engine) -> None:
     opcm_previous_lambda = 1.0
     opcm_task_vector_norms: dict[int, float] = {}
     for boundary in range(len(tasks)):
+        if opcm_mode:
+            # Paper-faithful OPCM schedule: an incoming expert is trained from
+            # the common pretrained initialization, merged immediately, and
+            # only then do we proceed to the next task.
+            task_id = boundary
+            task = tasks[task_id]
+            args._merging_task_id = task_id
+            train_data[task_id] = _load_task_arrays(
+                args, context=context, prep=prep, columns=columns,
+                task_classes=task["classes"], role="train", source_shard_root=source_shard_root,
+            )
+            validation_data[task_id] = _load_task_arrays(
+                args, context=context, prep=prep, columns=columns,
+                task_classes=task["classes"], role="validation", source_shard_root=source_shard_root,
+            )
+            sample_counts[task_id] = int(len(train_data[task_id][1]))
+            assert pretrained_reference_state is not None
+            owned_rows = [global_map[c] for c in task["classes"]]
+            _, expert_state, epoch_rows = _train_expert(
+                args,
+                task_id=task_id,
+                engine=engine,
+                initial_state=pretrained_reference_state,
+                train_values=train_data[task_id][0], train_labels=train_data[task_id][1],
+                validation_values=validation_data[task_id][0], validation_labels=validation_data[task_id][1],
+                global_map=global_map,
+                owned_rows=owned_rows,
+                device=device,
+            )
+            task_states[task_id] = expert_state
+            epochs_by_task[str(task_id)] = epoch_rows
+            torch.save(
+                {"model_state": expert_state, "task_id": task_id, "owned_rows": owned_rows},
+                root / "experts" / f"task_{task_id}.pt",
+            )
+            _log(f"expert_saved task={task_id} path=experts/task_{task_id}.pt online_before_merge=True")
+            if base_state is None:
+                base_state = expert_state
         _log(
             f"merge_start boundary={boundary} "
             f"experts_used={boundary + 1 if (opcm_mode or magmax_mode) else boundary} "
@@ -527,16 +555,13 @@ def run_model_merging_member(args, *, engine) -> None:
                 opcm_previous_state = merged_state
                 opcm_previous_lambda = 1.0
                 scope = inspect_neural_merge_scope(model)
-                opcm_task_vector_norms = {
-                    task_id: float(
-                        _state_vector_norm(
-                            pretrained_reference_state,
-                            task_states[task_id],
-                            scope.backbone_parameter_keys,
-                        )
+                opcm_task_vector_norms[0] = float(
+                    _state_vector_norm(
+                        pretrained_reference_state,
+                        task_states[0],
+                        scope.backbone_parameter_keys,
                     )
-                    for task_id in range(len(tasks))
-                }
+                )
                 merge_audit = {
                     "artifact_kind": "ddi_cil_sequential_opcm_boundary",
                     "base_task_id": 0,
@@ -652,6 +677,11 @@ def run_model_merging_member(args, *, engine) -> None:
             else "independent_from_task0_checkpoint"
         ),
         "sequential_merge": opcm_mode or magmax_mode,
+        "execution_schedule": (
+            "online_train_current_expert_then_merge" if opcm_mode
+            else "sequential_train_then_boundary_merge" if magmax_mode
+            else "train_experts_then_causal_boundary_recompute"
+        ),
         "future_experts_used": False,
     })
     _log(f"member_complete member={args.member_id} output={root}")

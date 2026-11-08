@@ -87,6 +87,11 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
             else "independent_from_task0_checkpoint"
         ),
         "sequential_merge": is_opcm or is_magmax,
+        "execution_schedule": (
+            "online_train_current_expert_then_merge" if is_opcm
+            else "sequential_train_then_boundary_merge" if is_magmax
+            else "train_experts_then_causal_boundary_recompute"
+        ),
         "future_experts_used": False,
     }
     _json(root / "ensemble_summary.json", summary)
@@ -109,6 +114,11 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
             else "task_0_base_then_independent_task_experts"
         ),
         "merge_scope": "learned_backbone_parameters_only",
+        "execution_schedule": (
+            "online_train_current_expert_then_merge" if is_opcm
+            else "sequential_train_then_boundary_merge" if is_magmax
+            else "train_experts_then_causal_boundary_recompute"
+        ),
         "future_experts_used": False,
         "review_archive_excludes": ["*.pt", "*.npz", "train.log", "stdout.log", "events.csv"],
     })
