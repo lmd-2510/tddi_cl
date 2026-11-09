@@ -127,12 +127,31 @@ status() {
   [[ -f "$output_root/full_manifest.json" ]] && echo "Offline ensemble: completed" || echo "Offline ensemble: pending"
 }
 
+resume_latest() {
+  cd "$PROJECT_ROOT"
+  local run_home output_root
+  run_home="$(latest_run_home)"
+  require_file "$run_home/output_root.txt"
+  output_root="$(<"$run_home/output_root.txt")"
+  if pid_is_running "$run_home/job.pid"; then
+    die "The latest launcher is still running."
+  fi
+  check_all
+  [[ ! -f "$run_home/exit_code.txt" ]] || mv -f "$run_home/exit_code.txt" "$run_home/previous_exit_code.txt"
+  nohup bash "$0" _worker "$run_home" "$output_root" > "$run_home/nohup.log" 2>&1 < /dev/null &
+  printf '%s\n' "$!" > "$run_home/job.pid"
+  echo "[RESUMED] PID=$(<"$run_home/job.pid")"
+  echo "[OUTPUT] $output_root"
+  echo "[LOG] $run_home/main.log"
+}
+
 case "${1:-}" in
   prepare) prepare_assets ;;
   check) check_all ;;
   start) start_new ;;
+  resume) resume_latest ;;
   status) status ;;
   follow) tail -n 100 -F "$(latest_run_home)/main.log" ;;
   _worker) worker "$2" "$3" ;;
-  *) echo "Usage: $0 prepare|check|start|status|follow"; exit 2 ;;
+  *) echo "Usage: $0 prepare|check|start|resume|status|follow"; exit 2 ;;
 esac

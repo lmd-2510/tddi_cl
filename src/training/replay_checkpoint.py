@@ -234,8 +234,13 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             raise ValueError("Frozen-fold class map/raw class order mismatch.")
         model = state["model_state"]
         manifest = expected_contract.get("model", {})
-        if manifest.get("variant") != "tddi_paper_member":
-            raise ValueError("Frozen-fold checkpoint requires the T-DDI backbone.")
+        supported_variants = {"tddi_paper_member", "ddinet_multiclass_cil"}
+        variant = manifest.get("variant")
+        if variant not in supported_variants:
+            raise ValueError(
+                "Frozen-fold checkpoint requires a registered backbone variant "
+                f"({sorted(supported_variants)}), got {variant!r}."
+            )
         fixed_head = expected_contract.get("head_policy") == "fixed_global_178_seen_class_mask_v1"
         global_raw_class_order = expected_contract.get("global_raw_class_order")
         if fixed_head:
@@ -346,8 +351,16 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
         if expected_contract["method"] == "ewc":
             if set(method_state) != {"fisher", "theta_star"}:
                 raise ValueError("EWC checkpoint requires Fisher and parameter anchors.")
+            parameter_keys = set(model)
+            if variant == "ddinet_multiclass_cil":
+                # BatchNorm running statistics are checkpoint buffers, while
+                # Fisher and anchors cover named_parameters() only.
+                parameter_keys = {
+                    key for key in parameter_keys
+                    if not key.endswith((".running_mean", ".running_var", ".num_batches_tracked"))
+                }
             for name in ("fisher", "theta_star"):
-                if set(method_state[name]) != set(model):
+                if set(method_state[name]) != parameter_keys:
                     raise ValueError("EWC state parameter coverage mismatch.")
                 for key, tensor in method_state[name].items():
                     if tensor.shape != model[key].shape or not torch.isfinite(tensor).all():

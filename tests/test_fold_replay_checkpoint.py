@@ -33,6 +33,76 @@ def load(root, task):
     return torch.load(root / "checkpoints" / f"task_{task}.pt", map_location="cpu", weights_only=False)
 
 
+def test_ddinet_ewc_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny):
+    """Exercise real DDINet BatchNorm state through the normal trainer/loader."""
+    from src.data.ddinet_fingerprints import build_ddinet_fingerprint_cache
+    from src.models.ddinet_member import DDINetMember, DDINetMemberConfig
+
+    cache_root = data["root"] / "fingerprints"
+    records = {"B": "CCO"}
+    for split in ("train", "validation"):
+        records.update({f"{split}_{index}": "CC" for index in range(178 * 3)})
+    build_ddinet_fingerprint_cache(cache_root, records)
+
+    def expand(previous, previous_map, seen_map, **kwargs):
+        assert kwargs["input_dim"] == 2048
+        model = DDINetMember(DDINetMemberConfig(
+            num_classes=len(seen_map), hidden_dims=(8, 8, 4, 4), dropout=kwargs["dropout"],
+        ))
+        if previous is not None:
+            model.load_state_dict(previous.state_dict())
+        return model
+
+    monkeypatch.setattr(engine, "expand_model_for_seen_classes", expand)
+    extra = [
+        "--method", "ewc", "--variant", "ddinet_multiclass_cil",
+        "--activation", "relu", "--norm", "none", "--dropout", "0.3",
+        "--ddinet-fingerprint-cache", str(cache_root), "--stop-after-task", "0",
+    ]
+    command = cli(data, suffix="_ddinet", extra=extra)
+    monkeypatch.setattr(sys, "argv", command)
+    engine.main()
+    root = data["root"] / "run_raw_identity_ddinet"
+    first = load(root, 0)
+    assert any(key.endswith("running_mean") for key in first["model_state"])
+    assert not any(key.endswith("running_mean") for key in first["method_state"]["fisher"])
+
+    resume_command = command + [
+        "--stop-after-task", "1", "--resume-fold-checkpoint", str(root / "checkpoints/task_0.pt"),
+    ]
+    monkeypatch.setattr(sys, "argv", resume_command)
+    engine.main()
+    assert load(root, 1)["next_task_id"] == 2
+
+    # Completed-scope validation runs the entire checkpoint loader again.
+    monkeypatch.setattr(sys, "argv", command + [
+        "--stop-after-task", "1", "--resume-fold-checkpoint", str(root / "checkpoints/task_1.pt"),
+    ])
+    engine.main()
+
+    prepared = fold_training.prepare_fold_run(engine.parse_args(command[1:]), engine=engine)
+    path = root / "checkpoints/task_1.pt"
+    saved = load(root, 1)
+    for bad_variant in ("unknown_backbone", "tddi_paper_member"):
+        contract = deepcopy(saved["contract"])
+        contract["model"]["variant"] = bad_variant
+        with pytest.raises(ValueError, match="contract mismatch"):
+            checkpoint.load_fold_replay_checkpoint(
+                path, root=root, expected_contract=contract, tasks=prepared["tasks"],
+                context=prepared["context"], buffer_kwargs=prepared["buffer_kwargs"],
+            )
+    del saved["method_state"]["fisher"]["backbone.0.weight"]
+    saved["state_sha256"] = checkpoint.fold_state_digest({
+        key: value for key, value in saved.items() if key != "state_sha256"
+    })
+    torch.save(saved, path)
+    with pytest.raises(ValueError, match="EWC state parameter coverage mismatch"):
+        checkpoint.load_fold_replay_checkpoint(
+            path, root=root, expected_contract=prepared["contract"], tasks=prepared["tasks"],
+            context=prepared["context"], buffer_kwargs=prepared["buffer_kwargs"],
+        )
+
+
 def fingerprint(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
