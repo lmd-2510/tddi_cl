@@ -14,6 +14,7 @@ from src.training import train_cil as engine
 from src.training.fold_training import _digest, prepare_fold_run
 from src.training.replay_checkpoint import load_fold_replay_checkpoint
 from src.data.stratified_folds import fold_file_sha256
+from src.eval.study_contract import compatible_implementation
 
 TRAINING = dict(method="class_balanced_fixed_budget_replay", fold_replay_policy="stratified_fraction_v1",
     optimizer="adamw", batch_size=64, effective_batch_size=1024, gradient_accumulation_steps=16,
@@ -159,6 +160,9 @@ def inspect_member(config, member, command, *, require_inputs=False):
     info = {"status": "fresh", "run_id": None, "completed_task_id": None, "resume_checkpoint": None,
             "contract_sha256": _digest(contract), "assignment_sha256": contract["assignment_sha256"],
             "implementation_sha256_digest": _digest(contract["implementation_sha256"]),
+            "compatible_implementation_sha256_digest": _digest(
+                compatible_implementation(contract["implementation_sha256"])
+            ),
             "fold_manifest_sha256": contract["fold_manifest_sha256"], "source_hashes": contract["sources"],
             "preprocessing_sha256": contract["preprocessing_sha256"], "buffer": contract["buffer"],
             "sampler": contract["sampler"], "task_file_sha256": contract["task_file_sha256"]}

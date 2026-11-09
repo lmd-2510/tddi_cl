@@ -143,6 +143,25 @@ def test_offline_ensemble_rejects_different_completed_member_contracts(tmp_path:
         shared.build_ensemble_plan(config, inspector=inspect)
 
 
+def test_offline_plan_accepts_reviewed_checkpoint_reader_fix(tmp_path):
+    from src.eval.study_contract import CHECKPOINT_READER_HASHES, compatible_implementation, contract_digest
+    hashes = sorted(CHECKPOINT_READER_HASHES)
+
+    def inspect(config, member, command, *, require_inputs=False):
+        implementation = {
+            "training/replay_checkpoint.py": hashes[member % 2],
+            "training/train_cil.py": "same-training-code",
+        }
+        return {
+            "status": "complete", "completed_task_id": 7, "resume_checkpoint": None,
+            "implementation_sha256_digest": contract_digest(implementation),
+            "compatible_implementation_sha256_digest": contract_digest(compatible_implementation(implementation)),
+        }
+
+    plan = shared.build_ensemble_plan(_config(tmp_path), inspector=inspect)
+    assert all(member.status == "complete" for member in plan.members)
+
+
 def test_full_members_are_sequential_then_all_eight_tasks_are_evaluated(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -420,7 +420,9 @@ def build_ensemble_plan(
         info = inspector(config, member_id, command, require_inputs=require_inputs)
         status = str(info["status"])
         if status == "complete" and info.get("implementation_sha256_digest"):
-            completed_implementations.append(str(info["implementation_sha256_digest"]))
+            completed_implementations.append(str(info.get(
+                "compatible_implementation_sha256_digest", info["implementation_sha256_digest"]
+            )))
         resume = Path(info["resume_checkpoint"]) if info.get("resume_checkpoint") else None
         if status == "resume":
             command.extend(("--resume-fold-checkpoint", str(resume)))
@@ -441,7 +443,7 @@ def build_ensemble_plan(
             and len(set(completed_implementations)) != 1):
         raise ValueError(
             "Completed members were trained under different frozen contracts; "
-            "offline ensemble is not valid."
+            "unreviewed implementation differences prevent offline ensemble."
         )
     evaluations = tuple(
         _eval_plan(config, task_id, python, all_complete)
@@ -578,6 +580,7 @@ def _manifest(
                 "run_id": run_payload["run_id"],
                 "run_config": str(run_config),
                 "run_config_sha256": fold_file_sha256(run_config),
+                "implementation_sha256": run_payload.get("checkpoint_contract", {}).get("implementation_sha256"),
                 "predictions": {
                     str(task_id): {
                         split: str(_prediction_path(config, member_id, task_id, split))
@@ -616,6 +619,7 @@ def _manifest(
         },
         "config_path": config["config_path"],
         "config_sha256": config["config_sha256"],
+        "implementation_compatibility_policy": "reviewed_ddinet_checkpoint_reader_fix_v1",
         "task_file_sha256": config["protocol"]["sha256"],
         "protocol": {**config["protocol"], "tasks": config["tasks"]},
         "method": config["training"]["method"],

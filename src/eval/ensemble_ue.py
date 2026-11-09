@@ -24,6 +24,9 @@ from src.eval.predictions import (  # noqa: E402
     load_member_prediction_artifact,
     partition_identity_sha256,
 )
+from src.eval.study_contract import (  # noqa: E402
+    compatible_implementation, contract_digest, prediction_study_contract,
+)
 
 
 OFFLINE_ENSEMBLE_SCHEMA_VERSION = 4
@@ -126,12 +129,12 @@ def _normalize_mi_by_member_count(mutual_information: np.ndarray, member_count: 
     return np.clip(np.asarray(mutual_information, dtype=np.float64) / np.log(member_count), 0.0, 1.0)
 
 
-def _shared_provenance(provenance: PredictionProvenance) -> tuple[object, ...]:
+def _shared_provenance(provenance: PredictionProvenance, *, study_digest=None) -> tuple[object, ...]:
     return (
         provenance.assignment_sha256,
         provenance.fold_manifest_sha256,
         provenance.task_file_sha256,
-        provenance.study_contract_sha256,
+        provenance.study_contract_sha256 if study_digest is None else study_digest,
         provenance.preprocessing_policy,
         provenance.ranking_policy,
         provenance.buffer_policy,
@@ -141,6 +144,7 @@ def _shared_provenance(provenance: PredictionProvenance) -> tuple[object, ...]:
 
 def _validate_member_provenance(
     artifacts: Sequence[MemberPredictionArtifact], *, is_oof: bool,
+    source_artifact_paths: Sequence[str | Path] | None = None,
 ) -> tuple[PredictionProvenance, PredictionProvenance, PredictionProvenance] | None:
     values = [artifact.provenance for artifact in artifacts]
     if all(value is None for value in values):
@@ -151,7 +155,26 @@ def _validate_member_provenance(
     provenance = tuple(values)  # type: ignore[arg-type]
     reference = _shared_provenance(provenance[0])
     if any(_shared_provenance(value) != reference for value in provenance[1:]):
-        raise ValueError("Member artifacts do not share the same partition/study contract.")
+        if source_artifact_paths is None or len(source_artifact_paths) != len(artifacts):
+            raise ValueError("Member artifacts do not share the same partition/study contract.")
+        comparisons = []
+        for artifact, value, source in zip(artifacts, provenance, source_artifact_paths, strict=True):
+            source = Path(source).resolve()
+            root = source.parents[2]
+            expected = root / "member_predictions" / f"task_{artifact.context.task_id}" / f"{artifact.context.split}.npz"
+            if source != expected:
+                raise ValueError("Compatibility verification requires member_predictions/task_N/split.npz paths.")
+            try:
+                config = json.loads((root / "run_config.json").read_text(encoding="utf-8"))
+                shared = prediction_study_contract(config["checkpoint_contract"])
+            except (OSError, KeyError, TypeError, ValueError) as error:
+                raise ValueError("Cannot verify member study contract from run_config.json.") from error
+            if config.get("run_id") != artifact.context.run_id or contract_digest(shared) != value.study_contract_sha256:
+                raise ValueError("Member prediction study contract/run ID does not match run_config.json.")
+            shared["implementation_sha256"] = compatible_implementation(shared["implementation_sha256"])
+            comparisons.append(_shared_provenance(value, study_digest=contract_digest(shared)))
+        if any(comparison != comparisons[0] for comparison in comparisons[1:]):
+            raise ValueError("Member artifacts do not share the same partition/study contract after reviewed fixes.")
     for artifact, value in zip(artifacts, provenance, strict=True):
         if value.preprocessing_member_id != artifact.context.member_id:
             raise ValueError("Member preprocessing provenance belongs to the wrong member.")
@@ -217,7 +240,8 @@ def aggregate_member_predictions(
         for artifact in artifacts:
             if not np.all(_row_fold_ids(artifact) == artifact.context.fold_id):
                 raise ValueError("OOF prediction rows belong to the wrong held-out fold.")
-        provenance = _validate_member_provenance(artifacts, is_oof=True)
+        provenance = _validate_member_provenance(artifacts, is_oof=True,
+                                                source_artifact_paths=source_artifact_paths)
         sample_ids = np.concatenate([artifact.sample_ids for artifact in artifacts])
         labels = np.concatenate([artifact.labels for artifact in artifacts])
         row_folds = np.concatenate([_row_fold_ids(artifact) for artifact in artifacts])
@@ -240,7 +264,8 @@ def aggregate_member_predictions(
         prediction_count = np.ones(sample_ids.shape[0], dtype=np.int16)
         unavailable = ENSEMBLE_ONLY_METRICS
     else:
-        provenance = _validate_member_provenance(artifacts, is_oof=False)
+        provenance = _validate_member_provenance(artifacts, is_oof=False,
+                                                source_artifact_paths=source_artifact_paths)
         sample_ids = _require_equal_array(artifacts, "sample_ids")
         labels = _require_equal_array(artifacts, "labels")
         if resolved_mode == "stratified_3fold" and split != "test":
