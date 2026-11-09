@@ -15,6 +15,7 @@ File này là bảng tổng hợp chung cho các run hoàn chỉnh. Mỗi run d�
 | `ties_head_to_tail_fixed_head_full_seed0_20261104T235759Z` | TIES | Head-to-Tail | TDDI | 0.854148 | 0.208110 | **0.231388** | 0.837363 | 0.460646 | n.a. | n.a. | [TIES results](TIES_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 | `opcm_head_to_tail_fixed_head_full_seed0_20261108T141808Z` | OPCM | Head-to-Tail | TDDI | 0.437949 | 0.070953 | **0.082172** | 0.425959 | 0.278576 | n.a. | n.a. | [OPCM results](OPCM_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 | `magmax_head_to_tail_fixed_head_full_seed0_20261108T182538Z` | MagMax | Head-to-Tail | TDDI | 0.585074 | 0.115060 | **0.132647** | 0.591144 | 0.272200 | n.a. | n.a. | [MagMax results](MAGMAX_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
+| `ewc_ddinet_head_to_tail_fixed_head_full_seed0_20261109T083845Z` | EWC | Head-to-Tail | DDINet | 0.870310 | 0.251004 | **0.223290** | 0.873725 | 0.474474 | -0.017201 | 0.017499 | [EWC + DDINet results](EWC_DDINET_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 
 ## Quy ước
 
@@ -23,4 +24,5 @@ File này là bảng tổng hợp chung cho các run hoàn chỉnh. Mỗi run d�
 - `BWT`: trung bình backward transfer trên các task cũ; càng gần 0 hoặc dương càng tốt.
 - `Forgetting`: best Macro-F1 trước đây trừ Macro-F1 cuối; càng thấp càng tốt.
 - Một run gồm ba ensemble member nhưng vẫn chỉ là một experiment seed.
+- Với EWC + DDINet, task-group Macro-F1 của task 3–7 bằng 0 ngay tại boundary vừa học. Đọc BWT/forgetting cùng khả năng học lớp mới trong báo cáo chi tiết.
 
