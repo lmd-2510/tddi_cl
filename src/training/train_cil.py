@@ -44,6 +44,11 @@ from src.methods.upcl import (
 )
 from src.methods.replay import classification_loss as replay_classification_loss
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, TDDIPaperMember, TDDIPaperMemberConfig
+from src.models.ddinet_member import (
+    DDINET_PAIR_INPUT_DIM,
+    DDINetMember,
+    DDINetMemberConfig,
+)
 from src.training.class_incremental_policy import (
     fixed_head_cross_entropy,
     mask_unseen_logits,
@@ -57,6 +62,7 @@ OPCM_METHOD = "opcm"
 MAGMAX_METHOD = "magmax"
 MERGING_METHODS = (TASK_ARITHMETIC_METHOD, TIES_METHOD, OPCM_METHOD, MAGMAX_METHOD)
 METHODS = (FIXED_BUDGET_METHOD, ER_METHOD, "ewc", "agem", IDER_METHOD, UPCL_METHOD, *MERGING_METHODS)
+DDINET_VARIANT = "ddinet_multiclass_cil"
 METHOD_POLICIES = {
     FIXED_BUDGET_METHOD: "frozen_fold_fixed_head_class_balanced_replay_v1",
     "ewc": "frozen_fold_fixed_head_original_ewc_v1",
@@ -92,7 +98,7 @@ def parse_args(argv=None):
                 "fold-assignments", "fold-manifest", "fold-preprocessing"):
         parser.add_argument("--" + key, type=Path, required=True)
     parser.add_argument("--method", choices=METHODS, default=FIXED_BUDGET_METHOD)
-    parser.add_argument("--variant", choices=["tddi_paper_member"], default="tddi_paper_member")
+    parser.add_argument("--variant", choices=["tddi_paper_member", DDINET_VARIANT], default="tddi_paper_member")
     parser.add_argument("--norm", choices=["layernorm", "none"], default=None)
     parser.add_argument("--activation", choices=["gelu", "relu"], default=None)
     parser.add_argument("--member-id", type=int, choices=[0, 1, 2], required=True)
@@ -142,6 +148,13 @@ def parse_args(argv=None):
                         nargs="+", default=["validation", "test"])
     parser.add_argument("--task-cache-root", type=Path)
     parser.add_argument("--source-shard-cache-root", type=Path)
+    parser.add_argument(
+        "--ddinet-fingerprint-cache",
+        type=Path,
+        default=(Path(os.environ["CIL_DDINET_FINGERPRINT_CACHE"])
+                 if os.environ.get("CIL_DDINET_FINGERPRINT_CACHE") else None),
+        help="Immutable label-free Morgan cache required by the DDINet variant.",
+    )
     args = parser.parse_args(argv)
     defaults = dict(norm="layernorm", activation="gelu", batch_size=64,
         evaluation_batch_size=512, patience=5, lr=0.001,
@@ -240,8 +253,13 @@ def _git_state(project_root: Path) -> dict[str, str | bool | None]:
 
 
 def model_manifest(args):
-    from src.models.tddi_paper_member import paper_member_manifest
-    manifest = paper_member_manifest(dropout=args.dropout, activation=args.activation)
+    if args.variant == DDINET_VARIANT:
+        manifest = DDINetMemberConfig(
+            dropout=args.dropout,
+        ).manifest()
+    else:
+        from src.models.tddi_paper_member import paper_member_manifest
+        manifest = paper_member_manifest(dropout=args.dropout, activation=args.activation)
     if args.method == IDER_METHOD:
         manifest = {
             **manifest,
@@ -277,25 +295,41 @@ def expand_model_for_seen_classes(
     method: str | None = None,
     active_class_indices=None,
 ) -> nn.Module:
-    if variant != "tddi_paper_member":
+    if variant == "tddi_paper_member":
+        if input_dim != TDDI_PAPER_INPUT_DIM:
+            raise ValueError(
+                "tddi_paper_member requires input_dim="
+                f"{TDDI_PAPER_INPUT_DIM}, got {input_dim}."
+            )
+        if norm != "layernorm":
+            raise ValueError(
+                "tddi_paper_member has fixed input LayerNorm; use --norm layernorm."
+            )
+        model = TDDIPaperMember(
+            TDDIPaperMemberConfig(
+                input_dim=input_dim,
+                num_classes=len(current_seen_map),
+                dropout=dropout,
+                activation=activation,  # type: ignore[arg-type]
+            )
+        )
+    elif variant == DDINET_VARIANT:
+        if input_dim != DDINET_PAIR_INPUT_DIM:
+            raise ValueError(
+                "ddinet_multiclass_cil requires ordered Morgan pair input_dim="
+                f"{DDINET_PAIR_INPUT_DIM}, got {input_dim}."
+            )
+        if norm != "none" or activation != "relu":
+            raise ValueError("DDINet uses internal BatchNorm/ReLU; use --norm none --activation relu.")
+        model = DDINetMember(
+            DDINetMemberConfig(
+                input_dim=input_dim,
+                num_classes=len(current_seen_map),
+                dropout=dropout,
+            )
+        )
+    else:
         raise ValueError(f"Unsupported model variant: {variant}")
-    if input_dim != TDDI_PAPER_INPUT_DIM:
-        raise ValueError(
-            "tddi_paper_member requires input_dim="
-            f"{TDDI_PAPER_INPUT_DIM}, got {input_dim}."
-        )
-    if norm != "layernorm":
-        raise ValueError(
-            "tddi_paper_member has fixed input LayerNorm; use --norm layernorm."
-        )
-    model = TDDIPaperMember(
-        TDDIPaperMemberConfig(
-            input_dim=input_dim,
-            num_classes=len(current_seen_map),
-            dropout=dropout,
-            activation=activation,  # type: ignore[arg-type]
-        )
-    )
     if method == IDER_METHOD:
         if active_class_indices is None:
             raise ValueError("IDER expansion requires active_class_indices.")

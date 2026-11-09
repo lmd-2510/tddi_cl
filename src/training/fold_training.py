@@ -42,6 +42,7 @@ from src.data.task_cache import (
     write_task_cache,
 )
 from src.data.source_shard_cache import load_source_shard, validate_source_shard_cache
+from src.data.ddinet_fingerprints import DDINetFingerprintConfig, load_ddinet_fingerprint_cache
 from src.data.fold_preprocessing import load_fold_preprocessing
 from src.data.class_balanced_replay_buffer import BUFFER_POLICY, RANKING_POLICY, four_percent_member_budgets
 from src.data.replay_sampler import (
@@ -55,6 +56,7 @@ from src.data.task_protocols import (
     validate_full_task_spec,
 )
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, paper_member_manifest
+from src.models.ddinet_member import DDINET_PAIR_INPUT_DIM
 from src.methods.ewc import (
     compute_fisher,
     consolidate_quadratic_penalties,
@@ -132,8 +134,15 @@ def method_policy(method):
 def validate_fold_options(args):
     if args.method not in engine_methods():
         raise ValueError("Supported methods are CB-Replay, ER, EWC, A-GEM, IDER and UPCL.")
-    if args.variant != "tddi_paper_member" or args.norm != "layernorm":
-        raise ValueError("Unsupported frozen-fold model/normalization.")
+    if args.variant == "tddi_paper_member" and args.norm != "layernorm":
+        raise ValueError("T-DDI requires --norm layernorm.")
+    if args.variant == "ddinet_multiclass_cil":
+        if args.norm != "none" or args.activation != "relu":
+            raise ValueError("DDINet requires internal BatchNorm/ReLU: --norm none --activation relu.")
+        if args.ddinet_fingerprint_cache is None:
+            raise ValueError("DDINet requires --ddinet-fingerprint-cache (or CIL_DDINET_FINGERPRINT_CACHE).")
+    elif args.variant != "tddi_paper_member":
+        raise ValueError(f"Unsupported frozen-fold model variant: {args.variant}")
     if args.member_id not in (0, 1, 2) or args.seed != 0 or args.fold_seed != 42:
         raise ValueError("Study requires experiment seed 0, fold seed 42 and members 0/1/2.")
     if not all((args.fold_assignments, args.fold_manifest, args.fold_preprocessing, args.preprocessing_policy)):
@@ -202,13 +211,34 @@ def validate_fold_task_spec(spec, context):
     return tasks
 
 
-def _model_values(raw, prep, columns, member):
+def _model_values(raw, prep, columns, member, *, variant="tddi_paper_member", metadata=None,
+                 fingerprint_cache=None):
+    if variant == "ddinet_multiclass_cil":
+        if fingerprint_cache is None or metadata is None:
+            raise ValueError("DDINet model inputs require fingerprint cache and pair metadata.")
+        try:
+            values = fingerprint_cache.ordered_pairs(
+                np.asarray(metadata["drugid-drug_a"]).astype(str).tolist(),
+                np.asarray(metadata["drugid-drug_b"]).astype(str).tolist(),
+            )
+        except KeyError as error:
+            raise ValueError("DDINet input metadata lacks drug pair IDs.") from error
+        values = np.asarray(values, dtype=np.float32)
+        if values.ndim != 2 or values.shape[1] != DDINET_PAIR_INPUT_DIM:
+            raise ValueError(f"DDINet fingerprint input must have shape [N, {DDINET_PAIR_INPUT_DIM}].")
+        return values
     values = prep.transform(raw, feature_columns=columns, member_id=member, policy=prep.metadata["policy"])
     with np.errstate(over="ignore", invalid="ignore"):
         values = values.astype(np.float32)
     if not np.isfinite(values).all():
         raise ValueError("Model inputs overflow float32 after frozen preprocessing.")
     return values
+
+
+def _metadata_slice(metadata, index):
+    if metadata is None:
+        return None
+    return {key: np.asarray(value)[index] for key, value in metadata.items()}
 
 
 def _ids(arrays):
@@ -373,8 +403,10 @@ def prepare_fold_run(args, *, engine, context=None):
     """
     validate_fold_options(args)
     columns = load_feature_columns(args.feature_cols)
-    if len(columns) != TDDI_PAPER_INPUT_DIM or len(set(columns)) != len(columns):
-        raise ValueError("Paper member requires exactly 3780 distinct descriptors in recorded order.")
+    if len(set(columns)) != len(columns):
+        raise ValueError("Feature descriptor columns must be distinct and remain in recorded order.")
+    if args.variant == "tddi_paper_member" and len(columns) != TDDI_PAPER_INPUT_DIM:
+        raise ValueError("Paper T-DDI member requires exactly 3780 distinct descriptors in recorded order.")
     task_hash = fold_file_sha256(args.task_file)
     spec = engine.load_task_spec(args.task_file)
     print("Frozen-fold preflight: validating assignment/source hashes and IDs; no model created yet.", flush=True)
@@ -402,6 +434,20 @@ def prepare_fold_run(args, *, engine, context=None):
     prep = load_fold_preprocessing(args.fold_preprocessing, context=context, task_file=args.task_file,
         feature_columns=columns, member_id=args.member_id, validation_fold=args.member_id,
         policy=args.preprocessing_policy, experiment_seed=args.seed, expected_sha256=prep_hash)
+    ddinet_cache = None
+    ddinet_cache_hash = None
+    if args.variant == "ddinet_multiclass_cil":
+        ddinet_cache = load_ddinet_fingerprint_cache(
+            args.ddinet_fingerprint_cache,
+            expected_config=DDINetFingerprintConfig(),
+        )
+        if ddinet_cache.input_dim != DDINET_PAIR_INPUT_DIM:
+            raise ValueError(
+                f"DDINet fingerprint cache input dimension must be {DDINET_PAIR_INPUT_DIM}."
+            )
+        ddinet_cache_hash = fold_file_sha256(
+            Path(args.ddinet_fingerprint_cache) / "manifest.json"
+        )
     if args.fold_member_budget is None:
         budgets = four_percent_member_budgets(manifest["assignment_row_count"])
     else:
@@ -434,6 +480,10 @@ def prepare_fold_run(args, *, engine, context=None):
         "global_raw_class_order": global_raw_class_order,
         "assignment_sha256": manifest["assignment_sha256"], "fold_manifest_sha256": context.manifest_sha256,
         "sources": buffer.metadata["sources"], "preprocessing_sha256": prep_hash,
+        "ddinet_fingerprint_cache": (
+            str(Path(args.ddinet_fingerprint_cache).resolve()) if ddinet_cache is not None else None
+        ),
+        "ddinet_fingerprint_manifest_sha256": ddinet_cache_hash,
         "preprocessing": prep.metadata, "buffer": buffer.metadata,
         "member_budgets": budgets, "global_slot_budget": sum(budgets.values()),
         "ranking_seed_role": buffer.metadata["ranking"]["policy"],
@@ -466,12 +516,13 @@ def prepare_fold_run(args, *, engine, context=None):
         "checkpoint_policy": "immutable_frozen_fold_task_boundary_v1",
         "model": engine.model_manifest(args), "device": device,
         "implementation_sha256": {name: fold_file_sha256(Path(__file__).parents[1] / name) for name in (
-            "training/fold_training.py", "training/train_cil.py", "eval/evaluation.py",
+                "training/fold_training.py", "training/train_cil.py", "eval/evaluation.py",
             "eval/metrics.py", "eval/predictions.py", "data/ddi_dataset.py",
             "data/fold_preprocessing.py", "data/class_balanced_replay_buffer.py", "data/replay_sampler.py",
             "methods/ewc.py", "methods/agem.py", "methods/ider.py", "methods/upcl.py", "methods/replay.py", "models/tddi_paper_member.py",
             "training/regularization_memory.py", "training/replay_checkpoint.py",
-            "training/class_incremental_policy.py")},
+            "training/class_incremental_policy.py", "models/ddinet_member.py",
+            "data/ddinet_fingerprints.py")},
     }
     # Scope/path relocation may change; learning/provenance contract may not.
     contract = {k: v for k, v in resolved.items() if k != "stop_after_task"}
@@ -510,7 +561,11 @@ def prepare_fold_run(args, *, engine, context=None):
             source_paths={"train": args.train, "validation": args.validation},
         )
         resolved["raw_source_shard_cache_root"] = str(source_shard_root)
-    if getattr(args, "task_cache_root", None) is not None:
+    # The shared task cache stores the descriptor-model view used by T-DDI.
+    # DDINet has a different, ID-based fingerprint representation, so it must
+    # consume the immutable source shards and build its view from the shared
+    # label-free fingerprint cache instead of reusing T-DDI arrays.
+    if getattr(args, "task_cache_root", None) is not None and args.variant == "tddi_paper_member":
         args.task_cache_root = Path(args.task_cache_root).resolve()
         assignment_sample_ids = np.concatenate([
             table["sample_id"].to_numpy(zero_copy_only=False) for table in context._rows
@@ -547,7 +602,8 @@ def prepare_fold_run(args, *, engine, context=None):
                 global_class_map=global_class_map,
                 task_cache_contract=task_cache_contract,
                 task_cache_root=getattr(args, "task_cache_root", None),
-                source_shard_cache_root=source_shard_root)
+                source_shard_cache_root=source_shard_root,
+                ddinet_fingerprint_cache=ddinet_cache)
 
 
 def run_fold_training(args, *, engine):
@@ -571,6 +627,8 @@ def run_fold_training(args, *, engine):
     task_cache_contract = prepared.get("task_cache_contract")
     task_cache_root = prepared.get("task_cache_root")
     source_shard_root = prepared.get("source_shard_cache_root")
+    prepared_ddinet_cache = prepared.get("ddinet_fingerprint_cache")
+    model_input_dim = DDINET_PAIR_INPUT_DIM if args.variant == "ddinet_multiclass_cil" else len(columns)
     loaded = None
     if resume_path:
         loaded, buffer = load_fold_replay_checkpoint(resume_path, root=root, expected_contract=contract,
@@ -598,7 +656,7 @@ def run_fold_training(args, *, engine):
         previous_map = loaded["seen_class_map"]
         reconstruction_map = global_class_map if fixed_head else previous_map
         previous = engine.expand_model_for_seen_classes(None, None, reconstruction_map,
-            variant=args.variant, input_dim=len(columns), dropout=args.dropout,
+            variant=args.variant, input_dim=model_input_dim, dropout=args.dropout,
             activation=args.activation, norm=args.norm, method=args.method,
             active_class_indices=[global_class_map[raw] for raw in sorted(previous_map)])
         previous.load_state_dict(loaded["model_state"], strict=True)
@@ -733,12 +791,16 @@ def run_fold_training(args, *, engine):
                             class_ids=new_classes if task_cache_contract is not None else list(seen_map),
                         )
                     current_model = DDIBatchArrays(
-                        _model_values(current.features, prep, columns, args.member_id),
+                        _model_values(current.features, prep, columns, args.member_id,
+                                      variant=args.variant, metadata=current.metadata,
+                                      fingerprint_cache=prepared_ddinet_cache),
                         current.labels.copy(),
                         {key: value.copy() for key, value in (current.metadata or {}).items()},
                     )
                     validation_model = DDIBatchArrays(
-                        _model_values(validation.features, prep, columns, args.member_id),
+                        _model_values(validation.features, prep, columns, args.member_id,
+                                      variant=args.variant, metadata=validation.metadata,
+                                      fingerprint_cache=prepared_ddinet_cache),
                         validation.labels.copy(),
                         {key: value.copy() for key, value in (validation.metadata or {}).items()},
                     )
@@ -801,14 +863,19 @@ def run_fold_training(args, *, engine):
             "assignment_sha256": manifest["assignment_sha256"], "preprocessing_sha256": prep_hash,
             "buffer_policy": buffer.metadata["policy"], "ranking": buffer.metadata["ranking"]})
         current_inputs = current_model.features
-        replay_inputs = (_model_values(retained.features, prep, columns, args.member_id)
-                         if args.method in replay_methods else np.empty((0, len(columns)), dtype=np.float32))
+        replay_inputs = (_model_values(
+                            retained.features, prep, columns, args.member_id,
+                            variant=args.variant, metadata=retained.metadata,
+                            fingerprint_cache=prepared_ddinet_cache)
+                         if args.method in replay_methods else np.empty((0, model_input_dim), dtype=np.float32))
         replay_labels = retained.labels if args.method in replay_methods else np.empty(0, dtype=np.int64)
         ider_replay_features = None
         ider_replay_labels = None
         if args.method == "ider" and len(retained.labels):
             ider_replay_features = torch.from_numpy(
-                _model_values(retained.features, prep, columns, args.member_id)
+                _model_values(retained.features, prep, columns, args.member_id,
+                              variant=args.variant, metadata=retained.metadata,
+                              fingerprint_cache=prepared_ddinet_cache)
             )
             ider_replay_labels = torch.from_numpy(
                 remap_labels(retained.labels, global_class_map).astype(np.int64, copy=False)
@@ -827,7 +894,7 @@ def run_fold_training(args, *, engine):
         model_map = global_class_map if fixed_head else seen_map
         previous_model_map = global_class_map if fixed_head and previous is not None else previous_map
         model = engine.expand_model_for_seen_classes(previous, previous_model_map, model_map,
-            variant=args.variant, input_dim=len(columns), dropout=args.dropout,
+            variant=args.variant, input_dim=model_input_dim, dropout=args.dropout,
             activation=args.activation, norm=args.norm, method=args.method,
             active_class_indices=active_class_indices).to(device)
         if class_policy is not None:
@@ -867,7 +934,9 @@ def run_fold_training(args, *, engine):
                     rng = np.random.default_rng(np.random.SeedSequence([seeds.member_seed, task_id, epoch, step]))
                     idx = rng.choice(len(retained.labels), min(args.agem_reference_batch_size, len(retained.labels)), replace=False)
                     engine.apply_agem_projection(model, criterion,
-                        _model_values(retained.features[idx], prep, columns, args.member_id),
+                        _model_values(retained.features[idx], prep, columns, args.member_id,
+                                      variant=args.variant, metadata=_metadata_slice(retained.metadata, idx),
+                                      fingerprint_cache=prepared_ddinet_cache),
                         retained.labels[idx], training_label_map, device,
                         active_class_indices=active_class_indices)
             if args.method == "ider":
@@ -1036,7 +1105,15 @@ def run_fold_training(args, *, engine):
                 args.test, columns, class_ids=list(seen_map),
                 include_metadata=True, meta_cols=DEFAULT_META_COLS,
             )
-            test_values = _model_values(frame[columns].to_numpy(dtype=np.float64), prep, columns, args.member_id)
+            test_metadata = {
+                column: frame[column].to_numpy(copy=False)
+                for column in DEFAULT_META_COLS if column in frame.columns
+            }
+            test_values = _model_values(
+                frame[columns].to_numpy(dtype=np.float64), prep, columns, args.member_id,
+                variant=args.variant, metadata=test_metadata,
+                fingerprint_cache=prepared_ddinet_cache,
+            )
             test_labels = frame["class"].to_numpy(dtype=np.int64)
             reporting_timings["test_load_transform_seconds"] = time.perf_counter() - stage_started
             stage_started = time.perf_counter()

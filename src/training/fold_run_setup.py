@@ -111,9 +111,12 @@ def member_command(config, member, *, python=sys.executable):
             for key in ("exemplar_ranking_policy", "buffer_policy"):
                 args.pop(key, None)
     common_task_cache_root = os.environ.get("CIL_COMMON_TASK_CACHE_ROOT")
-    if common_task_cache_root:
+    if common_task_cache_root and config.get("model", {}).get("variant") == "tddi_paper_member":
         # Explicit opt-in keeps the cache namespace outside any method output.
         args["task_cache_root"] = str(Path(common_task_cache_root).resolve())
+    ddinet_fingerprint_cache = os.environ.get("CIL_DDINET_FINGERPRINT_CACHE")
+    if ddinet_fingerprint_cache and config.get("model", {}).get("variant") == "ddinet_multiclass_cil":
+        args["ddinet_fingerprint_cache"] = str(Path(ddinet_fingerprint_cache).resolve())
     command = [str(python), str(PROJECT_ROOT / "src/training/train_cil.py")]
     for key, value in args.items():
         if value is not None:

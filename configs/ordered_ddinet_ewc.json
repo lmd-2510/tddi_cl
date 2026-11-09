@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "kind": "tddi_frozen_fold_ensemble3_full",
+  "phase": "full",
+  "experiment_seed": 0,
+  "fold_seed": 42,
+  "member_ids": [0, 1, 2],
+  "development_count": 694455,
+  "budget_policy": "per_member_4_percent",
+  "global_slot_budget": 83334,
+  "member_budgets": {"0": 27778, "1": 27778, "2": 27778},
+  "protocol": {
+    "id": "ORDERED",
+    "name": "head_to_tail",
+    "task_file": "study_assets/task_protocols/head_to_tail_tasks.json",
+    "sha256": "b5cc67460f399afa6e04f18ad065401eaf644ec2981c8406e1f22c574ed872b8",
+    "layout": [38, 20, 20, 20, 20, 20, 20, 20],
+    "class_count": 178
+  },
+  "inputs": {
+    "train": "data/train_extracted.parquet",
+    "validation": "data/validation_extracted.parquet",
+    "test": "data/test_extracted.parquet",
+    "feature_cols": "study_assets/data_schema/feature_columns.json",
+    "fold_assignments": "study_assets/stratified_3fold_seed42/fold_assignments.parquet",
+    "fold_manifest": "study_assets/stratified_3fold_seed42/fold_manifest.json"
+  },
+  "preprocessing": {
+    "policy": "raw_identity",
+    "artifact_template": "study_assets/preprocessing_ddinet_seed0_fold42/member_{member_id}/fold_preprocessing.json"
+  },
+  "model": {
+    "variant": "ddinet_multiclass_cil",
+    "input_dim": 2048,
+    "hidden_dims": [1024, 512, 256, 128],
+    "activation": "relu",
+    "dropout": 0.3,
+    "norm": "none"
+  },
+  "training": {
+    "method": "class_balanced_fixed_budget_replay",
+    "fold_replay_policy": "stratified_fraction_v1",
+    "optimizer": "adamw",
+    "batch_size": 64,
+    "effective_batch_size": 1024,
+    "gradient_accumulation_steps": 16,
+    "epochs": 30,
+    "patience": 5,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "focal_gamma": 1,
+    "loss_variant": "focal_current_ce_replay"
+  },
+  "replay": {
+    "buffer_policy": "equal_class_fixed_budget",
+    "ranking_policy": "sample_normalized_class_mean",
+    "fraction": 0.125,
+    "repeat_cap": 3,
+    "replay_starts_at_task": 1
+  },
+  "execution": {
+    "stop_after_task": 7,
+    "validation_only": false,
+    "sequential": true,
+    "checkpoint_resume_policy": "immutable_frozen_fold_task_boundary_v1",
+    "export_member_predictions": ["validation", "test"]
+  },
+  "evaluation": {
+    "threshold_config": "configs/eval_macro_f1_entropy.json",
+    "ensemble_namespace": "offline_evaluation"
+  },
+  "device": "cuda",
+  "output_root": "outputs/ordered_ddinet_ewc_seed0"
+}

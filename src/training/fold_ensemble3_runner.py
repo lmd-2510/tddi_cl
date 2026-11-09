@@ -43,6 +43,7 @@ from src.training.fold_run_setup import (  # noqa: E402
     inspect_member,
     member_command,
 )
+from src.models.ddinet_member import DDINET_DEFAULT_HIDDEN_DIMS, DDINET_PAIR_INPUT_DIM
 from src.training.fold_training import _publish_json  # noqa: E402
 from src.utils.seed import resolve_seed_configuration  # noqa: E402
 
@@ -181,14 +182,29 @@ def _load_locked_config(
         )
     _keys(value["inputs"], INPUT_KEYS, "inputs")
     _keys(value["preprocessing"], {"policy", "artifact_template"}, "preprocessing")
-    expected_model = MODEL
+    model_variant = str(value["model"].get("variant", "")) if isinstance(value.get("model"), dict) else ""
+    if model_variant == "tddi_paper_member":
+        expected_model = MODEL
+        allowed_preprocessing_policy = "task0_standard_frozen"
+    elif model_variant == "ddinet_multiclass_cil":
+        expected_model = {
+            "variant": "ddinet_multiclass_cil",
+            "input_dim": DDINET_PAIR_INPUT_DIM,
+            "hidden_dims": list(DDINET_DEFAULT_HIDDEN_DIMS),
+            "activation": "relu",
+            "dropout": 0.3,
+            "norm": "none",
+        }
+        allowed_preprocessing_policy = "raw_identity"
+    else:
+        raise ValueError("Study model variant must be tddi_paper_member or ddinet_multiclass_cil.")
     expected_training = {**TRAINING, "epochs": 30, "patience": 5}
     _keys(value["training"], set(expected_training), "training")
     _keys(value["evaluation"], EVALUATION_KEYS, "evaluation")
-    if value["preprocessing"]["policy"] != "task0_standard_frozen":
-        raise ValueError("Approved study preprocessing is task0_standard_frozen.")
+    if value["preprocessing"]["policy"] != allowed_preprocessing_policy:
+        raise ValueError(f"{model_variant} requires preprocessing policy {allowed_preprocessing_policy}.")
     if value["model"] != expected_model:
-        raise ValueError("Study model must match the locked T-DDI configuration.")
+        raise ValueError(f"Study model must match the locked {model_variant} configuration.")
     expected_replay = {**REPLAY, "ranking_policy": "sample_normalized_class_mean"}
     replay = value["replay"]
     _keys(replay, set(REPLAY), "replay")
@@ -460,7 +476,7 @@ def _validate_member_predictions(config: Mapping[str, Any], member_id: int) -> N
                 or artifact.raw_class_ids.astype(int).tolist() != expected_classes
                 or artifact.provenance is None
                 or artifact.provenance.preprocessing_member_id != member_id
-                or artifact.provenance.preprocessing_policy != "task0_standard_frozen"
+                or artifact.provenance.preprocessing_policy != config["preprocessing"]["policy"]
                 or artifact.provenance.ranking_policy
                 != (config["replay"]["ranking_policy"] if config["training"]["method"] in {engine.FIXED_BUDGET_METHOD, "er", "ider", "upcl"} else "none" if config["training"]["method"] == "ewc" else "seeded_task_uniform")
                 or artifact.provenance.buffer_policy != (config["replay"]["buffer_policy"] if config["training"]["method"] in {engine.FIXED_BUDGET_METHOD, "er", "ider", "upcl"} else "ewc_no_examples_v1" if config["training"]["method"] == "ewc" else "agem_task_uniform_v1")
