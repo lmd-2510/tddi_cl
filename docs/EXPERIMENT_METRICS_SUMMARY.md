@@ -13,6 +13,8 @@ File này là bảng tổng hợp chung cho các run hoàn chỉnh. Mỗi run d�
 | `upcl_head_to_tail_fixed_head_full_seed0_20261103T165325Z` | UPCL | Head-to-Tail | TDDI | 0.322388 | 0.653767 | **0.219061** | 0.381671 | 0.389315 | 0.147812 | 0.029976 | [UPCL results](UPCL_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 | `task_arithmetic_head_to_tail_fixed_head_full_seed0_20261104T120427Z` | Task Arithmetic | Head-to-Tail | TDDI | 0.819018 | 0.184912 | **0.208722** | 0.802104 | 0.446440 | n.a. | n.a. | [Task Arithmetic results](TASK_ARITHMETIC_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 | `ties_head_to_tail_fixed_head_full_seed0_20261104T235759Z` | TIES | Head-to-Tail | TDDI | 0.854148 | 0.208110 | **0.231388** | 0.837363 | 0.460646 | n.a. | n.a. | [TIES results](TIES_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
+| `opcm_head_to_tail_fixed_head_full_seed0_20261108T141808Z` | OPCM | Head-to-Tail | TDDI | 0.437949 | 0.070953 | **0.082172** | 0.425959 | 0.278576 | n.a. | n.a. | [OPCM results](OPCM_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
+| `magmax_head_to_tail_fixed_head_full_seed0_20261108T182538Z` | MagMax | Head-to-Tail | TDDI | 0.585074 | 0.115060 | **0.132647** | 0.591144 | 0.272200 | n.a. | n.a. | [MagMax results](MAGMAX_HEAD_TO_TAIL_FIXED_HEAD_RESULTS.md) |
 
 ## Quy ước
 
