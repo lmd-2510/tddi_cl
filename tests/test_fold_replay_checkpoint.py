@@ -33,7 +33,7 @@ def load(root, task):
     return torch.load(root / "checkpoints" / f"task_{task}.pt", map_location="cpu", weights_only=False)
 
 
-@pytest.mark.parametrize("method", ["ewc", "agem"])
+@pytest.mark.parametrize("method", ["ewc", "agem", "er"])
 def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method):
     """Exercise real DDINet BatchNorm state through the normal trainer/loader."""
     from src.data.ddinet_fingerprints import build_ddinet_fingerprint_cache
@@ -68,6 +68,13 @@ def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method)
         "--activation", "relu", "--norm", "none", "--dropout", "0.3",
         "--ddinet-fingerprint-cache", str(cache_root), "--stop-after-task", "0",
     ]
+    if method == "er":
+        extra += [
+            "--buffer-policy", "reservoir_uniform_v1",
+            "--exemplar-ranking-policy", "reservoir_uniform_v1",
+            "--fold-replay-policy", "er_uniform_reservoir_equal_batch_v1",
+            "--replay-fraction", "0.5", "--replay-repeat-cap", "1",
+        ]
     command = cli(data, suffix="_ddinet", extra=extra)
     monkeypatch.setattr(sys, "argv", command)
     engine.main()
@@ -76,6 +83,8 @@ def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method)
     assert any(key.endswith("running_mean") for key in first["model_state"])
     if method == "ewc":
         assert not any(key.endswith("running_mean") for key in first["method_state"]["fisher"])
+    if method == "er":
+        assert first["buffer_state"]["metadata"]["policy"] == "reservoir_uniform_v1"
 
     resume_command = command + [
         "--stop-after-task", "1", "--resume-fold-checkpoint", str(root / "checkpoints/task_0.pt"),

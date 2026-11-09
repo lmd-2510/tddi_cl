@@ -7,6 +7,7 @@ METHOD="${CIL_DDINET_FULL_RUN_METHOD:-ewc}"
 case "$METHOD" in
   ewc) METHOD_LABEL="EWC" ;;
   agem) METHOD_LABEL="A-GEM" ;;
+  er) METHOD_LABEL="ER" ;;
   *) echo "[STOP] Unsupported DDINet full-run method: $METHOD" >&2; exit 2 ;;
 esac
 CONFIG="$PROJECT_ROOT/configs/ordered_ddinet_ewc.json"
