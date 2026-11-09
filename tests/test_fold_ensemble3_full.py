@@ -111,6 +111,33 @@ def test_ider_full_override_uses_paper_defaults_and_equal_class_memory(tmp_path:
     assert _arg(command, "--ider-replay-batch-size") == "64"
 
 
+def test_ddinet_agem_full_plan_reuses_fingerprints_and_method_defaults(tmp_path, monkeypatch):
+    from src.training import train_cil
+    fingerprint_root = tmp_path / "fingerprints"
+    monkeypatch.setenv("CIL_DDINET_FINGERPRINT_CACHE", str(fingerprint_root))
+    monkeypatch.setenv("CIL_COMMON_TASK_CACHE_ROOT", str(tmp_path / "tddi-cache"))
+    config = load_full_config(
+        "configs/ordered_ddinet_ewc.json",
+        overrides={"method": "agem", "output_root": tmp_path / "agem"},
+    )
+    plan = shared.build_ensemble_plan(
+        config, inspector=_inspector({member: "fresh" for member in MEMBER_IDS}),
+    )
+    assert len(plan.evaluations) == 8
+    assert config["global_slot_budget"] == 83334
+    for member in plan.members:
+        args = train_cil.parse_args(member.command[2:])
+        assert args.method == "agem"
+        assert args.variant == "ddinet_multiclass_cil"
+        assert args.fold_member_budget == 27778
+        assert args.agem_reference_batch_size == 256
+        assert args.loss_variant == "cross_entropy"
+        assert args.ddinet_fingerprint_cache == fingerprint_root
+        assert args.task_cache_root is None
+        assert args.preprocessing_policy == "raw_identity"
+        assert args.stop_after_task == 7
+
+
 def test_full_selected_member_skip_and_resume(tmp_path: Path) -> None:
     config = _config(tmp_path)
     resume = tmp_path / "task_4.pt"

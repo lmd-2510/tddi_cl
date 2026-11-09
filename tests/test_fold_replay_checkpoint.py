@@ -33,7 +33,8 @@ def load(root, task):
     return torch.load(root / "checkpoints" / f"task_{task}.pt", map_location="cpu", weights_only=False)
 
 
-def test_ddinet_ewc_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny):
+@pytest.mark.parametrize("method", ["ewc", "agem"])
+def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method):
     """Exercise real DDINet BatchNorm state through the normal trainer/loader."""
     from src.data.ddinet_fingerprints import build_ddinet_fingerprint_cache
     from src.models.ddinet_member import DDINetMember, DDINetMemberConfig
@@ -54,8 +55,16 @@ def test_ddinet_ewc_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny):
         return model
 
     monkeypatch.setattr(engine, "expand_model_for_seen_classes", expand)
+    projection_calls = []
+    original_projection = engine.apply_agem_projection
+
+    def project(model, criterion, memory_features, *args, **kwargs):
+        projection_calls.append(memory_features.shape)
+        return original_projection(model, criterion, memory_features, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "apply_agem_projection", project)
     extra = [
-        "--method", "ewc", "--variant", "ddinet_multiclass_cil",
+        "--method", method, "--variant", "ddinet_multiclass_cil",
         "--activation", "relu", "--norm", "none", "--dropout", "0.3",
         "--ddinet-fingerprint-cache", str(cache_root), "--stop-after-task", "0",
     ]
@@ -65,7 +74,8 @@ def test_ddinet_ewc_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny):
     root = data["root"] / "run_raw_identity_ddinet"
     first = load(root, 0)
     assert any(key.endswith("running_mean") for key in first["model_state"])
-    assert not any(key.endswith("running_mean") for key in first["method_state"]["fisher"])
+    if method == "ewc":
+        assert not any(key.endswith("running_mean") for key in first["method_state"]["fisher"])
 
     resume_command = command + [
         "--stop-after-task", "1", "--resume-fold-checkpoint", str(root / "checkpoints/task_0.pt"),
@@ -73,6 +83,10 @@ def test_ddinet_ewc_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny):
     monkeypatch.setattr(sys, "argv", resume_command)
     engine.main()
     assert load(root, 1)["next_task_id"] == 2
+    if method == "agem":
+        assert projection_calls
+        assert all(shape[1] == 2048 for shape in projection_calls)
+        assert first["buffer_state"]["metadata"]["policy"] == "agem_task_uniform_v1"
 
     # Completed-scope validation runs the entire checkpoint loader again.
     monkeypatch.setattr(sys, "argv", command + [
@@ -91,6 +105,8 @@ def test_ddinet_ewc_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny):
                 path, root=root, expected_contract=contract, tasks=prepared["tasks"],
                 context=prepared["context"], buffer_kwargs=prepared["buffer_kwargs"],
             )
+    if method != "ewc":
+        return
     del saved["method_state"]["fisher"]["backbone.0.weight"]
     saved["state_sha256"] = checkpoint.fold_state_digest({
         key: value for key, value in saved.items() if key != "state_sha256"

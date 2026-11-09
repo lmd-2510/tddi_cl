@@ -3,6 +3,12 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${CIL_PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
+METHOD="${CIL_DDINET_FULL_RUN_METHOD:-ewc}"
+case "$METHOD" in
+  ewc) METHOD_LABEL="EWC" ;;
+  agem) METHOD_LABEL="A-GEM" ;;
+  *) echo "[STOP] Unsupported DDINet full-run method: $METHOD" >&2; exit 2 ;;
+esac
 CONFIG="$PROJECT_ROOT/configs/ordered_ddinet_ewc.json"
 TRAIN="$PROJECT_ROOT/data/train_extracted.parquet"
 VALIDATION="$PROJECT_ROOT/data/validation_extracted.parquet"
@@ -14,7 +20,7 @@ FOLD_MANIFEST="$PROJECT_ROOT/study_assets/stratified_3fold_seed42/fold_manifest.
 PREPROCESSING_ROOT="$PROJECT_ROOT/study_assets/preprocessing_ddinet_seed0_fold42"
 SOURCE_SHARD_CACHE_ROOT="$PROJECT_ROOT/study_assets/source_shard_cache_ordered_seed0_fold42"
 FINGERPRINT_CACHE_ROOT="$PROJECT_ROOT/study_assets/ddinet_fingerprint_cache_morgan1024"
-MONITOR_ROOT="$PROJECT_ROOT/outputs/ewc_ddinet_head_to_tail_full_monitor"
+MONITOR_ROOT="$PROJECT_ROOT/outputs/${METHOD}_ddinet_head_to_tail_full_monitor"
 LATEST_FILE="$MONITOR_ROOT/latest.txt"
 
 export CIL_DDINET_FINGERPRINT_CACHE="$FINGERPRINT_CACHE_ROOT"
@@ -54,7 +60,7 @@ prepare_assets() {
 full_command() {
   local output_root="$1"; local execute_flag="${2:-}"
   local command=("$PYTHON" "$PROJECT_ROOT/src/training/fold_ensemble3_full.py" \
-    --config "$CONFIG" --method ewc --train "$TRAIN" --validation "$VALIDATION" --test "$TEST" \
+    --config "$CONFIG" --method "$METHOD" --train "$TRAIN" --validation "$VALIDATION" --test "$TEST" \
     --feature-cols "$FEATURE_COLUMNS" --fold-assignments "$FOLD_ASSIGNMENTS" \
     --fold-manifest "$FOLD_MANIFEST" --task-file "$TASK_FILE" \
     --preprocessing-root "$PREPROCESSING_ROOT" --output-root "$output_root" \
@@ -74,11 +80,11 @@ print(f'[OK] CUDA: {torch.cuda.get_device_name(0)}; free={free/1024**3:.2f} GiB;
 PY
   for member in 0 1 2; do require_file "$PREPROCESSING_ROOT/member_${member}/fold_preprocessing.json"; done
   require_file "$FINGERPRINT_CACHE_ROOT/manifest.json"
-  echo "[CHECK] Validating DDINet EWC full-run plan; no model training."
+  echo "[CHECK] Validating DDINet $METHOD_LABEL full-run plan; no model training."
   export CIL_SOURCE_SHARD_CACHE_ROOT="$SOURCE_SHARD_CACHE_ROOT"
-  local dry_root="$PROJECT_ROOT/outputs/_ewc_ddinet_head_to_tail_dry_run_only"
+  local dry_root="$PROJECT_ROOT/outputs/_${METHOD}_ddinet_head_to_tail_dry_run_only"
   eval "$(full_command "$dry_root")"
-  echo "[OK] DDINet + EWC + fixed 178-head + P1 head-to-tail plan passed."
+  echo "[OK] DDINet + $METHOD_LABEL + fixed 178-head + P1 head-to-tail plan passed."
 }
 
 postprocess() {
@@ -96,7 +102,7 @@ worker() {
   mkdir -p "$run_home" "$output_root"
   exec > >(tee -a "$run_home/main.log") 2>&1
   set +e
-  echo "[RECIPE] EWC + DDINet + Morgan1024 ordered pair + fixed 178 head + P1 head-to-tail"
+  echo "[RECIPE] $METHOD_LABEL + DDINet + Morgan1024 ordered pair + fixed 178 head + P1 head-to-tail"
   export CIL_SOURCE_SHARD_CACHE_ROOT="$SOURCE_SHARD_CACHE_ROOT"
   eval "$(full_command "$output_root" execute)"
   local code=$?
@@ -114,7 +120,7 @@ start_new() {
   cd "$PROJECT_ROOT"; check_all; mkdir -p "$MONITOR_ROOT"
   if [[ -f "$LATEST_FILE" ]]; then local old; old="$(<"$LATEST_FILE")"; pid_is_running "$old/job.pid" && die "A run is already active."; fi
   local id run_home output_root; id="$(date -u +%Y%m%dT%H%M%SZ)"
-  run_home="$MONITOR_ROOT/run_${id}"; output_root="$PROJECT_ROOT/outputs/ewc_ddinet_head_to_tail_fixed_head_full_seed0_${id}"
+  run_home="$MONITOR_ROOT/run_${id}"; output_root="$PROJECT_ROOT/outputs/${METHOD}_ddinet_head_to_tail_fixed_head_full_seed0_${id}"
   mkdir -p "$run_home" "$output_root"; printf '%s\n' "$run_home" > "$LATEST_FILE"; printf '%s\n' "$output_root" > "$run_home/output_root.txt"
   nohup bash "$0" _worker "$run_home" "$output_root" > "$run_home/nohup.log" 2>&1 < /dev/null &
   printf '%s\n' "$!" > "$run_home/job.pid"; echo "[STARTED] PID=$(<"$run_home/job.pid")"; echo "[LOG] $run_home/main.log"
