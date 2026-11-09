@@ -111,7 +111,7 @@ def test_ider_full_override_uses_paper_defaults_and_equal_class_memory(tmp_path:
     assert _arg(command, "--ider-replay-batch-size") == "64"
 
 
-@pytest.mark.parametrize("method", ["agem", "er"])
+@pytest.mark.parametrize("method", ["agem", "er", "ider", "upcl"])
 def test_ddinet_full_plan_reuses_fingerprints_and_method_defaults(tmp_path, monkeypatch, method):
     from src.training import train_cil
     fingerprint_root = tmp_path / "fingerprints"
@@ -132,7 +132,7 @@ def test_ddinet_full_plan_reuses_fingerprints_and_method_defaults(tmp_path, monk
         assert args.variant == "ddinet_multiclass_cil"
         assert args.fold_member_budget == 27778
         assert args.agem_reference_batch_size == 256
-        assert args.loss_variant == "cross_entropy"
+        assert args.loss_variant == (method if method in {"ider", "upcl"} else "cross_entropy")
         assert args.ddinet_fingerprint_cache == fingerprint_root
         assert args.task_cache_root is None
         assert args.preprocessing_policy == "raw_identity"
@@ -143,6 +143,42 @@ def test_ddinet_full_plan_reuses_fingerprints_and_method_defaults(tmp_path, monk
             assert args.fold_replay_policy == "er_uniform_reservoir_equal_batch_v1"
             assert args.replay_fraction == 0.5
             assert args.replay_repeat_cap == 1
+        if method == "ider":
+            assert (args.ider_weight_a, args.ider_weight_b, args.ider_weight_c) == (0.5, 0.4, 0.5)
+            assert args.ider_replay_batch_size == 64
+            assert args.ider_uniform_probability == 1.0
+            assert args.buffer_policy == "equal_class_fixed_budget"
+        if method == "upcl":
+            assert config["model"]["hidden_dims"] == [1024, 512, 256, 256]
+            assert train_cil.model_manifest(args)["hidden_dims"] == config["model"]["hidden_dims"]
+            assert args.upcl_temperature == 0.07
+            assert args.replay_fraction == 0.0
+            assert args.buffer_policy == "equal_class_fixed_budget"
+
+
+def test_ddinet_upcl_production_head_supports_all_178_prototypes():
+    import torch
+    from src.training import train_cil
+    from src.methods.upcl import initialise_prototype_state, _orthogonal_candidates
+    old_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        model = train_cil.expand_model_for_seen_classes(
+            None, None, {i: i for i in range(178)}, variant="ddinet_multiclass_cil",
+            input_dim=2048, dropout=.3, activation="relu", norm="none", method="upcl",
+        )
+        head = model.classifier_head
+        assert (head.in_features, head.out_features) == (256, 178)
+        assert not head.weight.requires_grad
+        state = initialise_prototype_state(total_classes=178, latent_dim=head.in_features)
+        prototypes = _orthogonal_candidates(
+            state["prototypes"][state["assigned"]], count=178, latent_dim=head.in_features,
+            generator=torch.Generator().manual_seed(0),
+        )
+        torch.testing.assert_close(prototypes @ prototypes.T, torch.eye(178), atol=1e-5, rtol=1e-5)
+        assert model.eval()(torch.zeros(2, 2048)).shape == (2, 178)
+    finally:
+        torch.set_num_threads(old_threads)
 
 
 def test_full_selected_member_skip_and_resume(tmp_path: Path) -> None:

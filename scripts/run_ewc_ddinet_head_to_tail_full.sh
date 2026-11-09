@@ -8,6 +8,8 @@ case "$METHOD" in
   ewc) METHOD_LABEL="EWC" ;;
   agem) METHOD_LABEL="A-GEM" ;;
   er) METHOD_LABEL="ER" ;;
+  ider) METHOD_LABEL="IDER" ;;
+  upcl) METHOD_LABEL="UPCL" ;;
   *) echo "[STOP] Unsupported DDINet full-run method: $METHOD" >&2; exit 2 ;;
 esac
 CONFIG="$PROJECT_ROOT/configs/ordered_ddinet_ewc.json"
@@ -104,6 +106,9 @@ worker() {
   exec > >(tee -a "$run_home/main.log") 2>&1
   set +e
   echo "[RECIPE] $METHOD_LABEL + DDINet + Morgan1024 ordered pair + fixed 178 head + P1 head-to-tail"
+  if [[ "$METHOD" == upcl ]]; then
+    echo "[MODEL] UPCL uses hidden widths 1024,512,256,256 for 178 orthogonal prototypes."
+  fi
   export CIL_SOURCE_SHARD_CACHE_ROOT="$SOURCE_SHARD_CACHE_ROOT"
   eval "$(full_command "$output_root" execute)"
   local code=$?

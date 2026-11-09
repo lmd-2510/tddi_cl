@@ -45,6 +45,8 @@ from src.methods.upcl import (
 from src.methods.replay import classification_loss as replay_classification_loss
 from src.models.tddi_paper_member import TDDI_PAPER_INPUT_DIM, TDDIPaperMember, TDDIPaperMemberConfig
 from src.models.ddinet_member import (
+    DDINET_DEFAULT_HIDDEN_DIMS,
+    DDINET_UPCL_HIDDEN_DIMS,
     DDINET_PAIR_INPUT_DIM,
     DDINetMember,
     DDINetMemberConfig,
@@ -256,6 +258,7 @@ def model_manifest(args):
     if args.variant == DDINET_VARIANT:
         manifest = DDINetMemberConfig(
             dropout=args.dropout,
+            hidden_dims=DDINET_UPCL_HIDDEN_DIMS if args.method == UPCL_METHOD else DDINET_DEFAULT_HIDDEN_DIMS,
         ).manifest()
     else:
         from src.models.tddi_paper_member import paper_member_manifest
@@ -326,6 +329,7 @@ def expand_model_for_seen_classes(
                 input_dim=input_dim,
                 num_classes=len(current_seen_map),
                 dropout=dropout,
+                hidden_dims=DDINET_UPCL_HIDDEN_DIMS if method == UPCL_METHOD else DDINET_DEFAULT_HIDDEN_DIMS,
             )
         )
     else:

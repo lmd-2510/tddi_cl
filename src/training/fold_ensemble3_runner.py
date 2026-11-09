@@ -43,7 +43,7 @@ from src.training.fold_run_setup import (  # noqa: E402
     inspect_member,
     member_command,
 )
-from src.models.ddinet_member import DDINET_DEFAULT_HIDDEN_DIMS, DDINET_PAIR_INPUT_DIM
+from src.models.ddinet_member import DDINET_DEFAULT_HIDDEN_DIMS, DDINET_UPCL_HIDDEN_DIMS, DDINET_PAIR_INPUT_DIM
 from src.training.fold_training import _publish_json  # noqa: E402
 from src.utils.seed import resolve_seed_configuration  # noqa: E402
 
@@ -324,6 +324,8 @@ def _load_locked_config(
             value["member_budgets"] = {str(member): 0 for member in MEMBER_IDS}
             value["global_slot_budget"] = 0
         value["output_root"] = str(Path(value["output_root"]).with_name(f"{protocol_name}_{method}_seed0"))
+    if method == "upcl" and model_variant == "ddinet_multiclass_cil":
+        value["model"]["hidden_dims"] = list(DDINET_UPCL_HIDDEN_DIMS)
     output_source = overrides.get("output_root") or value["output_root"]
     value["output_root"] = _resolve(output_source, root, "output_root")
     value["device"] = str(overrides.get("device") or value["device"])

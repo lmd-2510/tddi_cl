@@ -33,7 +33,7 @@ def load(root, task):
     return torch.load(root / "checkpoints" / f"task_{task}.pt", map_location="cpu", weights_only=False)
 
 
-@pytest.mark.parametrize("method", ["ewc", "agem", "er"])
+@pytest.mark.parametrize("method", ["ewc", "agem", "er", "ider", "upcl"])
 def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method):
     """Exercise real DDINet BatchNorm state through the normal trainer/loader."""
     from src.data.ddinet_fingerprints import build_ddinet_fingerprint_cache
@@ -47,9 +47,14 @@ def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method)
 
     def expand(previous, previous_map, seen_map, **kwargs):
         assert kwargs["input_dim"] == 2048
+        hidden_dims = (8, 8, 180, 180) if kwargs.get("method") == "upcl" else (8, 8, 4, 4)
         model = DDINetMember(DDINetMemberConfig(
-            num_classes=len(seen_map), hidden_dims=(8, 8, 4, 4), dropout=kwargs["dropout"],
+            num_classes=len(seen_map), hidden_dims=hidden_dims, dropout=kwargs["dropout"],
         ))
+        if kwargs.get("method") == "ider":
+            engine.attach_ider_adapter(model, active_class_indices=kwargs["active_class_indices"])
+        if kwargs.get("method") == "upcl":
+            engine.enable_upcl_prototype_head(model)
         if previous is not None:
             model.load_state_dict(previous.state_dict())
         return model
@@ -85,6 +90,11 @@ def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method)
         assert not any(key.endswith("running_mean") for key in first["method_state"]["fisher"])
     if method == "er":
         assert first["buffer_state"]["metadata"]["policy"] == "reservoir_uniform_v1"
+    if method == "ider":
+        assert "ider_adapter.label_projection.0.weight" in first["model_state"]
+        assert first["buffer_state"]["metadata"]["total_memory_budget"] > 0
+    if method == "upcl":
+        assert first["method_state"]["upcl"]["assigned"].sum().item() == 38
 
     resume_command = command + [
         "--stop-after-task", "1", "--resume-fold-checkpoint", str(root / "checkpoints/task_0.pt"),
@@ -92,6 +102,8 @@ def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method)
     monkeypatch.setattr(sys, "argv", resume_command)
     engine.main()
     assert load(root, 1)["next_task_id"] == 2
+    if method == "upcl":
+        assert load(root, 1)["method_state"]["upcl"]["assigned"].sum().item() == 58
     if method == "agem":
         assert projection_calls
         assert all(shape[1] == 2048 for shape in projection_calls)
