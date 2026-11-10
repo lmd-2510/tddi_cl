@@ -150,6 +150,8 @@ def test_ddinet_full_plan_reuses_fingerprints_and_method_defaults(tmp_path, monk
             assert args.buffer_policy == "equal_class_fixed_budget"
         if method == "upcl":
             assert config["model"]["hidden_dims"] == [1024, 512, 256, 256]
+            assert config["model"]["singleton_batchnorm_policy"] == "running_stats_for_singleton_v1"
+            assert train_cil.model_manifest(args)["singleton_batchnorm_policy"] == config["model"]["singleton_batchnorm_policy"]
             assert train_cil.model_manifest(args)["hidden_dims"] == config["model"]["hidden_dims"]
             assert args.upcl_temperature == 0.07
             assert args.replay_fraction == 0.0

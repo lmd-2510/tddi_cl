@@ -53,3 +53,16 @@ def test_completed_scope_still_rejects_learning_or_data_drift(tmp_path):
             root, root / "checkpoints/task_7.pt", fresh,
             requested_stop_after_task=7,
         )
+
+
+def test_singleton_training_policy_change_requires_explicit_migration(tmp_path):
+    root = tmp_path / "run"
+    stored = {"method": "upcl", "model": {"variant": "ddinet_multiclass_cil"},
+              "implementation_sha256": {"train.py": "old"}}
+    fresh = {**stored, "model": {**stored["model"],
+             "singleton_batchnorm_policy": "running_stats_for_singleton_v1"}}
+    _write_run_config(root, stored)
+    with pytest.raises(ValueError, match="learning/data contract.*model"):
+        _validation_contract_for_existing_run(
+            root, root / "checkpoints/task_7.pt", fresh, requested_stop_after_task=7,
+        )

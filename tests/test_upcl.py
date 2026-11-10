@@ -98,3 +98,43 @@ def test_full_memory_sampler_uses_each_current_and_replay_row_once_and_resumes()
     assert audit["unique_replay_exemplars"] == 3 and audit["max_repeat"] == 1
     restored = FoldFullMemorySampler.from_state_dict(sampler.state_dict(), **kwargs)
     assert list(restored) == list(sampler)
+
+
+def test_ddinet_upcl_trains_all_65_rows_including_singleton_tail():
+    from src.training import train_cil
+    from src.models.ddinet_member import DDINET_SINGLETON_BN_POLICY
+    from torch.utils.data import DataLoader, TensorDataset
+
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        model = DDINetMember(DDINetMemberConfig(
+            input_dim=8, hidden_dims=(10, 9, 8, 8), num_classes=4, dropout=0.0,
+            singleton_batchnorm_policy=DDINET_SINGLETON_BN_POLICY,
+        ))
+        features = torch.randn(65, 8)
+        labels = torch.arange(65) % 2
+        prepare_task_prototypes(
+            model, None, current_features=features, current_labels=labels,
+            new_class_indices=(0, 1), active_class_indices=(0, 1),
+            seed=0, member_id=0, task_id=0, device="cpu",
+        )
+        context = UPCLTrainingContext(None, (0, 1), (), class_log_priors(
+            labels.numpy(), total_classes=4, active_class_indices=(0, 1),
+        ), 0)
+        loader = DataLoader(TensorDataset(features, labels), batch_size=64, drop_last=False)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
+        before = model.backbone[0].weight.detach().clone()
+        result = train_cil.train_one_epoch(
+            model, loader, optimizer, torch.nn.CrossEntropyLoss(), "cpu",
+            gradient_accumulation_steps=16, loss_variant="upcl", upcl_context=context,
+            return_loss_components=True,
+        )
+        assert result.examples_seen == 65
+        assert result.optimizer_steps == 1
+        assert np.isfinite(result.total_loss)
+        assert not torch.equal(before, model.backbone[0].weight)
+        assert all(int(layer.num_batches_tracked) == 1 for layer in model.modules()
+                   if isinstance(layer, torch.nn.BatchNorm1d))
+    finally:
+        torch.set_num_threads(previous_threads)

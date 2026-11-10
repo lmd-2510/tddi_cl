@@ -50,6 +50,7 @@ def test_ddinet_checkpoint_roundtrip_and_resume(data, monkeypatch, tiny, method)
         hidden_dims = (8, 8, 180, 180) if kwargs.get("method") == "upcl" else (8, 8, 4, 4)
         model = DDINetMember(DDINetMemberConfig(
             num_classes=len(seen_map), hidden_dims=hidden_dims, dropout=kwargs["dropout"],
+            singleton_batchnorm_policy="running_stats_for_singleton_v1" if kwargs.get("method") == "upcl" else "error",
         ))
         if kwargs.get("method") == "ider":
             engine.attach_ider_adapter(model, active_class_indices=kwargs["active_class_indices"])

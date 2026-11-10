@@ -20,6 +20,7 @@ DDINET_DEFAULT_HIDDEN_DIMS = (1024, 512, 256, 128)
 # Approved UPCL adaptation permits 178 orthogonal class prototypes.
 DDINET_UPCL_HIDDEN_DIMS = (1024, 512, 256, 256)
 DDINET_RECOMMENDED_WEIGHT_DECAY = 1e-4
+DDINET_SINGLETON_BN_POLICY = "running_stats_for_singleton_v1"
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class DDINetMemberConfig:
     hidden_dims: tuple[int, int, int, int] = DDINET_DEFAULT_HIDDEN_DIMS
     dropout: float = 0.3
     recommended_weight_decay: float = DDINET_RECOMMENDED_WEIGHT_DECAY
+    singleton_batchnorm_policy: str = "error"
 
     def __post_init__(self) -> None:
         if self.input_dim <= 0:
@@ -49,9 +51,11 @@ class DDINetMemberConfig:
             raise ValueError("DDINet dropout must be in [0, 1).")
         if self.recommended_weight_decay < 0:
             raise ValueError("DDINet recommended_weight_decay must be non-negative.")
+        if self.singleton_batchnorm_policy not in {"error", DDINET_SINGLETON_BN_POLICY}:
+            raise ValueError("Unsupported DDINet singleton BatchNorm policy.")
 
     def manifest(self) -> dict[str, object]:
-        return {
+        manifest = {
             "variant": "ddinet_multiclass_cil",
             "architecture": "DDINetMember",
             "paper_doi": "10.1016/j.knosys.2025.114981",
@@ -91,9 +95,24 @@ class DDINetMemberConfig:
                 ],
             },
         }
+        if self.singleton_batchnorm_policy != "error":
+            manifest["singleton_batchnorm_policy"] = self.singleton_batchnorm_policy
+        return manifest
 
 
 if nn is not None:
+
+    class SingletonRunningStatsBatchNorm1d(nn.BatchNorm1d):
+        """Use saved statistics for a one-row training batch, keeping gradients."""
+
+        def forward(self, values: torch.Tensor) -> torch.Tensor:
+            if self.training and values.ndim == 2 and values.shape[0] == 1:
+                return F.batch_norm(
+                    values, self.running_mean, self.running_var,
+                    self.weight, self.bias, training=False,
+                    momentum=self.momentum, eps=self.eps,
+                )
+            return super().forward(values)
 
     class DDINetMember(nn.Module):
         """2048-bit drug pair -> four regularized blocks -> fixed class head."""
@@ -103,11 +122,16 @@ if nn is not None:
             self.config = config
             blocks: list[nn.Module] = []
             previous_width = config.input_dim
+            batchnorm = (
+                SingletonRunningStatsBatchNorm1d
+                if config.singleton_batchnorm_policy == DDINET_SINGLETON_BN_POLICY
+                else nn.BatchNorm1d
+            )
             for width in config.hidden_dims:
                 blocks.extend(
                     (
                         nn.Linear(previous_width, width),
-                        nn.BatchNorm1d(width),
+                        batchnorm(width),
                         nn.ReLU(),
                         nn.Dropout(config.dropout),
                     )
