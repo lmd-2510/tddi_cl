@@ -32,6 +32,8 @@ from src.data.ddi_dataset import (
 from src.data.sample_identity import build_stable_sample_ids
 from src.data.fold_preprocessing import load_fold_preprocessing
 from src.data.source_shard_cache import load_source_shard
+from src.data.ddinet_fingerprints import DDINetFingerprintConfig, load_ddinet_fingerprint_cache
+from src.models.ddinet_member import DDINET_PAIR_INPUT_DIM
 from src.data.stratified_folds import fold_file_sha256
 from src.eval.metrics import compute_classification_metrics
 from src.methods.model_merging import (
@@ -122,7 +124,11 @@ def _load_task_arrays(args, *, context, prep, columns, task_classes, role: str, 
             validation_fold=args.member_id,
             class_ids=list(task_classes),
         )
-    values = _model_values(arrays.features, prep, columns, args.member_id)
+    values = _model_values(
+        arrays.features, prep, columns, args.member_id,
+        variant=getattr(args, "variant", "tddi_paper_member"), metadata=arrays.metadata,
+        fingerprint_cache=getattr(args, "_merging_fingerprint_cache", None),
+    )
     _log(
         f"loaded role={role} task={getattr(args, '_merging_task_id', '?')} "
         f"rows={len(arrays.labels)} classes={len(np.unique(arrays.labels))} "
@@ -202,7 +208,7 @@ def _train_expert(
         dropout=args.dropout,
         activation=args.activation,
         norm=args.norm,
-        method=None,
+        method=args.method if args.variant == "ddinet_multiclass_cil" else None,
         active_class_indices=owned_rows,
     ).to(device)
     if initial_state is not None:
@@ -273,6 +279,17 @@ def _train_expert(
 def run_model_merging_member(args, *, engine) -> None:
     if args.method not in {TASK_ARITHMETIC_METHOD, TIES_METHOD, OPCM_METHOD, MAGMAX_METHOD}:
         raise ValueError(f"Unsupported model-merging method: {args.method}")
+    ddinet = args.variant == "ddinet_multiclass_cil"
+    if ddinet:
+        if args.method not in {TASK_ARITHMETIC_METHOD, TIES_METHOD}:
+            raise ValueError("DDINet merging currently supports Task Arithmetic and TIES.")
+        if args.ddinet_fingerprint_cache is None:
+            raise ValueError("DDINet merging requires --ddinet-fingerprint-cache.")
+        if args.preprocessing_policy != "raw_identity" or args.norm != "none" or args.activation != "relu":
+            raise ValueError("DDINet merging requires raw_identity preprocessing, norm none and ReLU.")
+        args._merging_fingerprint_cache = load_ddinet_fingerprint_cache(
+            args.ddinet_fingerprint_cache, expected_config=DDINetFingerprintConfig(),
+        )
     root = Path(args.outdir)
     if root.exists():
         raise FileExistsError(f"Model-merging output already exists; never overwrite: {root}")
@@ -328,7 +345,24 @@ def run_model_merging_member(args, *, engine) -> None:
         recipe = ModelMergingRecipe.paper_magmax()
     opcm_mode = args.method == OPCM_METHOD
     magmax_mode = args.method == MAGMAX_METHOD
+    ddinet_config = {}
+    if ddinet:
+        ddinet_config = {
+            "model": engine.model_manifest(args),
+            "arguments": {key: str(value) if isinstance(value, Path) else value
+                          for key, value in vars(args).items() if not key.startswith("_")},
+            "ddinet_fingerprint_manifest_sha256": fold_file_sha256(
+                Path(args.ddinet_fingerprint_cache) / "manifest.json"),
+            "git": engine._git_state(engine.PROJECT_ROOT),
+            "implementation_sha256": {
+                name: fold_file_sha256(engine.PROJECT_ROOT / "src" / name)
+                for name in ("training/train_cil.py", "training/model_merging_training.py",
+                             "models/ddinet_member.py", "methods/model_merging.py",
+                             "data/ddinet_fingerprints.py", "eval/metrics.py")
+            },
+        }
     _dump_json(root / "run_config.json", {
+        **ddinet_config,
         "method": args.method,
         "method_policy": (
             "frozen_fold_fixed_head_opcm_sequential_paper_v1"
@@ -401,8 +435,8 @@ def run_model_merging_member(args, *, engine) -> None:
     if opcm_mode or magmax_mode:
         reference_model = engine.expand_model_for_seen_classes(
             None, None, global_map,
-            variant=args.variant, input_dim=len(columns), dropout=args.dropout,
-            activation=args.activation, norm=args.norm, method=None,
+            variant=args.variant, input_dim=DDINET_PAIR_INPUT_DIM if ddinet else len(columns), dropout=args.dropout,
+            activation=args.activation, norm=args.norm, method=args.method if ddinet else None,
             active_class_indices=list(range(len(global_map))),
         )
         pretrained_reference_state = _state_cpu(reference_model)
@@ -529,8 +563,8 @@ def run_model_merging_member(args, *, engine) -> None:
         )
         model = engine.expand_model_for_seen_classes(
             None, None, global_map,
-            variant=args.variant, input_dim=len(columns), dropout=args.dropout,
-            activation=args.activation, norm=args.norm, method=None,
+            variant=args.variant, input_dim=DDINET_PAIR_INPUT_DIM if ddinet else len(columns), dropout=args.dropout,
+            activation=args.activation, norm=args.norm, method=args.method if ddinet else None,
             active_class_indices=[global_map[c] for task in tasks[: boundary + 1] for c in task["classes"]],
         ).to(device)
         if opcm_mode:
@@ -633,6 +667,8 @@ def run_model_merging_member(args, *, engine) -> None:
             )
             merged_state = result.state_dict
             merge_audit = result.audit
+        if ddinet:
+            merge_audit["model"] = engine.model_manifest(args)
         seen_rows = [row for task_id in range(boundary + 1) for row in rows_by_task[task_id]]
         seen_raw = [raw for raw, index in global_map.items() if index in set(seen_rows)]
         keep = np.isin(test_labels, np.asarray(seen_raw, dtype=np.int64))

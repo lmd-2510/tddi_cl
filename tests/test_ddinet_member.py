@@ -101,7 +101,7 @@ def test_default_ddinet_preserves_strict_batchnorm_behavior():
         model(torch.randn(1, 8))
 
 
-@pytest.mark.parametrize("method", ["ewc", "agem", "er", "ider", "upcl"])
+@pytest.mark.parametrize("method", ["ewc", "agem", "er", "ider", "upcl", "task_arithmetic", "ties"])
 def test_singleton_policy_is_scoped_to_ddinet_upcl(method):
     from types import SimpleNamespace
     from src.training import train_cil
@@ -109,7 +109,7 @@ def test_singleton_policy_is_scoped_to_ddinet_upcl(method):
         manifest = train_cil.model_manifest(SimpleNamespace(
             variant=variant, method=method, dropout=.3, activation="relu",
         ))
-        if variant == "ddinet_multiclass_cil" and method == "upcl":
+        if variant == "ddinet_multiclass_cil" and method in {"upcl", "task_arithmetic", "ties"}:
             assert manifest["singleton_batchnorm_policy"] == DDINET_SINGLETON_BN_POLICY
         else:
             assert "singleton_batchnorm_policy" not in manifest

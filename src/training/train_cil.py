@@ -260,7 +260,8 @@ def model_manifest(args):
         manifest = DDINetMemberConfig(
             dropout=args.dropout,
             hidden_dims=DDINET_UPCL_HIDDEN_DIMS if args.method == UPCL_METHOD else DDINET_DEFAULT_HIDDEN_DIMS,
-            singleton_batchnorm_policy=DDINET_SINGLETON_BN_POLICY if args.method == UPCL_METHOD else "error",
+            singleton_batchnorm_policy=(DDINET_SINGLETON_BN_POLICY
+                if args.method in {UPCL_METHOD, TASK_ARITHMETIC_METHOD, TIES_METHOD} else "error"),
         ).manifest()
     else:
         from src.models.tddi_paper_member import paper_member_manifest
@@ -332,7 +333,8 @@ def expand_model_for_seen_classes(
                 num_classes=len(current_seen_map),
                 dropout=dropout,
                 hidden_dims=DDINET_UPCL_HIDDEN_DIMS if method == UPCL_METHOD else DDINET_DEFAULT_HIDDEN_DIMS,
-                singleton_batchnorm_policy=DDINET_SINGLETON_BN_POLICY if method == UPCL_METHOD else "error",
+                singleton_batchnorm_policy=(DDINET_SINGLETON_BN_POLICY
+                    if method in {UPCL_METHOD, TASK_ARITHMETIC_METHOD, TIES_METHOD} else "error"),
             )
         )
     else:

@@ -33,6 +33,23 @@ def _json(path: Path, value: object) -> None:
 def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path:
     _log(f"start method={method} root={root}")
     member_roots = [root / f"member_{member}" for member in (0, 1, 2)]
+    configs = [json.loads((member_root / "run_config.json").read_text(encoding="utf-8"))
+               if (member_root / "run_config.json").is_file() else {} for member_root in member_roots]
+    ddinet_metadata = {}
+    if any(config.get("model", {}).get("variant") == "ddinet_multiclass_cil" for config in configs):
+        common_keys = ("model", "protocol", "task_file_sha256", "preprocessing_policy",
+                       "recipe", "ddinet_fingerprint_manifest_sha256", "experiment_seed", "fold_seed",
+                       "implementation_sha256")
+        training_keys = ("batch_size", "effective_batch_size", "epochs", "patience", "lr", "weight_decay")
+        for member, config in enumerate(configs):
+            if config.get("member_id") != member or config.get("method") != method:
+                raise ValueError("DDINet merging member/method configuration mismatch.")
+            if any(config.get(key) != configs[0].get(key) for key in common_keys):
+                raise ValueError("DDINet merging model/data/recipe configuration mismatch.")
+            if any(config.get("arguments", {}).get(key) != configs[0].get("arguments", {}).get(key)
+                   for key in training_keys):
+                raise ValueError("DDINet merging training configuration mismatch.")
+        ddinet_metadata = {"model": configs[0]["model"], "protocol": configs[0]["protocol"]}
     rows: list[dict[str, object]] = []
     ensemble_dir = root / "ensemble"
     ensemble_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +89,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
     is_opcm = method == "opcm"
     is_magmax = method == "magmax"
     summary = {
+        **ddinet_metadata,
         "method": method,
         "members": [0, 1, 2],
         "tasks": 8,
@@ -103,6 +121,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
         "artifact_alignment": "sample_id_labels_class_ids_exact",
     })
     _json(root / "full_manifest.json", {
+        **ddinet_metadata,
         "kind": "ddi_cil_model_merging_full_manifest",
         "method": method,
         "members": [0, 1, 2],
@@ -161,7 +180,7 @@ def build_ensemble(root: Path, *, method: str, exclude_npz: bool = True) -> Path
             rel = path.relative_to(root)
             if exclude_npz and path.suffix == ".npz":
                 continue
-            if path.suffix == ".pt" or path.name in {"train.log", "stdout.log", "events.csv"}:
+            if path.suffix == ".pt" or path.name in {"train.log", "stdout.log", "events.csv", archive.name + ".sha256"}:
                 continue
             handle.write(path, rel.as_posix())
     _log(f"complete archive={archive}")
