@@ -7,8 +7,8 @@ PYTHON="${CIL_PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 METHOD="${1:-}"
 ACTION="${2:-check}"
 case "$METHOD" in
-  task_arithmetic|ties) ;;
-  *) echo "Usage: $0 {task_arithmetic|ties} {check|start|status|follow|package}"; exit 2 ;;
+  task_arithmetic|ties|opcm|magmax) ;;
+  *) echo "Usage: $0 {task_arithmetic|ties|opcm|magmax} {check|start|status|follow|package}"; exit 2 ;;
 esac
 
 TRAIN="$PROJECT_ROOT/data/train_extracted.parquet"
@@ -117,7 +117,17 @@ worker() {
   set +e
   echo "[RECIPE] $METHOD + DDINet 128-d + fixed 178 head + head-to-tail + members 0,1,2"
   echo "[MODEL] Morgan 2048-d, dropout 0.3, ReLU, BatchNorm singleton running-stat policy"
-  echo "[MERGE] Independent task-0-base experts, owned head rows, pooled BatchNorm moments"
+  case "$METHOD" in
+    opcm)
+      echo "[MERGE] Shared-initialization experts; train current task, merge immediately, then expose next task; alpha=0.5"
+      ;;
+    magmax)
+      echo "[MERGE] Sequential fine-tuning from previous raw expert; maximum-magnitude merge after each task; scale=0.5"
+      ;;
+    *)
+      echo "[MERGE] Independent task-0-base experts, owned head rows, pooled BatchNorm moments"
+      ;;
+  esac
   local code=0
   for member in 0 1 2; do
     echo "[RUN] member=$member"

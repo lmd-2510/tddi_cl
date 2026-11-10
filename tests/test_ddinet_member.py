@@ -101,15 +101,33 @@ def test_default_ddinet_preserves_strict_batchnorm_behavior():
         model(torch.randn(1, 8))
 
 
-@pytest.mark.parametrize("method", ["ewc", "agem", "er", "ider", "upcl", "task_arithmetic", "ties"])
-def test_singleton_policy_is_scoped_to_ddinet_upcl(method):
+@pytest.mark.parametrize("method", ["ewc", "agem", "er", "ider", "upcl", "task_arithmetic", "ties", "opcm", "magmax"])
+def test_singleton_policy_is_scoped_to_ddinet_upcl_and_merging(method):
     from types import SimpleNamespace
     from src.training import train_cil
     for variant in ("tddi_paper_member", "ddinet_multiclass_cil"):
         manifest = train_cil.model_manifest(SimpleNamespace(
             variant=variant, method=method, dropout=.3, activation="relu",
         ))
-        if variant == "ddinet_multiclass_cil" and method in {"upcl", "task_arithmetic", "ties"}:
+        if variant == "ddinet_multiclass_cil" and method in {"upcl", "task_arithmetic", "ties", "opcm", "magmax"}:
             assert manifest["singleton_batchnorm_policy"] == DDINET_SINGLETON_BN_POLICY
         else:
             assert "singleton_batchnorm_policy" not in manifest
+
+
+@pytest.mark.parametrize("method", ["opcm", "magmax"])
+def test_sequential_merging_factory_handles_singleton_ddinet_batch(method):
+    from src.training import train_cil
+
+    model = train_cil.expand_model_for_seen_classes(
+        None, None, {raw: raw for raw in range(178)},
+        variant="ddinet_multiclass_cil", input_dim=2048,
+        dropout=0.3, activation="relu", norm="none", method=method,
+    )
+    assert model.config.hidden_dims[-1] == 128
+    assert model.config.singleton_batchnorm_policy == DDINET_SINGLETON_BN_POLICY
+    logits = model(torch.randn(1, 2048))
+    assert logits.shape == (1, 178)
+    assert torch.isfinite(logits).all()
+    logits.sum().backward()
+    assert model.classifier_head.weight.grad is not None

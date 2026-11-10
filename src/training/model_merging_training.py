@@ -281,8 +281,6 @@ def run_model_merging_member(args, *, engine) -> None:
         raise ValueError(f"Unsupported model-merging method: {args.method}")
     ddinet = args.variant == "ddinet_multiclass_cil"
     if ddinet:
-        if args.method not in {TASK_ARITHMETIC_METHOD, TIES_METHOD}:
-            raise ValueError("DDINet merging currently supports Task Arithmetic and TIES.")
         if args.ddinet_fingerprint_cache is None:
             raise ValueError("DDINet merging requires --ddinet-fingerprint-cache.")
         if args.preprocessing_policy != "raw_identity" or args.norm != "none" or args.activation != "relu":
