@@ -87,7 +87,7 @@ def member_command(config, member, *, python=sys.executable):
     args.update({k: v for k, v in config["training"].items() if k not in ("optimizer", "gradient_accumulation_steps")})
     args.update({k: v for k, v in config["model"].items()
                  if k in ("variant", "activation", "dropout", "norm")})
-    if config.get("budget_policy") == "per_member_4_percent":
+    if config.get("budget_policy") in {"per_member_4_percent", "no_exemplar_memory"}:
         args["fold_member_budget"] = config["member_budgets"][str(member)]
         args["fold_global_budget"] = config["global_slot_budget"]
     args["replay_fraction"] = config["replay"]["fraction"]
@@ -118,6 +118,9 @@ def member_command(config, member, *, python=sys.executable):
     ddinet_fingerprint_cache = os.environ.get("CIL_DDINET_FINGERPRINT_CACHE")
     if ddinet_fingerprint_cache and config.get("model", {}).get("variant") == "ddinet_multiclass_cil":
         args["ddinet_fingerprint_cache"] = str(Path(ddinet_fingerprint_cache).resolve())
+    mfp_fingerprint_cache = os.environ.get("CIL_MFP_FINGERPRINT_CACHE")
+    if mfp_fingerprint_cache and config.get("model", {}).get("variant") == "mfp_siamese_member":
+        args["mfp_fingerprint_cache"] = str(Path(mfp_fingerprint_cache).resolve())
     command = [str(python), str(PROJECT_ROOT / "src/training/train_cil.py")]
     for key, value in args.items():
         if value is not None:

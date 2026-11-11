@@ -47,6 +47,10 @@ from src.models.ddinet_member import (
     DDINET_DEFAULT_HIDDEN_DIMS, DDINET_UPCL_HIDDEN_DIMS,
     DDINET_PAIR_INPUT_DIM, DDINET_SINGLETON_BN_POLICY,
 )
+from src.models.mfp_siamese_member import (
+    MFP_SIAMESE_PAIR_DIM, MFP_SIAMESE_PAPER_LR,
+    MFP_SIAMESE_PAPER_BATCH_SIZE, MFP_SIAMESE_PAPER_EPOCHS,
+)
 from src.training.fold_training import _publish_json  # noqa: E402
 from src.utils.seed import resolve_seed_configuration  # noqa: E402
 
@@ -160,11 +164,14 @@ def _load_locked_config(
         raise ValueError("Study member order must be exactly [0, 1, 2].")
     if type(value["development_count"]) is not int or value["development_count"] != 694455:
         raise ValueError("Study development_count must be the audited 694455 rows.")
-    if value["budget_policy"] != "per_member_4_percent":
-        raise ValueError("Only per-member 4% memory is supported.")
-    budgets = {str(k): v for k, v in four_percent_member_budgets(value["development_count"]).items()}
+    mfp_ewc = value["model"].get("variant") == "mfp_siamese_member" and value["training"].get("method") == "ewc"
+    expected_budget_policy = "no_exemplar_memory" if mfp_ewc else "per_member_4_percent"
+    if value["budget_policy"] != expected_budget_policy:
+        raise ValueError(f"Study requires budget policy {expected_budget_policy}.")
+    budgets = ({str(member): 0 for member in MEMBER_IDS} if mfp_ewc else
+               {str(k): v for k, v in four_percent_member_budgets(value["development_count"]).items()})
     if value["member_budgets"] != budgets or value["global_slot_budget"] != sum(budgets.values()):
-        raise ValueError("Each member requires 27778 slots (83334 total).")
+        raise ValueError(f"Member memory budgets must match {expected_budget_policy}.")
 
     protocol = _keys(
         value["protocol"],
@@ -186,6 +193,7 @@ def _load_locked_config(
     _keys(value["inputs"], INPUT_KEYS, "inputs")
     _keys(value["preprocessing"], {"policy", "artifact_template"}, "preprocessing")
     model_variant = str(value["model"].get("variant", "")) if isinstance(value.get("model"), dict) else ""
+    expected_training = {**TRAINING, "epochs": 30, "patience": 5}
     if model_variant == "tddi_paper_member":
         expected_model = MODEL
         allowed_preprocessing_policy = "task0_standard_frozen"
@@ -199,9 +207,28 @@ def _load_locked_config(
             "norm": "none",
         }
         allowed_preprocessing_policy = "raw_identity"
+    elif model_variant == "mfp_siamese_member":
+        expected_model = {
+            "variant": "mfp_siamese_member", "input_dim": MFP_SIAMESE_PAIR_DIM,
+            "encoder_hidden_dim": 512, "drug_latent_dim": 256,
+            "classifier_hidden_dim": 512, "activation": "relu", "dropout": 0.3, "norm": "none",
+        }
+        allowed_preprocessing_policy = "raw_identity"
+        mfp_method = value["training"].get("method")
+        expected_training.update(
+            method=mfp_method,
+            fold_replay_policy="er_uniform_reservoir_equal_batch_v1" if mfp_method == "er" else "stratified_fraction_v1",
+            optimizer="adam", batch_size=MFP_SIAMESE_PAPER_BATCH_SIZE,
+            effective_batch_size=MFP_SIAMESE_PAPER_BATCH_SIZE, gradient_accumulation_steps=1,
+            lr=MFP_SIAMESE_PAPER_LR, weight_decay=0.0,
+            epochs=MFP_SIAMESE_PAPER_EPOCHS, loss_variant="cross_entropy",
+        )
+        if mfp_method == "agem":
+            expected_training["agem_reference_batch_size"] = 256
+        if mfp_method == "ewc":
+            expected_training["ewc_lambda"] = 1000.0
     else:
-        raise ValueError("Study model variant must be tddi_paper_member or ddinet_multiclass_cil.")
-    expected_training = {**TRAINING, "epochs": 30, "patience": 5}
+        raise ValueError(f"Unsupported study model variant: {model_variant}")
     _keys(value["training"], set(expected_training), "training")
     _keys(value["evaluation"], EVALUATION_KEYS, "evaluation")
     if value["preprocessing"]["policy"] != allowed_preprocessing_policy:
@@ -209,17 +236,31 @@ def _load_locked_config(
     if value["model"] != expected_model:
         raise ValueError(f"Study model must match the locked {model_variant} configuration.")
     expected_replay = {**REPLAY, "ranking_policy": "sample_normalized_class_mean"}
+    if model_variant == "mfp_siamese_member":
+        if mfp_method == "agem":
+            expected_replay.update(buffer_policy="agem_task_uniform_v1", ranking_policy="seeded_task_uniform",
+                                   fraction=0.0, repeat_cap=1)
+        elif mfp_method == "ewc":
+            expected_replay.update(buffer_policy="ewc_no_examples_v1", ranking_policy="none",
+                                   fraction=0.0, repeat_cap=1)
+        else:
+            expected_replay.update(buffer_policy=ER_BUFFER_POLICY, ranking_policy=ER_RANKING_POLICY,
+                                   fraction=0.5, repeat_cap=1)
     replay = value["replay"]
     _keys(replay, set(REPLAY), "replay")
+    if model_variant == "mfp_siamese_member" and replay != expected_replay:
+        raise ValueError("MFP memory/replay configuration must match the selected method recipe.")
     for key in ("buffer_policy", "ranking_policy", "fraction", "repeat_cap", "replay_starts_at_task"):
         if key not in replay:
             raise ValueError(f"replay.{key} is required.")
     for key in ("ranking_policy", "replay_starts_at_task"):
         if replay[key] != expected_replay[key]:
             raise ValueError(f"replay.{key} does not match the approved buffer policy.")
-    if replay["buffer_policy"] not in BUFFER_POLICIES:
-        raise ValueError(f"replay.buffer_policy must be one of {BUFFER_POLICIES}.")
-    if not isinstance(replay["fraction"], (int, float)) or not 0.0 < float(replay["fraction"]) < 1.0:
+    allowed_buffer_policies = (expected_replay["buffer_policy"],) if model_variant == "mfp_siamese_member" else BUFFER_POLICIES
+    if replay["buffer_policy"] not in allowed_buffer_policies:
+        raise ValueError(f"replay.buffer_policy must be one of {allowed_buffer_policies}.")
+    zero_replay = model_variant == "mfp_siamese_member" and mfp_method in {"agem", "ewc"} and replay["fraction"] == 0.0
+    if not zero_replay and (not isinstance(replay["fraction"], (int, float)) or not 0.0 < float(replay["fraction"]) < 1.0):
         raise ValueError("replay.fraction must be in (0,1).")
     if type(replay["repeat_cap"]) is not int or replay["repeat_cap"] <= 0:
         raise ValueError("replay.repeat_cap must be a positive integer.")

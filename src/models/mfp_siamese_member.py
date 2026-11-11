@@ -22,6 +22,7 @@ MFP_SIAMESE_FIXED_CLASS_COUNT = 178
 MFP_SIAMESE_PAPER_LR = 1e-4
 MFP_SIAMESE_PAPER_BATCH_SIZE = 512
 MFP_SIAMESE_PAPER_EPOCHS = 200
+MFP_SIAMESE_SINGLETON_BN_POLICY = "running_stats_for_singleton_v1"
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class MFPSiameseMemberConfig:
     drug_latent_dim: int = MFP_SIAMESE_LATENT_DIM
     classifier_hidden_dim: int = MFP_SIAMESE_CLASSIFIER_HIDDEN_DIM
     dropout: float = 0.3
+    singleton_batchnorm_policy: str = "error"
 
     def __post_init__(self) -> None:
         dimensions = (
@@ -47,13 +49,15 @@ class MFPSiameseMemberConfig:
             raise ValueError("MFP-Siamese dimensions must all be positive.")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("MFP-Siamese dropout must be in [0, 1).")
+        if self.singleton_batchnorm_policy not in {"error", MFP_SIAMESE_SINGLETON_BN_POLICY}:
+            raise ValueError("Unsupported MFP-Siamese singleton BatchNorm policy.")
 
     @property
     def pair_input_dim(self) -> int:
         return 2 * self.drug_input_dim
 
     def manifest(self) -> dict[str, object]:
-        return {
+        manifest = {
             "variant": "mfp_siamese_member",
             "display_name": "MFP-Siamese",
             "architecture": "Shared-Encoder Morgan Fingerprint Network",
@@ -103,9 +107,14 @@ class MFPSiameseMemberConfig:
                 "checkpoint_selection": "validation_macro_f1",
             },
         }
+        if self.singleton_batchnorm_policy != "error":
+            manifest["singleton_batchnorm_policy"] = self.singleton_batchnorm_policy
+        return manifest
 
 
 if nn is not None:
+
+    from src.models.ddinet_member import SingletonRunningStatsBatchNorm1d
 
     class MFPSiameseMember(nn.Module):
         """Encode A/B with shared weights, then classify the ordered pair."""
@@ -116,18 +125,23 @@ if nn is not None:
         ) -> None:
             super().__init__()
             self.config = config
+            batchnorm = (
+                SingletonRunningStatsBatchNorm1d
+                if config.singleton_batchnorm_policy == MFP_SIAMESE_SINGLETON_BN_POLICY
+                else nn.BatchNorm1d
+            )
             self.encoder = nn.Sequential(
                 nn.Linear(config.drug_input_dim, config.encoder_hidden_dim),
-                nn.BatchNorm1d(config.encoder_hidden_dim),
+                batchnorm(config.encoder_hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(config.dropout),
                 nn.Linear(config.encoder_hidden_dim, config.drug_latent_dim),
-                nn.BatchNorm1d(config.drug_latent_dim),
+                batchnorm(config.drug_latent_dim),
                 nn.ReLU(),
             )
             self.pair_backbone = nn.Sequential(
                 nn.Linear(2 * config.drug_latent_dim, config.classifier_hidden_dim),
-                nn.BatchNorm1d(config.classifier_hidden_dim),
+                batchnorm(config.classifier_hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(config.dropout),
             )

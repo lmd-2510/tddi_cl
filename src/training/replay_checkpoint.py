@@ -234,7 +234,7 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             raise ValueError("Frozen-fold class map/raw class order mismatch.")
         model = state["model_state"]
         manifest = expected_contract.get("model", {})
-        supported_variants = {"tddi_paper_member", "ddinet_multiclass_cil"}
+        supported_variants = {"tddi_paper_member", "ddinet_multiclass_cil", "mfp_siamese_member"}
         variant = manifest.get("variant")
         if variant not in supported_variants:
             raise ValueError(
@@ -352,7 +352,7 @@ def load_fold_replay_checkpoint(path: str | Path, *, root: Path, expected_contra
             if set(method_state) != {"fisher", "theta_star"}:
                 raise ValueError("EWC checkpoint requires Fisher and parameter anchors.")
             parameter_keys = set(model)
-            if variant == "ddinet_multiclass_cil":
+            if variant in {"ddinet_multiclass_cil", "mfp_siamese_member"}:
                 # BatchNorm running statistics are checkpoint buffers, while
                 # Fisher and anchors cover named_parameters() only.
                 parameter_keys = {

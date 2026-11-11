@@ -52,6 +52,10 @@ from src.models.ddinet_member import (
     DDINetMember,
     DDINetMemberConfig,
 )
+from src.models.mfp_siamese_member import (
+    MFP_SIAMESE_PAIR_DIM, MFP_SIAMESE_SINGLETON_BN_POLICY,
+    MFPSiameseMember, MFPSiameseMemberConfig,
+)
 from src.training.class_incremental_policy import (
     fixed_head_cross_entropy,
     mask_unseen_logits,
@@ -66,6 +70,7 @@ MAGMAX_METHOD = "magmax"
 MERGING_METHODS = (TASK_ARITHMETIC_METHOD, TIES_METHOD, OPCM_METHOD, MAGMAX_METHOD)
 METHODS = (FIXED_BUDGET_METHOD, ER_METHOD, "ewc", "agem", IDER_METHOD, UPCL_METHOD, *MERGING_METHODS)
 DDINET_VARIANT = "ddinet_multiclass_cil"
+MFP_VARIANT = "mfp_siamese_member"
 METHOD_POLICIES = {
     FIXED_BUDGET_METHOD: "frozen_fold_fixed_head_class_balanced_replay_v1",
     "ewc": "frozen_fold_fixed_head_original_ewc_v1",
@@ -101,7 +106,7 @@ def parse_args(argv=None):
                 "fold-assignments", "fold-manifest", "fold-preprocessing"):
         parser.add_argument("--" + key, type=Path, required=True)
     parser.add_argument("--method", choices=METHODS, default=FIXED_BUDGET_METHOD)
-    parser.add_argument("--variant", choices=["tddi_paper_member", DDINET_VARIANT], default="tddi_paper_member")
+    parser.add_argument("--variant", choices=["tddi_paper_member", DDINET_VARIANT, MFP_VARIANT], default="tddi_paper_member")
     parser.add_argument("--norm", choices=["layernorm", "none"], default=None)
     parser.add_argument("--activation", choices=["gelu", "relu"], default=None)
     parser.add_argument("--member-id", type=int, choices=[0, 1, 2], required=True)
@@ -158,18 +163,27 @@ def parse_args(argv=None):
                  if os.environ.get("CIL_DDINET_FINGERPRINT_CACHE") else None),
         help="Immutable label-free Morgan cache required by the DDINet variant.",
     )
+    parser.add_argument(
+        "--mfp-fingerprint-cache", type=Path,
+        default=(Path(os.environ["CIL_MFP_FINGERPRINT_CACHE"])
+                 if os.environ.get("CIL_MFP_FINGERPRINT_CACHE") else None),
+        help="Immutable label-free Morgan-2048 cache for MFP-Siamese.",
+    )
     args = parser.parse_args(argv)
     defaults = dict(norm="layernorm", activation="gelu", batch_size=64,
         evaluation_batch_size=512, patience=5, lr=0.001,
         weight_decay=0.0001, dropout=0.2, gradient_clip_norm=None,
         label_smoothing=0.)
+    if args.variant == MFP_VARIANT:
+        defaults.update(norm="none", activation="relu", batch_size=512,
+                        lr=0.0001, weight_decay=0.0, dropout=0.3)
     for key, value in defaults.items():
         if getattr(args, key) is None:
             setattr(args, key, value)
     if args.effective_batch_size is None:
-        args.effective_batch_size = 1024
+        args.effective_batch_size = 512 if args.variant == MFP_VARIANT else 1024
     if args.epochs is None:
-        args.epochs = 30
+        args.epochs = 200 if args.variant == MFP_VARIANT else 30
     if args.ider_replay_batch_size is None:
         args.ider_replay_batch_size = args.batch_size
     expected_loss = (
@@ -256,7 +270,12 @@ def _git_state(project_root: Path) -> dict[str, str | bool | None]:
 
 
 def model_manifest(args):
-    if args.variant == DDINET_VARIANT:
+    if args.variant == MFP_VARIANT:
+        manifest = MFPSiameseMemberConfig(
+            dropout=args.dropout,
+            singleton_batchnorm_policy=MFP_SIAMESE_SINGLETON_BN_POLICY,
+        ).manifest()
+    elif args.variant == DDINET_VARIANT:
         manifest = DDINetMemberConfig(
             dropout=args.dropout,
             hidden_dims=DDINET_UPCL_HIDDEN_DIMS if args.method == UPCL_METHOD else DDINET_DEFAULT_HIDDEN_DIMS,
@@ -337,6 +356,15 @@ def expand_model_for_seen_classes(
                     if method == UPCL_METHOD or method in MERGING_METHODS else "error"),
             )
         )
+    elif variant == MFP_VARIANT:
+        if input_dim != MFP_SIAMESE_PAIR_DIM:
+            raise ValueError(f"MFP-Siamese requires ordered Morgan pair input_dim={MFP_SIAMESE_PAIR_DIM}.")
+        if norm != "none" or activation != "relu":
+            raise ValueError("MFP-Siamese uses internal BatchNorm/ReLU; use --norm none --activation relu.")
+        model = MFPSiameseMember(MFPSiameseMemberConfig(
+            num_classes=len(current_seen_map), dropout=dropout,
+            singleton_batchnorm_policy=MFP_SIAMESE_SINGLETON_BN_POLICY,
+        ))
     else:
         raise ValueError(f"Unsupported model variant: {variant}")
     if method == IDER_METHOD:
@@ -411,6 +439,8 @@ class EpochLossComponents:
 
 
 def make_optimizer(model, args):
+    if getattr(args, "variant", None) == MFP_VARIANT:
+        return torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 

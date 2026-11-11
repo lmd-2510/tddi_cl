@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "kind": "tddi_frozen_fold_ensemble3_full",
+  "phase": "full",
+  "experiment_seed": 0,
+  "fold_seed": 42,
+  "member_ids": [0, 1, 2],
+  "development_count": 694455,
+  "budget_policy": "per_member_4_percent",
+  "global_slot_budget": 83334,
+  "member_budgets": {"0": 27778, "1": 27778, "2": 27778},
+  "protocol": {
+    "id": "ORDERED",
+    "name": "head_to_tail",
+    "task_file": "study_assets/task_protocols/head_to_tail_tasks.json",
+    "sha256": "b5cc67460f399afa6e04f18ad065401eaf644ec2981c8406e1f22c574ed872b8",
+    "layout": [38, 20, 20, 20, 20, 20, 20, 20],
+    "class_count": 178
+  },
+  "inputs": {
+    "train": "data/train_extracted.parquet",
+    "validation": "data/validation_extracted.parquet",
+    "test": "data/test_extracted.parquet",
+    "feature_cols": "study_assets/data_schema/feature_columns.json",
+    "fold_assignments": "study_assets/stratified_3fold_seed42/fold_assignments.parquet",
+    "fold_manifest": "study_assets/stratified_3fold_seed42/fold_manifest.json"
+  },
+  "preprocessing": {
+    "policy": "raw_identity",
+    "artifact_template": "study_assets/preprocessing_mfp_seed0_fold42/member_{member_id}/fold_preprocessing.json"
+  },
+  "model": {
+    "variant": "mfp_siamese_member",
+    "input_dim": 4096,
+    "encoder_hidden_dim": 512,
+    "drug_latent_dim": 256,
+    "classifier_hidden_dim": 512,
+    "activation": "relu",
+    "dropout": 0.3,
+    "norm": "none"
+  },
+  "training": {
+    "method": "er",
+    "fold_replay_policy": "er_uniform_reservoir_equal_batch_v1",
+    "optimizer": "adam",
+    "batch_size": 512,
+    "effective_batch_size": 512,
+    "gradient_accumulation_steps": 1,
+    "epochs": 200,
+    "patience": 5,
+    "lr": 0.0001,
+    "weight_decay": 0.0,
+    "focal_gamma": 1,
+    "loss_variant": "cross_entropy"
+  },
+  "replay": {
+    "buffer_policy": "reservoir_uniform_v1",
+    "ranking_policy": "reservoir_uniform_v1",
+    "fraction": 0.5,
+    "repeat_cap": 1,
+    "replay_starts_at_task": 1
+  },
+  "execution": {
+    "stop_after_task": 7,
+    "validation_only": false,
+    "sequential": true,
+    "checkpoint_resume_policy": "immutable_frozen_fold_task_boundary_v1",
+    "export_member_predictions": ["validation", "test"]
+  },
+  "evaluation": {
+    "threshold_config": "configs/eval_macro_f1_entropy.json",
+    "ensemble_namespace": "offline_evaluation"
+  },
+  "device": "cuda",
+  "output_root": "outputs/er_mfp_head_to_tail_fixed_head_full_seed0"
+}
